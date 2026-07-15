@@ -2,6 +2,13 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-15 — M1 收尾：图标/标题/日志/主题
+
+- 外壳验证通过（用户截图：侧栏导航、数据库就绪）。图标：方案 A（注音书页），源文件 app/resources/icon.svg；iOS 用 app/resources/icon_1024.png（cargo-makepad 自动打包），桌面 Dock 用 workspace 根 resources/icon_{32..1024}.png（makepad-platform build.rs 构建期内嵌；首次需 `cargo clean -p makepad-platform` 触发，因目录此前不存在无监听）。
+- 窗口标题 `window.title: "ReadWise"`；主题改为官方三段式显式注册（theme_mod → mod.theme = mod.themes.dark → widgets_mod），运行时深/浅切换推迟到 M8（需先把自定义色改 theme.* 变量）。
+- 日志：main.rs 内置 10 行 StderrLogger 接通 log 门面（core 的 log::info 可见），零新依赖。
+- **M1 完成**。下一步 M2 书库：迁移 books 模块 + epub 解析（tauri-plugin-epub），书架 UI，文件导入。
+
 ## 2026-07-15 — M1 第一刀：readwise-core + App 外壳
 
 - 新建 `core` crate（readwise-core）：`db.rs`（老 database.rs 去 tauri 化，数据目录改由 `paths::app_data_dir()` 提供 = 系统数据目录/ReadWise；schema.sql、default-skills.json 原样拷贝）、`vocab/`（models 原样 + queries 全量迁移，签名从 `AppHandle` 改为 `&SqlitePool`，修掉老代码每次调用新建连接的低效——现在共享 pool）。

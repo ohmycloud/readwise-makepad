@@ -89,6 +89,7 @@ script_mod! {
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
+                window.title: "ReadWise"
                 window.inner_size: vec2(1080, 720)
                 body +: {
                     flow: Right
@@ -351,7 +352,11 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        makepad_widgets::script_mod(vm);
+        makepad_widgets::theme_mod(vm);
+        script_eval!(vm, {
+            mod.theme = mod.themes.dark
+        });
+        makepad_widgets::widgets_mod(vm);
         crate::ruby_word::script_mod(vm);
         self::script_mod(vm)
     }

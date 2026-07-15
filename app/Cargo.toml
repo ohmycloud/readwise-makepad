@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 makepad-widgets = { workspace = true }
 readwise-core = { path = "../core" }
+log = "0.4"

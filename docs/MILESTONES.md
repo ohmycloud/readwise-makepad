@@ -2,8 +2,17 @@
 
 > 决策日期：2026-07-14
 > 架构：纯 Makepad 2.0（Splash DSL + Rust），不再有 WebView/React/Vue。
-> 目标平台：macOS / Windows 桌面 + iOS（iPhone）/ Android，一套代码。
 > 参考资料：[Makepad 2.0 Book](https://zhanghandong.github.io/makepad-2.0-book/)、[makepad-skills](https://github.com/ZhangHanDong/makepad-skills)
+
+## 目标平台（2026-07-15 确认：桌面 + 移动，不含 Web）
+
+| 平台 | 状态 |
+|------|------|
+| macOS 桌面 | ✅ 已验证 |
+| iOS（iPhone） | ✅ 已验证（真机 + 模拟器） |
+| Windows / Linux 桌面 | 🟡 顺路支持，需补测（无 mac 专属代码；Windows 窗口装饰小差异待处理） |
+| Android | 🟡 顺路支持，需补测（cargo makepad android 打包链路待走） |
+| **Web (wasm)** | ❌ **明确不做**。Makepad 框架支持 wasm，但 readwise-core 的 sqlx + SQLite + tokio 在浏览器沙箱跑不了（无文件系统/原生线程）。支持 Web 需为 wasm 单独做数据层（IndexedDB/OPFS sqlite-wasm）或改远程架构，违背本地优先设计，不纳入路线图。 |
 
 ## 总体策略
 
@@ -26,15 +35,16 @@
 
 验收结论：demo 渲染整章、点词、iOS 可跑，全部达成。**闸门通过，重写路线成立。**
 
-## M1 工程骨架
+## M1 工程骨架 ✅ 2026-07-15
 
-- [ ] 新建 cargo workspace：`readwise-core`（纯业务逻辑）+ `readwise-app`（Makepad UI）
-- [ ] 从 src-tauri 迁移 database（schema.sql、sqlx）、models，去 tauri 化
-- [ ] App 外壳：窗口、主题（深/浅色）、侧栏导航、页面切换
-- [ ] 日志、配置、应用数据目录（桌面/移动路径差异）
-- [ ] 建立开发日志机制（DEVLOG.md，每次开发记录）
+- [x] cargo workspace：`readwise-core`（纯业务逻辑）+ `readwise-app`（Makepad UI）
+- [x] 迁移 database（schema.sql、sqlx、默认 skills）+ vocab 全模块，去 tauri 化；`Db` 同步门面（内置 tokio runtime）
+- [x] App 外壳：窗口标题、侧栏导航、PageFlip 页面切换；主题显式注册为 dark（运行时深/浅切换移至 M8——前提是自定义色全部改用 theme.* 变量）
+- [x] 日志（log 门面 → stderr 最小 logger）、应用数据目录（paths::app_data_dir，iOS 差异 M7 验证）
+- [x] 开发日志机制（DEVLOG.md）
+- [x] 应用图标（桌面 Dock + iOS，源文件 app/resources/icon.svg）
 
-验收：空壳 App 各页面可导航，数据库初始化成功。
+验收：空壳 App 各页面可导航，数据库初始化成功。✅ 用户实测通过。
 
 ## M2 书库（Library）
 

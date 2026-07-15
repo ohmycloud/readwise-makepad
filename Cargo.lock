@@ -1665,6 +1665,7 @@ dependencies = [
 name = "readwise-app"
 version = "0.1.0"
 dependencies = [
+ "log 0.4.33",
  "makepad-widgets",
  "readwise-core",
 ]
