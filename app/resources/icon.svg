@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect x="0" y="0" width="1024" height="1024" fill="#1f6f63"/>
+  <rect x="0" y="0" width="1024" height="512" fill="#23796c"/>
+  <path d="M170 740 Q340 675 512 715 Q684 675 854 740 L854 330 Q684 270 512 315 Q340 270 170 330 Z" fill="#f5f1e6"/>
+  <path d="M512 315 L512 715" stroke="#1f6f63" stroke-width="14"/>
+  <line x1="240" y1="430" x2="430" y2="414" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
+  <line x1="240" y1="510" x2="430" y2="494" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
+  <line x1="240" y1="590" x2="368" y2="580" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
+  <line x1="594" y1="510" x2="784" y2="494" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
+  <line x1="594" y1="590" x2="742" y2="580" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
+  <line x1="594" y1="430" x2="784" y2="414" stroke="#e8734a" stroke-width="32" stroke-linecap="round"/>
+  <line x1="618" y1="352" x2="668" y2="347" stroke="#e8734a" stroke-width="20" stroke-linecap="round"/>
+  <line x1="692" y1="345" x2="742" y2="340" stroke="#e8734a" stroke-width="20" stroke-linecap="round"/>
+</svg>
