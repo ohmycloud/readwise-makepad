@@ -1,0 +1,8 @@
+[package]
+name = "readwise-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets = { workspace = true }
+readwise-core = { path = "../core" }

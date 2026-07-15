@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["app", "core"]
+
+[workspace.dependencies]
+makepad-widgets = { git = "https://github.com/makepad/makepad", branch = "dev" }
+
+[profile.release]
+lto = true
