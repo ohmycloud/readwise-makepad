@@ -1,3 +1,4 @@
+pub mod books;
 pub mod db;
 pub mod paths;
 pub mod vocab;

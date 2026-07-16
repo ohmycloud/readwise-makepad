@@ -3,6 +3,7 @@ use sqlx::{migrate::MigrateDatabase, Sqlite, SqlitePool};
 use std::fs;
 use std::path::Path;
 
+use crate::books::{self, models::*};
 use crate::vocab::{self, models::*};
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -18,6 +19,7 @@ struct DefaultSkill {
 pub struct Db {
     rt: tokio::runtime::Runtime,
     pool: SqlitePool,
+    data_dir: std::path::PathBuf,
 }
 
 impl Db {
@@ -29,7 +31,37 @@ impl Db {
             .map_err(|e| format!("创建运行时失败: {}", e))?;
         let data_dir = crate::paths::app_data_dir();
         let pool = rt.block_on(initialize(&data_dir))?;
-        Ok(Self { rt, pool })
+        Ok(Self { rt, pool, data_dir })
+    }
+
+    /// 数据目录（books/ 与 import/ 都在其下）。
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
+    // —— 书库 ——
+
+    pub fn import_book(&self, src: &std::path::Path) -> Result<SimpleBook, String> {
+        self.rt.block_on(books::import_book(&self.pool, &self.data_dir, src))
+    }
+
+    pub fn get_shelf_items(&self) -> Result<Vec<BookShelfItem>, String> {
+        self.rt.block_on(books::get_shelf_items(&self.pool, &self.data_dir))
+    }
+
+    pub fn delete_book(&self, id: &str) -> Result<(), String> {
+        self.rt.block_on(books::delete_book(&self.pool, &self.data_dir, id))
+    }
+
+    pub fn update_progress(&self, id: &str, current: i64, total: i64, location: &str) -> Result<(), String> {
+        self.rt.block_on(books::update_progress(&self.pool, id, current, total, location))
+    }
+
+    /// 扫描导入目录，返回新导入数量。
+    pub fn scan_import_dir(&self) -> Result<usize, String> {
+        let import_dir = self.data_dir.join("import");
+        std::fs::create_dir_all(&import_dir).ok();
+        self.rt.block_on(books::scan_import_dir(&self.pool, &self.data_dir, &import_dir))
     }
 
     pub fn save_book_words(&self, book_id: &str, words: &[BookWord]) -> Result<(), String> {

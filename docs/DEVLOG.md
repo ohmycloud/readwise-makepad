@@ -2,6 +2,30 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-15 — M2 动手：books 迁移 + epub 解析 + 书架 + 拖放导入
+
+- 导入方式定为拖放 + 导入目录（用户拍板）。
+- core/books：models（SimpleBook/BookStatus/BookShelfItem，M2 只迁书库需要的，ReadingSession/BookNote 留 M3/M4）、epub_meta（epub crate 解析 title/author/language/cover，`mdata().value` + `get_cover()`）、queries（**import_book 新架构**：Rust 侧解析元数据→copy 文件与封面到 data_dir/books/<id>/→入库，源文件不删；get_shelf_items 拼绝对路径；delete_book 删目录+级联；update_progress；scan_import_dir 扫 data_dir/import/ 按 标题+大小 去重）。Db 加 data_dir 字段 + 5 个书库方法。
+- UI：BookShelf widget（deref View + PortalList 卡片列表，封面暂用书名首字色块占位）；page_library 换成书架 + 顶部提示；空态卡片。启动 DbAction::Ready 后 spawn_load_shelf（扫描导入目录 + 读书目）；拖放 Event::Drag 设 DragResponse::Copy 接受、Event::Drop 取 DragItem::FilePath 过滤 .epub → spawn_import → 刷新。ShelfAction 回传计数。
+- 核对：std::sync::Mutex → response.lock().unwrap()；DragItem/DragResponse 由 makepad_widgets 可达；epub crate 纯 Rust。
+- 待验证：编译；拖 epub 进窗口是否入库并显示卡片；重启后书架持久；放文件到 ~/Library/Application Support/ReadWise/import/ 重启是否收录；封面占位显示首字。**封面图真实加载（Image widget 从运行时文件路径）是下一个子任务。**
+
+## 2026-07-15 — rfd 集成评估：可行但不推荐
+
+- rfd 平台：Windows/macOS/Linux/WASM，**iOS/Android 不支持**——桌面用 rfd 仍要为移动端另写 UIDocumentPicker/Intent，未省移动端工作量（致命）。
+- Makepad 不实现 raw-window-handle（grep 无），rfd 无法 attach 父窗口 → 只能弹独立对话框，模态/焦点体验打折。
+- 桌面集成技术可行：Makepad 内部有主线程 dispatch（permission 回调用的 NSBlockOperation）+ NSApp 在跑，AsyncFileDialog 内部派发弹窗能在其 runloop 转；路径 = 后台 tokio block_on future → post_action 回 UI。但 examples 无先例，中等试错成本。
+- 结论：rfd 卖点（原生对话框）只覆盖桌面，恰在移动端帮不上，性价比低。推荐仍是拖放+导入目录（桌面移动通用、零依赖、原生接线）。追求一步到位则方案四自实现（NSOpenPanel+UIDocumentPicker）留 M7。
+- 待用户拍板导入方式。
+
+## 2026-07-15 — M2 调研：文件导入技术闸门（待决策）
+
+- 老项目 books：models（SimpleBook/BookStatus/ReadingSession/BookNote 等）+ commands 900+ 行，纯 sqlx，迁移方式同 vocab（去 tauri、共享 pool）。EPUB 元数据在老项目是 foliate-js（JS）解析后传给 save_book。
+- 关键发现：`epub` crate（2.1.5，纯 Rust）能解析 title/author/章节——**替代 foliate-js 在 Rust 侧解析元数据可行**，M2 架构与老项目不同（Rust 解析而非前端）。
+- **技术闸门**：Makepad dev 分支内置文件对话框是**空壳**——macos_app.rs:873 `open_select_file_dialog` 只有 `println!("open select file dialog!")`，无 NSOpenPanel、无结果回传事件，examples 无一使用。标准"按钮弹选择器"走不通。
+- 备选：① 拖放（`DragItem::FilePath` 已接线，能拿路径，仅桌面）② 扫描导入目录（零依赖，桌面移动通用）③ rfd crate（跨平台但需验证与 makepad 事件循环集成）④ 自实现 NSOpenPanel/UIDocumentPicker（工作量大）。
+- 导入方式 = 影响架构的决策，已抛给用户（AskUserQuestion），用户 dismiss，**暂停等指示**。解析与书架主线不受导入方式阻塞。
+
 ## 2026-07-15 — M1 收尾：图标/标题/日志/主题
 
 - 外壳验证通过（用户截图：侧栏导航、数据库就绪）。图标：方案 A（注音书页），源文件 app/resources/icon.svg；iOS 用 app/resources/icon_1024.png（cargo-makepad 自动打包），桌面 Dock 用 workspace 根 resources/icon_{32..1024}.png（makepad-platform build.rs 构建期内嵌；首次需 `cargo clean -p makepad-platform` 触发，因目录此前不存在无监听）。

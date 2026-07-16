@@ -1,8 +1,7 @@
-use makepad_widgets::*;
-use std::sync::{LazyLock, OnceLock, RwLock};
-
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
+use makepad_widgets::*;
+use std::sync::{LazyLock, OnceLock, RwLock};
 
 app_main!(App);
 
@@ -14,10 +13,111 @@ static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> =
 /// 全局数据库句柄：后台线程初始化后写入，各处只读使用。
 static DB: OnceLock<readwise_core::Db> = OnceLock::new();
 
+/// 书架数据（UI 侧只读渲染，后台线程写）。
+static SHELF: LazyLock<RwLock<Vec<ShelfItem>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+
+#[derive(Clone)]
+struct ShelfItem {
+    id: String,
+    title: String,
+    author: String,
+    status_line: String,
+}
+
+fn status_cn(status: &str, cur: i64, total: i64) -> String {
+    let name = match status {
+        "reading" => "在读",
+        "completed" => "读完",
+        _ => "未读",
+    };
+    if total > 0 {
+        format!("{} · {}%", name, (cur * 100 / total).min(100))
+    } else {
+        name.to_string()
+    }
+}
+
+/// 书架加载结果（后台 → UI）。
+#[derive(Debug)]
+enum ShelfAction {
+    Loaded { items: usize, imported: usize },
+    Error(String),
+}
+
+/// 后台加载书架：先扫描导入目录，再读全部书目。
+fn spawn_load_shelf() {
+    std::thread::spawn(|| {
+        let Some(db) = DB.get() else { return };
+        let imported = db.scan_import_dir().unwrap_or(0);
+        match db.get_shelf_items() {
+            Ok(items) => {
+                let ui_items: Vec<ShelfItem> = items
+                    .iter()
+                    .map(|b| ShelfItem {
+                        id: b.id.clone(),
+                        title: b.title.clone(),
+                        author: b.author.clone(),
+                        status_line: status_cn(&b.status, b.progress_current, b.progress_total),
+                    })
+                    .collect();
+                let n = ui_items.len();
+                *SHELF.write().unwrap() = ui_items;
+                Cx::post_action(ShelfAction::Loaded { items: n, imported });
+            }
+            Err(e) => {
+                Cx::post_action(ShelfAction::Error(e));
+            }
+        }
+    });
+}
+
+fn is_epub_path(path: &str) -> bool {
+    path.to_lowercase().ends_with(".epub")
+}
+
+fn is_epub_item(item: &DragItem) -> bool {
+    matches!(item, DragItem::FilePath { path, .. } if is_epub_path(path))
+}
+
+/// 拖入的 epub 文件在后台导入，完成后刷新书架。
+fn spawn_import(paths: Vec<String>) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        for p in paths {
+            if let Err(e) = db.import_book(std::path::Path::new(&p)) {
+                //log::error!("导入失败 {}: {}", p, e);
+                println!("导入失败 {}: {}", p, e);
+            }
+        }
+        // 复用书架加载刷新 UI
+        if let Ok(items) = db.get_shelf_items() {
+            let ui_items: Vec<ShelfItem> = items
+                .iter()
+                .map(|b| ShelfItem {
+                    id: b.id.clone(),
+                    title: b.title.clone(),
+                    author: b.author.clone(),
+                    status_line: status_cn(&b.status, b.progress_current, b.progress_total),
+                })
+                .collect();
+            let n = ui_items.len();
+            *SHELF.write().unwrap() = ui_items;
+            Cx::post_action(ShelfAction::Loaded {
+                items: n,
+                imported: 0,
+            });
+        }
+    });
+}
+
 /// 数据库初始化结果（后台线程 → UI）。
 #[derive(Debug)]
 enum DbAction {
-    Ready { vocab_count: usize, known_count: usize, vocab_preview: String },
+    Ready {
+        vocab_count: usize,
+        known_count: usize,
+        vocab_preview: String,
+    },
     Failed(String),
 }
 
@@ -55,6 +155,54 @@ fn spawn_db_init() {
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+
+    mod.widgets.BookShelfBase = #(BookShelf::register_widget(vm))
+    mod.widgets.BookShelf = set_type_default() do mod.widgets.BookShelfBase{
+        width: Fill height: Fill
+        list := PortalList{
+            width: Fill height: Fill
+            padding: Inset{ left: 24 right: 24 top: 8 bottom: 24 }
+            spacing: 10
+            scroll_bar: ScrollBar{}
+            Card := RoundedView{
+                width: Fill height: 76
+                flow: Right spacing: 14 padding: 12
+                align: Align{ y: 0.5 }
+                draw_bg.color: #x2a2a2a
+                draw_bg.border_radius: 8.0
+                cover := SolidView{
+                    width: 44 height: 52
+                    align: Align{ x: 0.5 y: 0.5 }
+                    draw_bg.color: #x1f6f63
+                    draw_bg.border_radius: 4.0
+                    cover_letter := Label{
+                        text: ""
+                        draw_text.text_style.font_size: 20
+                    }
+                }
+                info := View{
+                    width: Fill height: Fit
+                    flow: Down spacing: 5
+                    card_title := Label{
+                        width: Fill
+                        text: ""
+                        draw_text.text_style.font_size: 14
+                    }
+                    card_author := Label{
+                        width: Fill
+                        text: ""
+                        draw_text.color: #x9a9a9a
+                    }
+                    card_status := Label{
+                        width: Fill
+                        text: ""
+                        draw_text.color: #x7fb2a6
+                        draw_text.text_style.font_size: 9
+                    }
+                }
+            }
+        }
+    }
 
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
@@ -118,12 +266,20 @@ script_mod! {
 
                         page_library := View{
                             width: Fill height: Fill
-                            flow: Down padding: 24 spacing: 12
-                            Label{ text: "书库" draw_text.text_style.font_size: 18 }
-                            library_hint := Label{
-                                width: Fill
-                                text: "M2 实现：EPUB 导入与书架。"
+                            flow: Down
+                            lib_header := View{
+                                width: Fill height: Fit
+                                padding: Inset{ left: 24 right: 24 top: 20 bottom: 8 }
+                                flow: Down spacing: 4
+                                Label{ text: "书库" draw_text.text_style.font_size: 18 }
+                                library_hint := Label{
+                                    width: Fill
+                                    text: "把 EPUB 拖进窗口，或放入导入目录后重启。"
+                                    draw_text.color: #x9a9a9a
+                                    draw_text.text_style.font_size: 9
+                                }
                             }
+                            book_shelf := mod.widgets.BookShelf{}
                         }
 
                         page_reader := View{
@@ -217,6 +373,61 @@ impl Widget for ChapterList {
     }
 }
 
+#[derive(Script, ScriptHook, Widget)]
+struct BookShelf {
+    #[deref]
+    view: View,
+}
+
+impl Widget for BookShelf {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let shelf = SHELF.read().unwrap();
+
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                if shelf.is_empty() {
+                    list.set_item_range(cx, 0, 1);
+                    while let Some(item_id) = list.next_visible_item(cx) {
+                        let item = list.item(cx, item_id, id!(Card));
+                        item.label(cx, ids!(cover_letter)).set_text(cx, "书");
+                        item.label(cx, ids!(card_title)).set_text(cx, "书架为空");
+                        item.label(cx, ids!(card_author))
+                            .set_text(cx, "拖入 EPUB 文件，或放进 ReadWise/import 目录");
+                        item.label(cx, ids!(card_status)).set_text(cx, "");
+                        item.draw_all_unscoped(cx);
+                    }
+                } else {
+                    list.set_item_range(cx, 0, shelf.len());
+                    while let Some(item_id) = list.next_visible_item(cx) {
+                        let Some(book) = shelf.get(item_id) else {
+                            continue;
+                        };
+                        let letter = book
+                            .title
+                            .chars()
+                            .next()
+                            .map(|c| c.to_string())
+                            .unwrap_or_default();
+                        let item = list.item(cx, item_id, id!(Card));
+                        item.label(cx, ids!(cover_letter)).set_text(cx, &letter);
+                        item.label(cx, ids!(card_title)).set_text(cx, &book.title);
+                        item.label(cx, ids!(card_author)).set_text(cx, &book.author);
+                        item.label(cx, ids!(card_status))
+                            .set_text(cx, &book.status_line);
+                        item.draw_all_unscoped(cx);
+                    }
+                }
+            }
+        }
+
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[source]
@@ -277,21 +488,50 @@ impl MatchEvent for App {
         for action in actions {
             if let Some(db_action) = action.downcast_ref::<DbAction>() {
                 match db_action {
-                    DbAction::Ready { vocab_count, known_count, vocab_preview } => {
-                        let status = format!("数据库就绪\n生词本 {} · 已认识 {}", vocab_count, known_count);
+                    DbAction::Ready {
+                        vocab_count,
+                        known_count,
+                        vocab_preview,
+                    } => {
+                        let status = format!(
+                            "数据库就绪\n生词本 {} · 已认识 {}",
+                            vocab_count, known_count
+                        );
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
                         let summary = format!("共 {} 词（预览前 50 条）", vocab_count);
-                        self.ui.label(cx, ids!(vocab_summary)).set_text(cx, &summary);
+                        self.ui
+                            .label(cx, ids!(vocab_summary))
+                            .set_text(cx, &summary);
                         let list = if vocab_preview.is_empty() {
                             "生词本为空——去阅读页点注音词收藏（M4 打通）。".to_string()
                         } else {
                             vocab_preview.clone()
                         };
                         self.ui.label(cx, ids!(vocab_list)).set_text(cx, &list);
+                        spawn_load_shelf();
                     }
                     DbAction::Failed(e) => {
                         let status = format!("数据库失败:\n{}", e);
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
+                    }
+                }
+                continue;
+            }
+            if let Some(shelf) = action.downcast_ref::<ShelfAction>() {
+                match shelf {
+                    ShelfAction::Loaded { items, imported } => {
+                        let hint = if *imported > 0 {
+                            format!("共 {} 本（导入目录新增 {} 本）", items, imported)
+                        } else {
+                            format!("共 {} 本 · 拖入 EPUB 或放进 import 目录添加", items)
+                        };
+                        self.ui.label(cx, ids!(library_hint)).set_text(cx, &hint);
+                        self.ui.redraw(cx);
+                    }
+                    ShelfAction::Error(e) => {
+                        self.ui
+                            .label(cx, ids!(library_hint))
+                            .set_text(cx, &format!("书架加载失败: {}", e));
                     }
                 }
                 continue;
@@ -362,8 +602,29 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::Startup = event {
-            spawn_db_init();
+        match event {
+            Event::Startup => spawn_db_init(),
+            // 拖入悬停：声明接受拷贝，否则系统不触发 Drop。
+            Event::Drag(de) => {
+                if de.items.iter().any(is_epub_item) {
+                    *de.response.lock().unwrap() = DragResponse::Copy;
+                }
+            }
+            // 松手放下：收集 epub 路径后台导入。
+            Event::Drop(de) => {
+                let paths: Vec<String> = de
+                    .items
+                    .iter()
+                    .filter_map(|it| match it {
+                        DragItem::FilePath { path, .. } if is_epub_path(path) => Some(path.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if !paths.is_empty() {
+                    spawn_import(paths);
+                }
+            }
+            _ => {}
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
