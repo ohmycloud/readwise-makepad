@@ -46,7 +46,7 @@
 
 验收：空壳 App 各页面可导航，数据库初始化成功。✅ 用户实测通过。
 
-## M2 书库（Library）
+## M2 书库（Library）✅ 2026-07-15（tags 项移 M8）
 
 - [x] EPUB 导入：拖放进窗口 + import 投递箱目录（Makepad 文件对话框是空壳，原生选择器留 M7；rfd 因不支持移动端被否）
 - [x] 复用 epub 解析：元数据、封面提取（epub crate，Rust 侧解析，替代 foliate-js）

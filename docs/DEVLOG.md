@@ -2,6 +2,13 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-15 — M2 完成 ✅
+
+- 收尾三项用户实测通过（真封面/删除/投递箱），已提交 75e947f。
+- 编译修复三处（新坑记录）：① Script 派生宏不认字段类型的全限定路径（`std::collections::HashMap` → 必须 use 导入短名，报 `Unexpected field form` + 连锁 E0277/E0599）② `load_image_file_by_path` 收 `&Path` 非 `&str` ③ `#[live(2.0)]` 对 f32 字段要写 `2.0f32`（future-incompat）。
+- 枚举 DSL 写法：`fit: Biggest` 运行时报 type mismatch（静默回退默认值），正确为 `fit: ImageFit.Biggest`（examples/uizoo/tab_image 确认；枚举一律 `类型名.变体`，与 skills 里 `@` 前缀说法不同——`@` 是 default 声明用）。
+- **M2 关闭。下一步 M3 阅读器**：点击书卡片 → 打开真实 EPUB（迁移老项目 toc_parser/sanitizer 或用 epub crate 取章节 HTML）→ M0 管线渲染 → 进度保存。
+
 ## 2026-07-15 — M2 收尾：真封面 + 删除 + 投递箱语义
 
 - M2 第一刀用户验收通过（导入/书架/持久化），已提交 e7964ab。
