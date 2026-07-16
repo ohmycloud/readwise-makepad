@@ -217,6 +217,9 @@ pub async fn scan_import_dir(
             }
         }
         if import_book(pool, data_dir, &path).await.is_ok() {
+            // 导入目录是"投递箱"：成功入库后移除源文件，
+            // 否则删书后重启会被再次扫描导入。
+            let _ = fs::remove_file(&path);
             count += 1;
         }
     }

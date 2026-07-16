@@ -1,6 +1,7 @@
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
 use makepad_widgets::*;
+use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock, RwLock};
 
 app_main!(App);
@@ -22,6 +23,7 @@ struct ShelfItem {
     title: String,
     author: String,
     status_line: String,
+    cover_path: Option<String>,
 }
 
 fn status_cn(status: &str, cur: i64, total: i64) -> String {
@@ -44,29 +46,49 @@ enum ShelfAction {
     Error(String),
 }
 
+/// 从 DB 读书架写入静态区，返回本数（后台线程内调用）。
+fn refresh_shelf(db: &readwise_core::Db) -> Result<usize, String> {
+    let items = db.get_shelf_items()?;
+    let ui_items: Vec<ShelfItem> = items
+        .iter()
+        .map(|b| ShelfItem {
+            id: b.id.clone(),
+            title: b.title.clone(),
+            author: b.author.clone(),
+            status_line: status_cn(&b.status, b.progress_current, b.progress_total),
+            cover_path: b.cover_abs_path.clone(),
+        })
+        .collect();
+    let n = ui_items.len();
+    *SHELF.write().unwrap() = ui_items;
+    Ok(n)
+}
+
 /// 后台加载书架：先扫描导入目录，再读全部书目。
 fn spawn_load_shelf() {
     std::thread::spawn(|| {
         let Some(db) = DB.get() else { return };
         let imported = db.scan_import_dir().unwrap_or(0);
-        match db.get_shelf_items() {
-            Ok(items) => {
-                let ui_items: Vec<ShelfItem> = items
-                    .iter()
-                    .map(|b| ShelfItem {
-                        id: b.id.clone(),
-                        title: b.title.clone(),
-                        author: b.author.clone(),
-                        status_line: status_cn(&b.status, b.progress_current, b.progress_total),
-                    })
-                    .collect();
-                let n = ui_items.len();
-                *SHELF.write().unwrap() = ui_items;
-                Cx::post_action(ShelfAction::Loaded { items: n, imported });
-            }
-            Err(e) => {
-                Cx::post_action(ShelfAction::Error(e));
-            }
+        match refresh_shelf(db) {
+            Ok(n) => Cx::post_action(ShelfAction::Loaded { items: n, imported }),
+            Err(e) => Cx::post_action(ShelfAction::Error(e)),
+        }
+    });
+}
+
+/// 后台删除书籍后刷新书架。
+fn spawn_delete(id: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(e) = db.delete_book(&id) {
+            println!("删除失败 {}: {}", id, e);
+        }
+        match refresh_shelf(db) {
+            Ok(n) => Cx::post_action(ShelfAction::Loaded {
+                items: n,
+                imported: 0,
+            }),
+            Err(e) => Cx::post_action(ShelfAction::Error(e)),
         }
     });
 }
@@ -89,23 +111,12 @@ fn spawn_import(paths: Vec<String>) {
                 println!("导入失败 {}: {}", p, e);
             }
         }
-        // 复用书架加载刷新 UI
-        if let Ok(items) = db.get_shelf_items() {
-            let ui_items: Vec<ShelfItem> = items
-                .iter()
-                .map(|b| ShelfItem {
-                    id: b.id.clone(),
-                    title: b.title.clone(),
-                    author: b.author.clone(),
-                    status_line: status_cn(&b.status, b.progress_current, b.progress_total),
-                })
-                .collect();
-            let n = ui_items.len();
-            *SHELF.write().unwrap() = ui_items;
-            Cx::post_action(ShelfAction::Loaded {
+        match refresh_shelf(db) {
+            Ok(n) => Cx::post_action(ShelfAction::Loaded {
                 items: n,
                 imported: 0,
-            });
+            }),
+            Err(e) => Cx::post_action(ShelfAction::Error(e)),
         }
     });
 }
@@ -170,14 +181,22 @@ script_mod! {
                 align: Align{ y: 0.5 }
                 draw_bg.color: #x2a2a2a
                 draw_bg.border_radius: 8.0
-                cover := SolidView{
+                cover := View{
                     width: 44 height: 52
-                    align: Align{ x: 0.5 y: 0.5 }
-                    draw_bg.color: #x1f6f63
-                    draw_bg.border_radius: 4.0
-                    cover_letter := Label{
-                        text: ""
-                        draw_text.text_style.font_size: 20
+                    flow: Overlay
+                    cover_ph := SolidView{
+                        width: Fill height: Fill
+                        align: Align{ x: 0.5 y: 0.5 }
+                        draw_bg.color: #x1f6f63
+                        draw_bg.border_radius: 4.0
+                        cover_letter := Label{
+                            text: ""
+                            draw_text.text_style.font_size: 20
+                        }
+                    }
+                    cover_img := Image{
+                        width: Fill height: Fill
+                        fit: ImageFit.Biggest
                     }
                 }
                 info := View{
@@ -200,6 +219,7 @@ script_mod! {
                         draw_text.text_style.font_size: 9
                     }
                 }
+                del_btn := ButtonFlat{ text: "删除" }
             }
         }
     }
@@ -377,6 +397,9 @@ impl Widget for ChapterList {
 struct BookShelf {
     #[deref]
     view: View,
+    /// item_id → 已加载的封面路径（PortalList 复用 item，路径变了才重载）。
+    #[rust]
+    loaded_covers: HashMap<usize, Option<String>>,
 }
 
 impl Widget for BookShelf {
@@ -414,6 +437,20 @@ impl Widget for BookShelf {
                         item.label(cx, ids!(card_author)).set_text(cx, &book.author);
                         item.label(cx, ids!(card_status))
                             .set_text(cx, &book.status_line);
+                        if self.loaded_covers.get(&item_id) != Some(&book.cover_path) {
+                            let img = item.image(cx, ids!(cover_img));
+                            match &book.cover_path {
+                                Some(path) => {
+                                    let p = std::path::Path::new(path);
+                                    if let Err(e) = img.load_image_file_by_path(cx, p) {
+                                        println!("封面加载失败 {}: {:?}", path, e);
+                                        img.set_texture(cx, None);
+                                    }
+                                }
+                                None => img.set_texture(cx, None),
+                            }
+                            self.loaded_covers.insert(item_id, book.cover_path.clone());
+                        }
                         item.draw_all_unscoped(cx);
                     }
                 }
@@ -558,6 +595,18 @@ impl MatchEvent for App {
             if let RubyWordAction::Clicked { word, gloss } = action.cast() {
                 let status = format!("注音词：{} → {}", word.trim_end_matches(['.', ',']), gloss);
                 self.ui.label(cx, ids!(status)).set_text(cx, &status);
+            }
+        }
+        let shelf_list = self
+            .ui
+            .widget(cx, ids!(book_shelf))
+            .portal_list(cx, ids!(list));
+        for (item_id, item) in shelf_list.items_with_actions(actions) {
+            if item.button(cx, ids!(del_btn)).clicked(actions) {
+                let book_id = SHELF.read().unwrap().get(item_id).map(|b| b.id.clone());
+                if let Some(id) = book_id {
+                    spawn_delete(id);
+                }
             }
         }
         let pages = self.ui.page_flip(cx, ids!(pages));

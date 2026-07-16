@@ -2,6 +2,15 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-15 — M2 收尾：真封面 + 删除 + 投递箱语义
+
+- M2 第一刀用户验收通过（导入/书架/持久化），已提交 e7964ab。
+- 封面：Card 封面区改 `flow: Overlay`（首字色块打底 + `Image{fit: Biggest}` 叠加）；BookShelf 加 `loaded_covers: HashMap<usize, Option<String>>`，路径变化才 `load_image_file_by_path`，无封面 `set_texture(None)` 清旧纹理（PortalList item 跨书复用防串图）。
+- 删除：卡片尾部 `del_btn`，`items_with_actions` 拿 item_id → SHELF 查 book id → spawn_delete 后台删+刷新。M2 先直删不确认（书可重新导入）。
+- 投递箱：scan_import_dir 成功导入后删除 import/ 源文件——否则删书后重启会被重新扫回。
+- 待验证：封面真图显示、无封面书显示首字、删除即时生效、import 目录文件导入后消失。
+- tags 复用评估：老项目书库 tags 仅作筛选，当前书架无筛选 UI 消费场景 → 推迟到 M8 整理（MILESTONES 已注）。
+
 ## 2026-07-15 — M2 动手：books 迁移 + epub 解析 + 书架 + 拖放导入
 
 - 导入方式定为拖放 + 导入目录（用户拍板）。

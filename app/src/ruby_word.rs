@@ -48,7 +48,7 @@ pub struct RubyWord {
     layout: Layout,
     #[live]
     draw_gloss: DrawText,
-    #[live(2.0)]
+    #[live(2.0f32)]
     gloss_gap: f32,
     #[rust]
     drawn_areas: Vec<Area>,
