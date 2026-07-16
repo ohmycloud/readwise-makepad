@@ -57,6 +57,10 @@ impl Db {
         self.rt.block_on(books::update_progress(&self.pool, id, current, total, location))
     }
 
+    pub fn get_status(&self, id: &str) -> Result<Option<BookStatus>, String> {
+        self.rt.block_on(books::get_status(&self.pool, id))
+    }
+
     /// 扫描导入目录，返回新导入数量。
     pub fn scan_import_dir(&self) -> Result<usize, String> {
         let import_dir = self.data_dir.join("import");

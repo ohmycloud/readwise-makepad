@@ -2,6 +2,27 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-15 — 修复：中文文件名拖放导入失败
+
+- macOS 拖放的 `DragItem::FilePath` 是 URL 百分号编码（中文/空格变 %XX），makepad 未解码直接透传 → 文件系统找不到。Drop 处理时 `percent_decode_path`（15 行零依赖）解码后再导入。
+- 注意 import 投递箱目录不受影响（直接读目录，无编码问题）。
+
+## 2026-07-15 — M3 修复：真书空白根因 = 未知标签丢内容
+
+- 用户实测：标题/章节数(1/22)加载正确但整章空白、偶发崩溃。根因即 M0 发现的 Html widget 行为：**未知标签连内容整体跳过**（handle_custom_widget 查不到模板就 jump_to_close）——真书章节全部包在 `<section>/<div>` 里，整章被吞。
+- 修复（core/epub_meta）：`sanitize_for_reader`——白名单（Html widget 的 32 个 tag，grep some_id! 确认）保留；未知标签（div/section/span/a/figure…）**去壳留瓤**；script/style/head/svg/math/rt/rp 连内容删；注释/声明剔除。`split_blocks` 按标签深度归零切块（替代 `</p>` 粗切，不再把 blockquote/表格切断——疑似崩溃源之一）。
+- 3 个单元测试全过（去壳留瓤/删 script/嵌套分块）。坑：raw string 里 `href="#f1"` 的 `"#` 会终止 `r#".."#`，要用 `r##`。
+- 待复测：真书章节渲染、崩溃是否消失。
+
+## 2026-07-15 — M3 第一刀：真书阅读闭环
+
+- core：`epub_meta::load_chapter_htmls`（spine 遍历 `get_current_str` → `extract_body` 取 body 内容，空章跳过）；`books::get_status` + Db 包装（恢复进度用）。
+- app：书卡加"阅读"按钮 → `spawn_open_book` 后台加载全书章节（逐章 strip_ruby）→ `CURRENT_BOOK` 静态区 → `ReaderAction::Opened{resume_chapter}`。
+- `set_chapter`：章节 HTML 按 `</p>` split_inclusive 切块喂 PortalList（保持虚拟化）、标题/页码更新、`set_first_id_and_scroll(0,0)` 回顶、后台存进度（location=章节下标，progress=章/总章）。
+- 阅读页头部改为 上一章/页码/下一章；流式测试与重载示例挪到设置页"开发工具"。
+- 无书打开时阅读页仍显示 M0 示例章节（兜底）。
+- 待验证：点"阅读"能否渲染真书、上下章切换、重启后从上次章节恢复、书架进度百分比变化、真书里的点词（`<a>` 无处不在？不，真书没包链接——点词在真书上暂不可用，M4 注音管线接上才有）。
+
 ## 2026-07-15 — M2 完成 ✅
 
 - 收尾三项用户实测通过（真封面/删除/投递箱），已提交 75e947f。

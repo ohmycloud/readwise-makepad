@@ -149,6 +149,21 @@ pub async fn delete_book(pool: &SqlitePool, data_dir: &Path, id: &str) -> Result
     Ok(())
 }
 
+/// 读取一本书的阅读状态（恢复进度用）。
+pub async fn get_status(pool: &SqlitePool, id: &str) -> Result<Option<BookStatus>, String> {
+    let row = sqlx::query("SELECT * FROM book_status WHERE book_id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("读取阅读状态失败: {}", e))?;
+    match row {
+        Some(r) => Ok(Some(
+            BookStatus::from_db_row(&r).map_err(|e| format!("解析阅读状态失败: {}", e))?,
+        )),
+        None => Ok(None),
+    }
+}
+
 /// 更新阅读进度与位置（M3 阅读器保存进度用）。
 pub async fn update_progress(
     pool: &SqlitePool,

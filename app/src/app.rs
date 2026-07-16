@@ -24,6 +24,66 @@ struct ShelfItem {
     author: String,
     status_line: String,
     cover_path: Option<String>,
+    file_path: String,
+}
+
+/// 当前打开的书（后台线程写入，UI 读）。
+static CURRENT_BOOK: LazyLock<RwLock<Option<OpenBook>>> = LazyLock::new(|| RwLock::new(None));
+
+struct OpenBook {
+    id: String,
+    title: String,
+    /// 各章 body HTML（已剔除 ruby 降级处理）。
+    chapters: Vec<String>,
+}
+
+/// 打开书的结果（后台 → UI）。
+#[derive(Debug)]
+enum ReaderAction {
+    Opened { resume_chapter: usize },
+    OpenError(String),
+}
+
+/// 后台加载整本书章节 + 恢复进度。
+fn spawn_open_book(item: ShelfItem) {
+    std::thread::spawn(move || {
+        let chapters = match readwise_core::books::epub_meta::load_chapter_htmls(
+            std::path::Path::new(&item.file_path),
+        ) {
+            Ok(list) => list,
+            Err(e) => {
+                Cx::post_action(ReaderAction::OpenError(e));
+                return;
+            }
+        };
+        let total = chapters.len();
+        let resume = DB
+            .get()
+            .and_then(|db| db.get_status(&item.id).ok().flatten())
+            .and_then(|s| s.location.parse::<usize>().ok())
+            .filter(|idx| *idx < total)
+            .unwrap_or(0);
+        *CURRENT_BOOK.write().unwrap() = Some(OpenBook {
+            id: item.id,
+            title: item.title,
+            chapters,
+        });
+        Cx::post_action(ReaderAction::Opened { resume_chapter: resume });
+    });
+}
+
+/// 后台保存阅读进度（章节粒度，location 存章节下标）。
+fn spawn_save_progress(id: String, chapter_idx: usize, total: usize) {
+    std::thread::spawn(move || {
+        if let Some(db) = DB.get() {
+            let _ = db.update_progress(
+                &id,
+                (chapter_idx + 1) as i64,
+                total as i64,
+                &chapter_idx.to_string(),
+            );
+        }
+    });
 }
 
 fn status_cn(status: &str, cur: i64, total: i64) -> String {
@@ -57,6 +117,7 @@ fn refresh_shelf(db: &readwise_core::Db) -> Result<usize, String> {
             author: b.author.clone(),
             status_line: status_cn(&b.status, b.progress_current, b.progress_total),
             cover_path: b.cover_abs_path.clone(),
+            file_path: b.file_abs_path.clone(),
         })
         .collect();
     let n = ui_items.len();
@@ -95,6 +156,33 @@ fn spawn_delete(id: String) {
 
 fn is_epub_path(path: &str) -> bool {
     path.to_lowercase().ends_with(".epub")
+}
+
+/// macOS 拖放给的是 URL 百分号编码路径（中文/空格会变 %XX），解码成真实路径。
+fn percent_decode_path(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn is_epub_item(item: &DragItem) -> bool {
@@ -219,6 +307,7 @@ script_mod! {
                         draw_text.text_style.font_size: 9
                     }
                 }
+                read_btn := ButtonFlat{ text: "阅读" }
                 del_btn := ButtonFlat{ text: "删除" }
             }
         }
@@ -310,21 +399,14 @@ script_mod! {
                                 padding: 12 spacing: 12
                                 align: Align{ y: 0.5 }
                                 title := Label{
-                                    text: "阅读 · M0 渲染验证章节"
+                                    text: "阅读 · 示例章节"
                                     draw_text.text_style.font_size: 15
                                 }
                                 spacer := View{ width: Fill height: Fit }
-                                status := Label{ text: "PortalList 虚拟化 · 200 段" }
-                                stream_button := Button{ text: "流式测试" }
-                                reload_button := Button{ text: "重新渲染" }
-                            }
-                            stream_panel := View{
-                                width: Fill height: Fit
-                                padding: Inset{ left: 12 right: 12 bottom: 6 }
-                                stream_label := Label{
-                                    width: Fill
-                                    text: "点「流式测试」验证后台线程 → UI 打字机效果"
-                                }
+                                status := Label{ text: "" }
+                                prev_btn := ButtonFlat{ text: "上一章" }
+                                chapter_pos := Label{ text: "" }
+                                next_btn := ButtonFlat{ text: "下一章" }
                             }
                             chapter_list := mod.widgets.ChapterList{}
                         }
@@ -347,6 +429,24 @@ script_mod! {
                             settings_hint := Label{
                                 width: Fill
                                 text: "M8 整合：主题、字体、AI 配置。"
+                            }
+                            Label{
+                                text: "开发工具"
+                                draw_text.text_style.font_size: 13
+                                draw_text.color: #x9a9a9a
+                            }
+                            dev_tools := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                stream_button := Button{ text: "流式测试" }
+                                reload_button := Button{ text: "重载示例章节" }
+                            }
+                            stream_panel := View{
+                                width: Fill height: Fit
+                                stream_label := Label{
+                                    width: Fill
+                                    text: "点「流式测试」验证后台线程 → UI 打字机效果"
+                                }
                             }
                         }
                     }
@@ -475,6 +575,37 @@ pub struct App {
     reload_count: usize,
     #[rust]
     stream_text: String,
+    #[rust]
+    chapter_idx: usize,
+}
+
+impl App {
+    /// 切换到指定章节：按 </p> 切块喂给 PortalList，更新标题/页码，保存进度，滚回顶部。
+    fn set_chapter(&mut self, cx: &mut Cx, idx: usize) {
+        let (id, title, total, chunks) = {
+            let guard = CURRENT_BOOK.read().unwrap();
+            let Some(book) = guard.as_ref() else { return };
+            if idx >= book.chapters.len() {
+                return;
+            }
+            let chunks = readwise_core::books::epub_meta::split_blocks(&book.chapters[idx]);
+            (book.id.clone(), book.title.clone(), book.chapters.len(), chunks)
+        };
+        self.chapter_idx = idx;
+        *PARAGRAPHS.write().unwrap() = chunks;
+        self.ui
+            .label(cx, ids!(title))
+            .set_text(cx, &format!("《{}》", title));
+        self.ui
+            .label(cx, ids!(chapter_pos))
+            .set_text(cx, &format!("{}/{}", idx + 1, total));
+        self.ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list))
+            .set_first_id_and_scroll(0, 0.0);
+        spawn_save_progress(id, idx, total);
+        self.ui.redraw(cx);
+    }
 }
 
 /// 后台线程 → UI 的流式消息（模拟 AI 打字机，M5 换成真实 SSE）。
@@ -554,6 +685,19 @@ impl MatchEvent for App {
                 }
                 continue;
             }
+            if let Some(reader) = action.downcast_ref::<ReaderAction>() {
+                match reader {
+                    ReaderAction::Opened { resume_chapter } => {
+                        self.set_chapter(cx, *resume_chapter);
+                    }
+                    ReaderAction::OpenError(e) => {
+                        self.ui
+                            .label(cx, ids!(title))
+                            .set_text(cx, &format!("打开失败: {}", e));
+                    }
+                }
+                continue;
+            }
             if let Some(shelf) = action.downcast_ref::<ShelfAction>() {
                 match shelf {
                     ShelfAction::Loaded { items, imported } => {
@@ -601,6 +745,7 @@ impl MatchEvent for App {
             .ui
             .widget(cx, ids!(book_shelf))
             .portal_list(cx, ids!(list));
+        let pages = self.ui.page_flip(cx, ids!(pages));
         for (item_id, item) in shelf_list.items_with_actions(actions) {
             if item.button(cx, ids!(del_btn)).clicked(actions) {
                 let book_id = SHELF.read().unwrap().get(item_id).map(|b| b.id.clone());
@@ -608,8 +753,17 @@ impl MatchEvent for App {
                     spawn_delete(id);
                 }
             }
+            if item.button(cx, ids!(read_btn)).clicked(actions) {
+                let book = SHELF.read().unwrap().get(item_id).cloned();
+                if let Some(book) = book {
+                    self.ui
+                        .label(cx, ids!(title))
+                        .set_text(cx, &format!("《{}》加载中…", book.title));
+                    pages.set_active_page(cx, id!(page_reader));
+                    spawn_open_book(book);
+                }
+            }
         }
-        let pages = self.ui.page_flip(cx, ids!(pages));
         if self.ui.button(cx, ids!(nav_library)).clicked(actions) {
             pages.set_active_page(cx, id!(page_library));
         }
@@ -621,6 +775,18 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(nav_settings)).clicked(actions) {
             pages.set_active_page(cx, id!(page_settings));
+        }
+        if self.ui.button(cx, ids!(prev_btn)).clicked(actions) {
+            if self.chapter_idx > 0 && CURRENT_BOOK.read().unwrap().is_some() {
+                let idx = self.chapter_idx - 1;
+                self.set_chapter(cx, idx);
+            }
+        }
+        if self.ui.button(cx, ids!(next_btn)).clicked(actions) {
+            if CURRENT_BOOK.read().unwrap().is_some() {
+                let idx = self.chapter_idx + 1;
+                self.set_chapter(cx, idx);
+            }
         }
         if self.ui.button(cx, ids!(stream_button)).clicked(actions) {
             self.stream_text = "▶ ".to_string();
@@ -665,7 +831,9 @@ impl AppMain for App {
                     .items
                     .iter()
                     .filter_map(|it| match it {
-                        DragItem::FilePath { path, .. } if is_epub_path(path) => Some(path.clone()),
+                        DragItem::FilePath { path, .. } if is_epub_path(path) => {
+                            Some(percent_decode_path(path))
+                        }
                         _ => None,
                     })
                     .collect();
