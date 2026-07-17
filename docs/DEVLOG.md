@@ -2,6 +2,25 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-17 — 注音总开关（用户需求）
+
+- 设置页顶部 CheckBox"生词注音"；勾选才显示注音字号/字色/背景/词字色/词背景五行配置（set_visible 联动），未勾选原样显示文章。
+- 切换即时生效：关 → `remove_all_ruby` 原地剥全部注音（不重载不跳转，复用原地消注机制）；开 → 重开当前书走注音管线。spawn_open_book 注音段受 GLOSS_ENABLED 门控。
+- 默认开启（保持现有阅读流；默认值偏好待 M8 设置持久化时定）。11 测试过。
+
+## 2026-07-17 — 选区两 bug：颜色路径 + 手势仲裁
+
+- 颜色不生效：选区真正的绘制者是 TextFlow 的 `draw_selection`（DrawQuad，theme.color_u_3 灰），不是 `draw_block.selection_color`（块级样式）。apply 改 `draw_selection.color`，alpha 66→88 提高可见度（灰色半透明在深底上近乎不可见，可能也是"只能选几个字"观感的一部分）。
+- 手势仲裁失灵：PortalList 的官方仲裁（按在交互件→子件点击；按普通文本→列表接管选区并屏蔽子件）依赖 `WidgetRef::find_widgets_from_point` 的自报机制——**自报条件是 `point_hits_area`**，而 RubyWord 用默认实现（基于从未赋值的 area 字段，恒 false）→ 仲裁器看不见注音词。修复：RubyWord 手写 `WidgetNode`（derive 从 Widget 改为 WidgetRef/WidgetSet/WidgetRegister，照 TextFlowLink 样板），`point_hits_area` 遍历 drawn_areas。
+- 附带清理：#[redraw]/#[area]/#[walk]/#[layout] 是 Widget 全量派生的属性，手写 WidgetNode 后改 `#[rust] area: Area`。
+- **教训：凡 TextFlow 内联的交互 widget，必须手写 WidgetNode 并用 drawn_areas 实现 point_hits_area，否则选区仲裁失灵（TextFlowLink 是官方样板）。**
+
+## 2026-07-17 — M4 文本选择 + 选中颜色配置
+
+- 文本选择走原生机制：Para/GlossPara 的 Html `selectable: true` + ChapterList 的 PortalList `selectable: true`（跨块选择由 PortalList 统一接管，官方注释确认）；Cmd+C 复制由 TextFlow 内置（Hit::TextCopy → selected_text）。
+- 选中颜色：设置页"选中颜色"色板（青/蓝/橙/黄，半透明 66 alpha），SELECTION_SLOT 槽位静态区，ChapterList 绑定时按槽位 apply `selection_color`（TextFlow #[live] 字段，字面量枚举——apply 无 prelude 教训沿用）。
+- 提交 e0f2？（上一刀已交：M4释义卡片与注音串位修复）。
+
 ## 2026-07-17 — M4 释义卡片
 
 - 点注音词 → 阅读页底部滑出卡片（词 + 释义 + 加入生词本 + 标为已认识 + 关闭），替代原状态栏一闪。

@@ -81,6 +81,12 @@ fn spawn_mark_known(lemma: String) {
 /// 阅读字号（None = 用主题默认；A+/A- 调整后生效）。
 static READER_FONT_SIZE: LazyLock<RwLock<Option<f32>>> = LazyLock::new(|| RwLock::new(None));
 
+/// 选中文字的高亮色槽位：0=青 1=蓝 2=橙 3=黄。
+static SELECTION_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(0));
+
+/// 生词注音总开关（关闭 = 原样显示文章）。
+static GLOSS_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(true));
+
 const READER_FONT_DEFAULT: f32 = 11.0;
 const READER_FONT_MIN: f32 = 8.0;
 const READER_FONT_MAX: f32 = 20.0;
@@ -123,14 +129,16 @@ fn spawn_open_book(item: ShelfItem) {
             chapter_titles.push(info.title);
             chapters.push(info.html);
         }
-        // 注音：有释义数据就给全书注入 <ruby t="...">（老项目 GlossAnnotator 的等价物）
-        if let Some(db) = DB.get() {
-            if let Ok((glosses, known)) = db.gloss_context(Some(&item.id)) {
-                if !glosses.is_empty() {
-                    use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
-                    for ch in chapters.iter_mut() {
-                        let flat = flatten_lists(ch);
-                        *ch = annotate_html(&flat, &glosses, &known);
+        // 注音：总开关开启且有释义数据才注入（老项目 GlossAnnotator 的等价物）
+        if *GLOSS_ENABLED.read().unwrap() {
+            if let Some(db) = DB.get() {
+                if let Ok((glosses, known)) = db.gloss_context(Some(&item.id)) {
+                    if !glosses.is_empty() {
+                        use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
+                        for ch in chapters.iter_mut() {
+                            let flat = flatten_lists(ch);
+                            *ch = annotate_html(&flat, &glosses, &known);
+                        }
                     }
                 }
             }
@@ -417,6 +425,7 @@ script_mod! {
         width: Fill height: Fill
         list := PortalList{
             width: Fill height: Fill
+            selectable: true
             padding: Inset{ left: 32 right: 32 top: 8 bottom: 32 }
             spacing: 6
             scroll_bar: ScrollBar{}
@@ -424,6 +433,7 @@ script_mod! {
                 width: Fill height: Fit
                 para_html := Html{
                     width: Fill height: Fit
+                    selectable: true
                     a.color: #xc9c9c9
                     a.hover_color: #x62b6ff
                     a.pressed_color: #x2a8fe0
@@ -434,6 +444,7 @@ script_mod! {
                 width: Fill height: Fit
                 para_html := Html{
                     width: Fill height: Fit
+                    selectable: true
                     padding: Inset{ top: 22 }
                     text_style_normal.line_spacing: 2.2
                     text_style_bold.line_spacing: 2.2
@@ -600,6 +611,12 @@ script_mod! {
                                 font_size_label := Label{ text: "默认" }
                                 font_inc := ButtonFlat{ text: "A+" }
                             }
+                            gloss_enable_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                gloss_enable := CheckBox{ text: "生词注音（关闭则原样显示文章）" }
+                            }
                             gloss_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
@@ -638,6 +655,16 @@ script_mod! {
                                 wc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
                                 wc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
                                 wc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
+                            }
+                            sel_color_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                Label{ text: "选中颜色" }
+                                sc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
+                                sc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
+                                sc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
+                                sc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "黄" } }
                             }
                             word_bg_row := View{
                                 width: Fill height: Fit
@@ -710,6 +737,12 @@ impl Widget for ChapterList {
                         script_apply_eval!(cx, html, {
                             font_size: #(fs)
                         });
+                    }
+                    match *SELECTION_SLOT.read().unwrap() {
+                        1 => script_apply_eval!(cx, html, { draw_selection.color: #x4a90d988 }),
+                        2 => script_apply_eval!(cx, html, { draw_selection.color: #xe8875a88 }),
+                        3 => script_apply_eval!(cx, html, { draw_selection.color: #xd9c96a88 }),
+                        _ => script_apply_eval!(cx, html, { draw_selection.color: #x7fb2a688 }),
                     }
                     item.draw_all_unscoped(cx);
                 }
@@ -1001,6 +1034,7 @@ impl App {
             6 => script_apply_eval!(cx, w, { draw_bg.color: #x4d4d4d }),
             7 => script_apply_eval!(cx, w, { draw_bg.color: #x294f45 }),
             8 => script_apply_eval!(cx, w, { draw_bg.color: #x293d61 }),
+            9 => script_apply_eval!(cx, w, { draw_bg.color: #xd9c96a }),
             _ => script_apply_eval!(cx, w, { draw_bg.color: #x2a2a2a }),
         }
     }
@@ -1040,6 +1074,61 @@ impl App {
             let slot = if BG_PRESETS[i].1 == wbg { bg_slot[i] } else { 0 };
             self.paint_swatch(cx, cell, slot);
         }
+
+        let sel = *SELECTION_SLOT.read().unwrap();
+        let cells = [ids!(sc0), ids!(sc1), ids!(sc2), ids!(sc3)];
+        let sel_slot = [1usize, 2, 3, 9];
+        for (i, cell) in cells.into_iter().enumerate() {
+            let slot = if i == sel { sel_slot[i] } else { 0 };
+            self.paint_swatch(cx, cell, slot);
+        }
+    }
+
+    /// 注音相关配置行的显隐（跟随总开关）。
+    fn set_gloss_rows_visible(&mut self, cx: &mut Cx, visible: bool) {
+        for row in [
+            ids!(gloss_row),
+            ids!(gloss_color_row),
+            ids!(gloss_bg_row),
+            ids!(word_color_row),
+            ids!(word_bg_row),
+        ] {
+            self.ui.widget(cx, row).set_visible(cx, visible);
+        }
+    }
+
+    /// 注音总开关切换：关→原地剥掉全部注音；开→重开当前书注音。
+    fn toggle_gloss(&mut self, cx: &mut Cx, on: bool) {
+        *GLOSS_ENABLED.write().unwrap() = on;
+        self.set_gloss_rows_visible(cx, on);
+        if on {
+            let item = CURRENT_ITEM.read().unwrap().clone();
+            if let Some(item) = item {
+                self.ui
+                    .label(cx, ids!(title))
+                    .set_text(cx, &format!("《{}》注音中…", item.title));
+                spawn_open_book(item);
+            }
+        } else {
+            if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+                for ch in book.chapters.iter_mut() {
+                    if ch.contains("<ruby") {
+                        *ch = readwise_core::vocab::annotate::remove_all_ruby(ch);
+                    }
+                }
+            }
+            let chunks = {
+                let guard = CURRENT_BOOK.read().unwrap();
+                guard
+                    .as_ref()
+                    .and_then(|b| b.chapters.get(self.chapter_idx))
+                    .map(|ch| readwise_core::books::epub_meta::split_blocks(ch))
+            };
+            if let Some(chunks) = chunks {
+                *PARAGRAPHS.write().unwrap() = chunks;
+            }
+        }
+        self.ui.redraw(cx);
     }
 
     /// 四行色板的点击分发。
@@ -1071,6 +1160,13 @@ impl App {
         for (i, cell) in wb.into_iter().enumerate() {
             if self.ui.button(cx, cell).clicked(actions) {
                 *WORD_BG.write().unwrap() = BG_PRESETS[i].1;
+                changed = true;
+            }
+        }
+        let sc = [ids!(sc0.b), ids!(sc1.b), ids!(sc2.b), ids!(sc3.b)];
+        for (i, cell) in sc.into_iter().enumerate() {
+            if self.ui.button(cx, cell).clicked(actions) {
+                *SELECTION_SLOT.write().unwrap() = i;
                 changed = true;
             }
         }
@@ -1163,6 +1259,11 @@ impl MatchEvent for App {
                         };
                         self.ui.label(cx, ids!(vocab_list)).set_text(cx, &list);
                         self.refresh_swatches(cx);
+                        let gloss_on = *GLOSS_ENABLED.read().unwrap();
+                        self.ui
+                            .check_box(cx, ids!(gloss_enable))
+                            .set_active(cx, gloss_on, Animate::No);
+                        self.set_gloss_rows_visible(cx, gloss_on);
                         spawn_load_shelf();
                     }
                     DbAction::Failed(e) => {
@@ -1311,6 +1412,9 @@ impl MatchEvent for App {
             self.adjust_gloss_font(cx, -0.5);
         }
         self.handle_swatch_rows(cx, actions);
+        if let Some(on) = self.ui.check_box(cx, ids!(gloss_enable)).changed(actions) {
+            self.toggle_gloss(cx, on);
+        }
         if self.ui.button(cx, ids!(close_card_btn)).clicked(actions) {
             self.card = None;
             self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);

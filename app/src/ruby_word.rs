@@ -53,7 +53,6 @@ script_mod! {
 
     mod.widgets.RubyWordBase = #(RubyWord::register_widget(vm))
     mod.widgets.RubyWord = set_type_default() do mod.widgets.RubyWordBase{
-        width: Fit height: Fit
         gloss_gap: 2.0
         draw_gloss +: {
             color: #x7fb2a6
@@ -80,19 +79,14 @@ pub enum RubyWordAction {
 /// 基线、字体、断行与正文完全一致（HtmlLink 同款画法）；
 /// 释义用独立 DrawText 按绝对坐标画在词的第一段区域上方。
 /// 由 Html 自定义标签机制实例化：<ruby t="释义">word</ruby>。
-#[derive(Script, Widget)]
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct RubyWord {
     #[uid]
     uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
-    #[redraw]
-    #[area]
+    #[rust]
     area: Area,
-    #[walk]
-    walk: Walk,
-    #[layout]
-    layout: Layout,
     #[live]
     draw_gloss: DrawText,
     #[live]
@@ -120,6 +114,28 @@ impl ScriptHook for RubyWord {
                 }
             }
         }
+    }
+}
+
+impl WidgetNode for RubyWord {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        Walk::default()
+    }
+    fn area(&self) -> Area {
+        self.area
+    }
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+    }
+    /// 命中区域 = 词的各行绘制段（PortalList 的选区/点击仲裁靠它自报：
+    /// 按在注音词上→点词，按在普通文本→列表接管拖选）。
+    fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
+        self.drawn_areas
+            .iter()
+            .any(|a| a.is_valid(cx) && a.rect(cx).contains(point))
     }
 }
 

@@ -137,6 +137,26 @@ pub fn remove_ruby_for_lemma(html: &str, lemma: &str) -> String {
     out
 }
 
+/// 剥掉全部注音标注（总开关关闭时原地还原纯文）。
+pub fn remove_all_ruby(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(pos) = html[i..].find("<ruby") {
+        let tag_start = i + pos;
+        let Some(open_end_rel) = html[tag_start..].find('>') else { break };
+        let content_start = tag_start + open_end_rel + 1;
+        let Some(close_rel) = html[content_start..].find("</ruby>") else { break };
+        let content_end = content_start + close_rel;
+        let content = &html[content_start..content_end];
+        let word = content.split(RUBY_SEP).next().unwrap_or(content);
+        out.push_str(&html[i..tag_start]);
+        out.push_str(word);
+        i = content_end + "</ruby>".len();
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '\'' || c == '\u{2019}' || c == '-'
 }
