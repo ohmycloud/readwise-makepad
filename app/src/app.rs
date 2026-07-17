@@ -74,6 +74,18 @@ fn spawn_open_book(item: ShelfItem) {
             chapter_titles.push(info.title);
             chapters.push(info.html);
         }
+        // 注音：有释义数据就给全书注入 <ruby t="...">（老项目 GlossAnnotator 的等价物）
+        if let Some(db) = DB.get() {
+            if let Ok((glosses, known)) = db.gloss_context(Some(&item.id)) {
+                if !glosses.is_empty() {
+                    use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
+                    for ch in chapters.iter_mut() {
+                        let flat = flatten_lists(ch);
+                        *ch = annotate_html(&flat, &glosses, &known);
+                    }
+                }
+            }
+        }
         let total = chapters.len();
         let resume = DB
             .get()
@@ -373,8 +385,13 @@ script_mod! {
                 width: Fill height: Fit
                 para_html := Html{
                     width: Fill height: Fit
-                    text_style_normal.line_spacing: 2.0
-                    text_style_bold.line_spacing: 2.0
+                    padding: Inset{ top: 22 }
+                    text_style_normal.line_spacing: 2.2
+                    text_style_bold.line_spacing: 2.2
+                    text_style_italic.line_spacing: 2.2
+                    text_style_fixed.line_spacing: 2.2
+                    paragraph_margin.bottom: 1.4
+                    heading_margin.bottom: 1.1
                     a.color: #xc9c9c9
                     a.hover_color: #x62b6ff
                     a.pressed_color: #x2a8fe0
@@ -495,6 +512,55 @@ script_mod! {
                                 font_dec := ButtonFlat{ text: "A-" }
                                 font_size_label := Label{ text: "默认" }
                                 font_inc := ButtonFlat{ text: "A+" }
+                            }
+                            gloss_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                Label{ text: "注音字号" }
+                                gloss_dec := ButtonFlat{ text: "A-" }
+                                gloss_size_label := Label{ text: "7.5" }
+                                gloss_inc := ButtonFlat{ text: "A+" }
+                            }
+                            gloss_color_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                Label{ text: "注音字色" }
+                                gc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
+                                gc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
+                                gc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
+                                gc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "灰" } }
+                            }
+                            gloss_bg_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                Label{ text: "注音背景" }
+                                gb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "无" } }
+                                gb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深灰" } }
+                                gb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深青" } }
+                                gb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深蓝" } }
+                            }
+                            word_color_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                Label{ text: "词字色" }
+                                wc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "默认" } }
+                                wc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
+                                wc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
+                                wc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
+                            }
+                            word_bg_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                Label{ text: "词背景" }
+                                wb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "无" } }
+                                wb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深灰" } }
+                                wb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深青" } }
+                                wb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深蓝" } }
                             }
                             settings_hint := Label{
                                 width: Fill
@@ -832,6 +898,110 @@ impl App {
             .set_text(cx, &format!("{:.0}", new_size));
         self.ui.redraw(cx);
     }
+
+    /// 把一个色板格子的底色刷成预设色（apply 片段只认字面量，逐色枚举）。
+    fn paint_swatch(&mut self, cx: &mut Cx, cell: &[LiveId], slot: usize) {
+        let mut w = self.ui.widget(cx, cell);
+        match slot {
+            1 => script_apply_eval!(cx, w, { draw_bg.color: #x7fb2a6 }),
+            2 => script_apply_eval!(cx, w, { draw_bg.color: #x62b6ff }),
+            3 => script_apply_eval!(cx, w, { draw_bg.color: #xe8875a }),
+            4 => script_apply_eval!(cx, w, { draw_bg.color: #x9a9a9a }),
+            5 => script_apply_eval!(cx, w, { draw_bg.color: #x5c5c5c }),
+            6 => script_apply_eval!(cx, w, { draw_bg.color: #x4d4d4d }),
+            7 => script_apply_eval!(cx, w, { draw_bg.color: #x294f45 }),
+            8 => script_apply_eval!(cx, w, { draw_bg.color: #x293d61 }),
+            _ => script_apply_eval!(cx, w, { draw_bg.color: #x2a2a2a }),
+        }
+    }
+
+    /// 按当前配置刷新四行色板的选中态。
+    /// slot 约定：0=未选底灰 1=青 2=蓝 3=橙 4=灰 5=中性选中 6=深灰 7=深青 8=深蓝
+    fn refresh_swatches(&mut self, cx: &mut Cx) {
+        use crate::ruby_word::*;
+        let color_slot = [1usize, 2, 3, 4];
+        let bg_slot = [5usize, 6, 7, 8];
+
+        let gloss = *GLOSS_COLOR.read().unwrap();
+        let cells = [ids!(gc0), ids!(gc1), ids!(gc2), ids!(gc3)];
+        for (i, cell) in cells.into_iter().enumerate() {
+            let slot = if GLOSS_PRESETS[i].1 == gloss { color_slot[i] } else { 0 };
+            self.paint_swatch(cx, cell, slot);
+        }
+
+        let gbg = *GLOSS_BG.read().unwrap();
+        let cells = [ids!(gb0), ids!(gb1), ids!(gb2), ids!(gb3)];
+        for (i, cell) in cells.into_iter().enumerate() {
+            let slot = if BG_PRESETS[i].1 == gbg { bg_slot[i] } else { 0 };
+            self.paint_swatch(cx, cell, slot);
+        }
+
+        let wcol = *WORD_COLOR.read().unwrap();
+        let cells = [ids!(wc0), ids!(wc1), ids!(wc2), ids!(wc3)];
+        let wc_slot = [5usize, 1, 2, 3];
+        for (i, cell) in cells.into_iter().enumerate() {
+            let slot = if WORD_COLOR_PRESETS[i].1 == wcol { wc_slot[i] } else { 0 };
+            self.paint_swatch(cx, cell, slot);
+        }
+
+        let wbg = *WORD_BG.read().unwrap();
+        let cells = [ids!(wb0), ids!(wb1), ids!(wb2), ids!(wb3)];
+        for (i, cell) in cells.into_iter().enumerate() {
+            let slot = if BG_PRESETS[i].1 == wbg { bg_slot[i] } else { 0 };
+            self.paint_swatch(cx, cell, slot);
+        }
+    }
+
+    /// 四行色板的点击分发。
+    fn handle_swatch_rows(&mut self, cx: &mut Cx, actions: &Actions) {
+        use crate::ruby_word::*;
+        let mut changed = false;
+        let gc = [ids!(gc0.b), ids!(gc1.b), ids!(gc2.b), ids!(gc3.b)];
+        for (i, cell) in gc.into_iter().enumerate() {
+            if self.ui.button(cx, cell).clicked(actions) {
+                *GLOSS_COLOR.write().unwrap() = GLOSS_PRESETS[i].1;
+                changed = true;
+            }
+        }
+        let gb = [ids!(gb0.b), ids!(gb1.b), ids!(gb2.b), ids!(gb3.b)];
+        for (i, cell) in gb.into_iter().enumerate() {
+            if self.ui.button(cx, cell).clicked(actions) {
+                *GLOSS_BG.write().unwrap() = BG_PRESETS[i].1;
+                changed = true;
+            }
+        }
+        let wc = [ids!(wc0.b), ids!(wc1.b), ids!(wc2.b), ids!(wc3.b)];
+        for (i, cell) in wc.into_iter().enumerate() {
+            if self.ui.button(cx, cell).clicked(actions) {
+                *WORD_COLOR.write().unwrap() = WORD_COLOR_PRESETS[i].1;
+                changed = true;
+            }
+        }
+        let wb = [ids!(wb0.b), ids!(wb1.b), ids!(wb2.b), ids!(wb3.b)];
+        for (i, cell) in wb.into_iter().enumerate() {
+            if self.ui.button(cx, cell).clicked(actions) {
+                *WORD_BG.write().unwrap() = BG_PRESETS[i].1;
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_swatches(cx);
+            self.ui.redraw(cx);
+        }
+    }
+
+    /// 调整注音字号（clamp 到 [6, 12]）。
+    fn adjust_gloss_font(&mut self, cx: &mut Cx, delta: f32) {
+        let new_size = {
+            let mut guard = crate::ruby_word::GLOSS_FONT_SIZE.write().unwrap();
+            *guard = (*guard + delta).clamp(6.0, 12.0);
+            *guard
+        };
+        self.ui
+            .label(cx, ids!(gloss_size_label))
+            .set_text(cx, &format!("{:.1}", new_size));
+        self.ui.redraw(cx);
+    }
 }
 
 /// 后台线程 → UI 的流式消息（模拟 AI 打字机，M5 换成真实 SSE）。
@@ -902,6 +1072,7 @@ impl MatchEvent for App {
                             vocab_preview.clone()
                         };
                         self.ui.label(cx, ids!(vocab_list)).set_text(cx, &list);
+                        self.refresh_swatches(cx);
                         spawn_load_shelf();
                     }
                     DbAction::Failed(e) => {
@@ -1013,6 +1184,13 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(font_dec)).clicked(actions) {
             self.adjust_font(cx, -1.0);
         }
+        if self.ui.button(cx, ids!(gloss_inc)).clicked(actions) {
+            self.adjust_gloss_font(cx, 0.5);
+        }
+        if self.ui.button(cx, ids!(gloss_dec)).clicked(actions) {
+            self.adjust_gloss_font(cx, -0.5);
+        }
+        self.handle_swatch_rows(cx, actions);
         if self.ui.button(cx, ids!(toc_btn)).clicked(actions) {
             self.toc_open = !self.toc_open;
             self.ui

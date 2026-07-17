@@ -2,6 +2,36 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-17 — 注音遮挡定案 ✅ + 注音外观全套设置
+
+- **遮挡最终根因（调试可视化定案）**：红块（注音摆放盒）本身被切 → 裁剪者是 Html/TextFlow 自身的绘制区域；外层留白无效（clip 边界跟着下移）。修复 = padding 挪进 Html 内部（首行文字在 Html 矩形内下移，注音不越界）。叠加此前修的字盒高度低估（字号≠字盒，差 ~1.4×）。用户确认 OK。
+- 色板选中态：格子底色=预设色本身（色样+选中态双重作用），`script_apply_eval` 的 `vec4(#(r),...)` 插值可用；启动时 DbAction::Ready 后刷一次初始选中态。
+- 注音外观四项可配：注音字色（青/蓝/橙/灰）、注音背景（无/深灰/深青/深蓝）、词字色（默认/青/蓝/橙，经 tf.font_colors push/pop——HtmlLink 同款）、词背景（用上一帧 drawn_areas 铺底，首帧延迟一帧）。
+- 会话级配置，持久化到 settings 表留 M8。
+- 坑：`script_apply_eval!` 片段是裸作用域，**没有 prelude——`vec4()` 等函数不可用**（运行时 call target NotFound），但 `#x` 颜色字面量是解析器原生类型可用。动态颜色 → 改为逐字面量枚举（paint_swatch slot 表）。
+
+## 2026-07-17 — M3 关闭 ✅ + M4 第一刀：真书注音管线 + 老数据导入
+
+- M3 全清单完成（用户实测图片 OK），MILESTONES 已关。
+- M4 注音管线（产品灵魂功能落地）：
+  - `vocab/lemma.rs`：嵌入老项目 lemmas-en.json（900KB）+ word-levels.json，`normalize_token/lemmatize/word_level` 逻辑照抄 JS 版；
+  - `vocab/annotate.rs`：`annotate_html`——文本节点分词（字母开头含 '’-），lemma 在释义表且不在已认识集 → 包 `<ruby t="释义">`；跳过标签内部/code/pre/HTML 实体（&amp; 的 amp 不会被当词）；
+  - `Db::gloss_context`（全局释义 + 本书语境覆盖 + known 集）；`spawn_open_book` 加载后全书注音；
+  - `Db::import_legacy_vocab`：ATTACH 老库 INSERT OR IGNORE（word_glosses 4775 条/known/vocab_book，vocab_book 的 book_id 置 NULL 防 FK），设置页"导入老版词汇数据"按钮触发。
+- 7 个单元测试全过（含注音只标生词、跳过 code/实体）。
+- 用户点名：一次性迁移不该占设置 UI → 拆除导入按钮/Db::import_legacy_vocab/legacy_db_path，改为 sqlite3 CLI 直接迁移（已执行成功：4775/24/7 全部入新库）。
+- App 内 ATTACH 失败的真因（存档）：**sqlx 连接池的 ATTACH 只对执行连接生效**，后续语句被派发到未挂载的连接 → no such table。若以后需要 ATTACH 类操作，必须用单连接（pool.acquire 同一 conn 执行整段）。
+- **原则沉淀：一次性运维操作走脚本/CLI，不进产品 UI。**
+- 待验证：打开英文书 → 生词自动绿字注音、点注音词状态栏显示、生词本页 7 条。
+- 注音遮挡——底层根因（读 text_flow/turtle/draw_text 源码定案）：**TextFlow 换行有五条互不相通的路径，注音是排版不知情的叠加层**——①段内 wrap 行距吃 line_spacing（唯一可控好的）②段落间=paragraph_margin.bottom（可调）③标题后=heading_margin.bottom（可调）④块首行=无（靠容器 padding）⑤ **li=new_line_collapsed 硬编码零间距无旋钮**。表格 cell 行高同样不可控。
+- 根治（收敛宿主路径而非打补丁）：GlossPara 设 paragraph_margin.bottom:1.4 + heading_margin.bottom:1.1 + padding-top + 四字体 line_spacing 2.0；**注音章节渲染前 `flatten_lists` 把 ul/ol/li 拍平成"• "段落**（li 无解→绕开）；**annotate 跳过 table 内部**（与 code/pre 同级规则）。9 个单元测试锁行为。
+- 注音字号（6-12，步进0.5）与颜色（青/蓝/橙/灰预设）进设置页；RubyWord 每帧从 GLOSS_FONT_SIZE/GLOSS_COLOR 静态区读取。
+- 坑：这版 `id!()` 返回单个 LiveId（非数组），路径要 `&[id]`。
+- 待验证：全书翻读注音无遮挡（重点：列表变段落后的观感、表格内无注音是否可接受）、注音字号/颜色设置联动。
+- 用户暂不接受"列表转段落/表格不注音"取舍——记为待重审（正解可能是上游给 TextFlow 提 leading 支持或自研注音段落排版，M4 后评估）。
+- **调试可视化揪出真凶嫌疑**：注音摆放高度此前用"字号"(7.5) 而非真实字盒（ascender-descender ≈ 1.4×），注音顶部天然伸出预留空间 → 系统性半裁。已改用排版器真实度量；并加 GLOSS_DEBUG=1 环境变量（绿=词锚定矩形、红=注音摆放盒）。
+- 第二轮截图暴露三个残余缺口，逐个封死：① **li 内嵌 `<p>`**（Manning 常见结构）在 flatten 后变成 p 嵌套破坏段落间距 → flatten 剥掉 li 内的 p 标签（li_depth 跟踪，测试锁定）；② **折行单词的注音锚点错误**——词跨行时 drawn_areas[0] 是行尾小残段，注音画到了残段头上（截图"同重/表刁"悬空半裁）→ 改锚最宽的段（词主体）；③ 块首行头顶量不足 → padding-top 14→22、line_spacing 2.0→2.2（覆盖注音字号上限 12 的字盒高度）。10 测试全过。
+
 ## 2026-07-15 — M3 图片刀：EPUB 内嵌图片渲染
 
 - core：`extract_images` 打开书时把包内 image/* 资源提取到 `books/<id>/res/`（按文件名，幂等）；`rewrite_img_src` 把章节里 `<img src>`（含 %XX 解码、按 basename 匹配）改写为提取后的绝对路径；消毒白名单加 img、split_blocks VOID 加 img。

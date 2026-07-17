@@ -119,6 +119,36 @@ impl Db {
     pub fn vocab_book_review(&self, lemma: &str) -> Result<(), String> {
         self.rt.block_on(vocab::vocab_book_review(&self.pool, lemma))
     }
+
+    /// 注音上下文：全局释义 +（可选）本书语境释义覆盖，以及已认识词集合。
+    pub fn gloss_context(
+        &self,
+        book_id: Option<&str>,
+    ) -> Result<(std::collections::HashMap<String, String>, std::collections::HashSet<String>), String>
+    {
+        self.rt.block_on(async {
+            let rows = sqlx::query("SELECT lemma, gloss FROM word_glosses")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| format!("读取全局释义失败: {}", e))?;
+            let mut glosses: std::collections::HashMap<String, String> = rows
+                .iter()
+                .map(|r| {
+                    use sqlx::Row;
+                    (r.get("lemma"), r.get("gloss"))
+                })
+                .collect();
+            if let Some(id) = book_id {
+                for g in vocab::get_book_glosses(&self.pool, id).await? {
+                    glosses.insert(g.lemma, g.gloss);
+                }
+            }
+            let known: std::collections::HashSet<String> =
+                vocab::get_known_words(&self.pool).await?.into_iter().collect();
+            Ok((glosses, known))
+        })
+    }
+
 }
 
 /// 打开/创建数据库并执行 schema（自老项目 database.rs 迁移，去 tauri 化：
