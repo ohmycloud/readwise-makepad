@@ -30,6 +30,13 @@ struct ShelfItem {
 /// 当前打开的书（后台线程写入，UI 读）。
 static CURRENT_BOOK: LazyLock<RwLock<Option<OpenBook>>> = LazyLock::new(|| RwLock::new(None));
 
+/// 阅读字号（None = 用主题默认；A+/A- 调整后生效）。
+static READER_FONT_SIZE: LazyLock<RwLock<Option<f32>>> = LazyLock::new(|| RwLock::new(None));
+
+const READER_FONT_DEFAULT: f32 = 11.0;
+const READER_FONT_MIN: f32 = 8.0;
+const READER_FONT_MAX: f32 = 20.0;
+
 struct OpenBook {
     id: String,
     title: String,
@@ -404,9 +411,11 @@ script_mod! {
                                 }
                                 spacer := View{ width: Fill height: Fit }
                                 status := Label{ text: "" }
-                                prev_btn := ButtonFlat{ text: "上一章" }
-                                chapter_pos := Label{ text: "" }
-                                next_btn := ButtonFlat{ text: "下一章" }
+                                chapter_pos := Label{
+                                    text: ""
+                                    draw_text.color: #x8a8a8a
+                                    draw_text.text_style.font_size: 9.5
+                                }
                             }
                             chapter_list := mod.widgets.ChapterList{}
                         }
@@ -426,9 +435,25 @@ script_mod! {
                             width: Fill height: Fill
                             flow: Down padding: 24 spacing: 12
                             Label{ text: "设置" draw_text.text_style.font_size: 18 }
+                            Label{
+                                text: "阅读"
+                                draw_text.text_style.font_size: 13
+                                draw_text.color: #x9a9a9a
+                            }
+                            font_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                Label{ text: "正文字号" }
+                                font_dec := ButtonFlat{ text: "A-" }
+                                font_size_label := Label{ text: "默认" }
+                                font_inc := ButtonFlat{ text: "A+" }
+                            }
                             settings_hint := Label{
                                 width: Fill
-                                text: "M8 整合：主题、字体、AI 配置。"
+                                text: "字体、注音颜色、深浅主题等 M8 补齐。"
+                                draw_text.color: #x9a9a9a
+                                draw_text.text_style.font_size: 9
                             }
                             Label{
                                 text: "开发工具"
@@ -479,7 +504,13 @@ impl Widget for ChapterList {
                         id!(Para)
                     };
                     let item = list.item(cx, item_id, template);
-                    item.widget(cx, ids!(para_html)).set_text(cx, para);
+                    let mut html = item.widget(cx, ids!(para_html));
+                    html.set_text(cx, para);
+                    if let Some(fs) = *READER_FONT_SIZE.read().unwrap() {
+                        script_apply_eval!(cx, html, {
+                            font_size: #(fs)
+                        });
+                    }
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -577,6 +608,8 @@ pub struct App {
     stream_text: String,
     #[rust]
     chapter_idx: usize,
+    #[rust]
+    on_reader_page: bool,
 }
 
 impl App {
@@ -604,6 +637,105 @@ impl App {
             .portal_list(cx, ids!(list))
             .set_first_id_and_scroll(0, 0.0);
         spawn_save_progress(id, idx, total);
+        self.ui.redraw(cx);
+    }
+
+    /// 章内进度标签：`第x/y章 · z%`（z 按已读到的块估算）。
+    fn update_progress_label(&mut self, cx: &mut Cx) {
+        let total_ch = {
+            let guard = CURRENT_BOOK.read().unwrap();
+            let Some(book) = guard.as_ref() else { return };
+            book.chapters.len()
+        };
+        let list = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list));
+        let blocks = PARAGRAPHS.read().unwrap().len().max(1);
+        let read_to = (list.first_id() + list.visible_items()).min(blocks);
+        let pct = read_to * 100 / blocks;
+        let text = format!("{}/{} · {}%", self.chapter_idx + 1, total_ch, pct);
+        self.ui.label(cx, ids!(chapter_pos)).set_text(cx, &text);
+    }
+
+    /// 视口翻屏；到底/到顶时跨章。
+    fn page_scroll(&mut self, cx: &mut Cx, down: bool) {
+        if CURRENT_BOOK.read().unwrap().is_none() {
+            return;
+        }
+        let list = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list));
+        let total = PARAGRAPHS.read().unwrap().len();
+        let first = list.first_id();
+        let vis = list.visible_items().max(1);
+        let step = vis.saturating_sub(1).max(1);
+        if down {
+            if first + vis >= total {
+                let idx = self.chapter_idx + 1;
+                self.set_chapter(cx, idx);
+            } else {
+                list.set_first_id_and_scroll((first + step).min(total - 1), 0.0);
+                self.ui.redraw(cx);
+            }
+        } else if first == 0 {
+            if self.chapter_idx > 0 {
+                let idx = self.chapter_idx - 1;
+                self.set_chapter(cx, idx);
+            }
+        } else {
+            list.set_first_id_and_scroll(first.saturating_sub(step), 0.0);
+            self.ui.redraw(cx);
+        }
+        self.update_progress_label(cx);
+    }
+
+    /// 阅读页快捷键：空格/PgDn/→ 下一屏，PgUp/← 上一屏，Shift+←/→ 跨章，Home 回章首。
+    fn handle_reader_key(&mut self, cx: &mut Cx, ke: &KeyEvent) {
+        if !self.on_reader_page || CURRENT_BOOK.read().unwrap().is_none() {
+            return;
+        }
+        let shift = ke.modifiers.shift;
+        match ke.key_code {
+            KeyCode::Space | KeyCode::PageDown => self.page_scroll(cx, true),
+            KeyCode::PageUp => self.page_scroll(cx, false),
+            KeyCode::ArrowRight if shift => {
+                let idx = self.chapter_idx + 1;
+                self.set_chapter(cx, idx);
+            }
+            KeyCode::ArrowLeft if shift => {
+                if self.chapter_idx > 0 {
+                    let idx = self.chapter_idx - 1;
+                    self.set_chapter(cx, idx);
+                }
+            }
+            KeyCode::ArrowRight => self.page_scroll(cx, true),
+            KeyCode::ArrowLeft => self.page_scroll(cx, false),
+            KeyCode::Home => {
+                self.ui
+                    .widget(cx, ids!(chapter_list))
+                    .portal_list(cx, ids!(list))
+                    .set_first_id_and_scroll(0, 0.0);
+                self.ui.redraw(cx);
+                self.update_progress_label(cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// 调整阅读字号（clamp 到 [8, 20]），设置页标签同步。
+    fn adjust_font(&mut self, cx: &mut Cx, delta: f32) {
+        let new_size = {
+            let mut guard = READER_FONT_SIZE.write().unwrap();
+            let cur = guard.unwrap_or(READER_FONT_DEFAULT);
+            let v = (cur + delta).clamp(READER_FONT_MIN, READER_FONT_MAX);
+            *guard = Some(v);
+            v
+        };
+        self.ui
+            .label(cx, ids!(font_size_label))
+            .set_text(cx, &format!("{:.0}", new_size));
         self.ui.redraw(cx);
     }
 }
@@ -760,33 +892,32 @@ impl MatchEvent for App {
                         .label(cx, ids!(title))
                         .set_text(cx, &format!("《{}》加载中…", book.title));
                     pages.set_active_page(cx, id!(page_reader));
+                    self.on_reader_page = true;
                     spawn_open_book(book);
                 }
             }
         }
         if self.ui.button(cx, ids!(nav_library)).clicked(actions) {
             pages.set_active_page(cx, id!(page_library));
+            self.on_reader_page = false;
         }
         if self.ui.button(cx, ids!(nav_reader)).clicked(actions) {
             pages.set_active_page(cx, id!(page_reader));
+            self.on_reader_page = true;
         }
         if self.ui.button(cx, ids!(nav_vocab)).clicked(actions) {
             pages.set_active_page(cx, id!(page_vocab));
+            self.on_reader_page = false;
         }
         if self.ui.button(cx, ids!(nav_settings)).clicked(actions) {
             pages.set_active_page(cx, id!(page_settings));
+            self.on_reader_page = false;
         }
-        if self.ui.button(cx, ids!(prev_btn)).clicked(actions) {
-            if self.chapter_idx > 0 && CURRENT_BOOK.read().unwrap().is_some() {
-                let idx = self.chapter_idx - 1;
-                self.set_chapter(cx, idx);
-            }
+        if self.ui.button(cx, ids!(font_inc)).clicked(actions) {
+            self.adjust_font(cx, 1.0);
         }
-        if self.ui.button(cx, ids!(next_btn)).clicked(actions) {
-            if CURRENT_BOOK.read().unwrap().is_some() {
-                let idx = self.chapter_idx + 1;
-                self.set_chapter(cx, idx);
-            }
+        if self.ui.button(cx, ids!(font_dec)).clicked(actions) {
+            self.adjust_font(cx, -1.0);
         }
         if self.ui.button(cx, ids!(stream_button)).clicked(actions) {
             self.stream_text = "▶ ".to_string();
@@ -819,6 +950,13 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::Startup => spawn_db_init(),
+            Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
+            // 滚轮/触控板滚动后刷新章内百分比
+            Event::Scroll(_) => {
+                if self.on_reader_page && CURRENT_BOOK.read().unwrap().is_some() {
+                    self.update_progress_label(cx);
+                }
+            }
             // 拖入悬停：声明接受拷贝，否则系统不触发 Drop。
             Event::Drag(de) => {
                 if de.items.iter().any(is_epub_item) {

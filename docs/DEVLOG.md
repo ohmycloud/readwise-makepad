@@ -2,6 +2,22 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-15 — 阅读页去 chrome（用户反馈：学 iBooks）
+
+- 用户点名：字号/注音色/字体切换不该显式摆在阅读页；上一章/下一章按钮多余。
+- 改：阅读页头部只剩 书名 + 状态 + 章内进度（弱化小字灰色）；字号调节移入设置页"阅读"区（A-/A+ + 当前值标签）；上/下章按钮删除——章节导航全靠键盘（空格连读自动跨章、Shift+←/→）与后续 TOC。
+- **设计原则沉淀：阅读页保持沉浸，控制项进设置或走手势/键盘（iBooks 范式）。** 后续做 TOC/图片渲染时同样遵守。
+- 待验证：阅读页观感、设置页字号调节联动。
+
+## 2026-07-15 — M3 翻页刀：快捷键 + 视口翻屏 + 章内进度 + 字号
+
+- 翻屏：按 PortalList 可见块数翻页（`first_id + visible_items - 1` 重叠一块保上下文），到底自动进下一章、到顶回上一章；`set_first_id_and_scroll` 定位。
+- 快捷键（仅阅读页 + 有书打开，`on_reader_page` 标志随导航维护）：空格/PgDn/→ 下屏，PgUp/← 上屏，Shift+←/→ 跨章，Home 回章首。KeyCode 来自 makepad_studio_protocol 再导出。
+- 章内进度：`chapter_pos` 标签 `第x/y章 · z%`（z=已读到块/总块），翻屏/切章/滚轮（Event::Scroll）时刷新。
+- 字号：A-/A+ 按钮调 `READER_FONT_SIZE`（None=主题默认，8-20 clamp）；ChapterList 绑定时 `script_apply_eval!` 设 Html 的 `font_size`——TextFlow 的标题字号按 font_size 缩放（text_flow.rs:1193），一个旋钮全局生效。
+- 已知风险：CachedView 可能缓存旧字号纹理（改字号后需滚动才刷新）——待实测，若发生则换失效策略。
+- 待验证：快捷键翻屏手感、跨章、百分比、字号调节即时性。
+
 ## 2026-07-15 — 修复：中文文件名拖放导入失败
 
 - macOS 拖放的 `DragItem::FilePath` 是 URL 百分号编码（中文/空格变 %XX），makepad 未解码直接透传 → 文件系统找不到。Drop 处理时 `percent_decode_path`（15 行零依赖）解码后再导入。
