@@ -125,7 +125,15 @@ impl ScriptHook for RubyWord {
 
 impl Widget for RubyWord {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
-        self.word = v.to_string();
+        // 正式管线：内文 = 词 + RUBY_SEP + 释义（随文本每帧刷新，widget 复用不串位）；
+        // 无分隔符时保留创建时从 t 属性读的释义（M0 demo 兼容）。
+        match v.split_once(readwise_core::vocab::annotate::RUBY_SEP) {
+            Some((word, gloss)) => {
+                self.word = word.to_string();
+                self.gloss = gloss.to_string();
+            }
+            None => self.word = v.to_string(),
+        }
         self.redraw(cx);
     }
 

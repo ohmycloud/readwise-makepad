@@ -30,6 +30,54 @@ struct ShelfItem {
 /// 当前打开的书（后台线程写入，UI 读）。
 static CURRENT_BOOK: LazyLock<RwLock<Option<OpenBook>>> = LazyLock::new(|| RwLock::new(None));
 
+/// 当前打开的书对应的书架项（"标为已认识"后重开重注音用）。
+static CURRENT_ITEM: LazyLock<RwLock<Option<ShelfItem>>> = LazyLock::new(|| RwLock::new(None));
+
+/// 释义卡片操作结果（后台 → UI）。
+#[derive(Debug)]
+enum CardAction {
+    VocabAdded(bool),
+    MarkedKnown,
+}
+
+fn spawn_add_vocab(lemma: String, word: String, gloss: String, book_id: Option<String>) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        let level = readwise_core::vocab::lemma::word_level(&word);
+        let input = readwise_core::vocab::models::VocabBookAddInput {
+            lemma,
+            word,
+            gloss: Some(gloss),
+            level: Some(level),
+            context_sentence: None,
+            book_id,
+        };
+        match db.vocab_book_add(&input) {
+            Ok(added) => Cx::post_action(CardAction::VocabAdded(added)),
+            Err(e) => ::log::error!("加入生词本失败: {}", e),
+        }
+    });
+}
+
+fn spawn_mark_known(lemma: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(e) = db.add_known_word(&lemma, "marked") {
+            ::log::error!("标记已认识失败: {}", e);
+            return;
+        }
+        // 原地消注：内存里剥掉该词的 <ruby>，不重载不跳转
+        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+            for ch in book.chapters.iter_mut() {
+                if ch.contains("<ruby") {
+                    *ch = readwise_core::vocab::annotate::remove_ruby_for_lemma(ch, &lemma);
+                }
+            }
+        }
+        Cx::post_action(CardAction::MarkedKnown);
+    });
+}
+
 /// 阅读字号（None = 用主题默认；A+/A- 调整后生效）。
 static READER_FONT_SIZE: LazyLock<RwLock<Option<f32>>> = LazyLock::new(|| RwLock::new(None));
 
@@ -58,6 +106,7 @@ enum ReaderAction {
 
 /// 后台加载整本书章节 + 恢复进度。
 fn spawn_open_book(item: ShelfItem) {
+    *CURRENT_ITEM.write().unwrap() = Some(item.clone());
     std::thread::spawn(move || {
         let infos = match readwise_core::books::epub_meta::load_chapters(std::path::Path::new(
             &item.file_path,
@@ -482,6 +531,44 @@ script_mod! {
                                 }
                                 chapter_list := mod.widgets.ChapterList{}
                             }
+                            word_card := RoundedView{
+                                visible: false
+                                width: Fill height: Fit
+                                margin: Inset{ left: 16 right: 16 bottom: 12 top: 4 }
+                                padding: 14
+                                flow: Down spacing: 10
+                                draw_bg.color: #x2e2e2e
+                                draw_bg.border_radius: 10.0
+                                card_head := View{
+                                    width: Fill height: Fit
+                                    spacing: 14
+                                    align: Align{ y: 0.5 }
+                                    card_word := Label{
+                                        text: ""
+                                        draw_text.text_style.font_size: 17
+                                    }
+                                    card_gloss := Label{
+                                        width: Fill
+                                        text: ""
+                                        draw_text.color: #x7fb2a6
+                                        draw_text.text_style.font_size: 13
+                                    }
+                                    close_card_btn := ButtonFlat{ text: "关闭" }
+                                }
+                                card_foot := View{
+                                    width: Fill height: Fit
+                                    spacing: 14
+                                    align: Align{ y: 0.5 }
+                                    add_vocab_btn := ButtonFlat{ text: "加入生词本" }
+                                    know_btn := ButtonFlat{ text: "标为已认识" }
+                                    card_hint := Label{
+                                        width: Fill
+                                        text: ""
+                                        draw_text.color: #x9a9a9a
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                }
+                            }
                         }
 
                         page_vocab := View{
@@ -769,6 +856,9 @@ pub struct App {
     on_reader_page: bool,
     #[rust]
     toc_open: bool,
+    /// 释义卡片当前展示的 (word, lemma, gloss)。
+    #[rust]
+    card: Option<(String, String, String)>,
 }
 
 impl App {
@@ -1082,6 +1172,30 @@ impl MatchEvent for App {
                 }
                 continue;
             }
+            if let Some(card) = action.downcast_ref::<CardAction>() {
+                match card {
+                    CardAction::VocabAdded(added) => {
+                        let hint = if *added { "已加入生词本 ✓" } else { "生词本里已有这个词" };
+                        self.ui.label(cx, ids!(card_hint)).set_text(cx, hint);
+                    }
+                    CardAction::MarkedKnown => {
+                        self.card = None;
+                        self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
+                        // 只刷新当前章内容（块数不变，滚动位置保持）
+                        let chunks = {
+                            let guard = CURRENT_BOOK.read().unwrap();
+                            guard.as_ref().and_then(|b| b.chapters.get(self.chapter_idx)).map(
+                                |ch| readwise_core::books::epub_meta::split_blocks(ch),
+                            )
+                        };
+                        if let Some(chunks) = chunks {
+                            *PARAGRAPHS.write().unwrap() = chunks;
+                        }
+                        self.ui.redraw(cx);
+                    }
+                }
+                continue;
+            }
             if let Some(reader) = action.downcast_ref::<ReaderAction>() {
                 match reader {
                     ReaderAction::Opened { resume_chapter } => {
@@ -1134,8 +1248,14 @@ impl MatchEvent for App {
                 }
             }
             if let RubyWordAction::Clicked { word, gloss } = action.cast() {
-                let status = format!("注音词：{} → {}", word.trim_end_matches(['.', ',']), gloss);
-                self.ui.label(cx, ids!(status)).set_text(cx, &status);
+                let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']).to_string();
+                let lemma = readwise_core::vocab::lemma::lemmatize(&word);
+                self.ui.label(cx, ids!(card_word)).set_text(cx, &word);
+                self.ui.label(cx, ids!(card_gloss)).set_text(cx, &gloss);
+                self.ui.label(cx, ids!(card_hint)).set_text(cx, "");
+                self.ui.widget(cx, ids!(word_card)).set_visible(cx, true);
+                self.card = Some((word, lemma, gloss));
+                self.ui.redraw(cx);
             }
         }
         let shelf_list = self
@@ -1191,6 +1311,24 @@ impl MatchEvent for App {
             self.adjust_gloss_font(cx, -0.5);
         }
         self.handle_swatch_rows(cx, actions);
+        if self.ui.button(cx, ids!(close_card_btn)).clicked(actions) {
+            self.card = None;
+            self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
+            self.ui.redraw(cx);
+        }
+        if self.ui.button(cx, ids!(add_vocab_btn)).clicked(actions) {
+            if let Some((word, lemma, gloss)) = self.card.clone() {
+                let book_id = CURRENT_ITEM.read().unwrap().as_ref().map(|i| i.id.clone());
+                self.ui.label(cx, ids!(card_hint)).set_text(cx, "加入中…");
+                spawn_add_vocab(lemma, word, gloss, book_id);
+            }
+        }
+        if self.ui.button(cx, ids!(know_btn)).clicked(actions) {
+            if let Some((_, lemma, _)) = self.card.clone() {
+                self.ui.label(cx, ids!(card_hint)).set_text(cx, "标记中…");
+                spawn_mark_known(lemma);
+            }
+        }
         if self.ui.button(cx, ids!(toc_btn)).clicked(actions) {
             self.toc_open = !self.toc_open;
             self.ui

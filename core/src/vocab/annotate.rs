@@ -1,8 +1,13 @@
 use super::lemma::lemmatize;
 use std::collections::{HashMap, HashSet};
 
+/// 词与释义在 <ruby> 内文中的分隔符（私有区字符，正文不可能出现）。
+/// 释义随文本走而非存 widget 属性：Html 复用 widget 时 set_text 每帧刷新，
+/// 属性只在创建时读一次——删词后释义会错位到下一个词上（实测 bug）。
+pub const RUBY_SEP: char = '\u{E000}';
+
 /// 给章节 HTML 注入生词注音：文本节点里的英文词，若其原形在释义表中
-/// 且不在已认识集合中，包成 <ruby t="释义">词</ruby>。
+/// 且不在已认识集合中，包成 <ruby>词⌷释义</ruby>（⌷ 为 RUBY_SEP 私有区分隔符）。
 /// 跳过标签内部、code/pre 内容、HTML 实体（老项目 GlossAnnotator 的字符串版）。
 pub fn annotate_html(
     html: &str,
@@ -106,6 +111,32 @@ pub fn flatten_lists(html: &str) -> String {
     out
 }
 
+/// 原地消注：把词形还原后等于 lemma 的 <ruby> 标注剥回纯词。
+/// "标为已认识"用——不重载书、不动滚动位置。
+pub fn remove_ruby_for_lemma(html: &str, lemma: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(pos) = html[i..].find("<ruby") {
+        let tag_start = i + pos;
+        let Some(open_end_rel) = html[tag_start..].find('>') else { break };
+        let content_start = tag_start + open_end_rel + 1;
+        let Some(close_rel) = html[content_start..].find("</ruby>") else { break };
+        let content_end = content_start + close_rel;
+        let content = &html[content_start..content_end];
+        let word = content.split(RUBY_SEP).next().unwrap_or(content);
+
+        out.push_str(&html[i..tag_start]);
+        if super::lemma::lemmatize(word) == lemma {
+            out.push_str(word);
+        } else {
+            out.push_str(&html[tag_start..content_end + "</ruby>".len()]);
+        }
+        i = content_end + "</ruby>".len();
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '\'' || c == '\u{2019}' || c == '-'
 }
@@ -142,11 +173,7 @@ fn annotate_text(
         }
         if let Some(gloss) = glosses.get(&lemma) {
             out.push_str(&text[last..start]);
-            let safe_gloss = gloss.replace('"', "'");
-            out.push_str(&format!(
-                "<ruby t=\"{}\">{}</ruby>",
-                safe_gloss, word
-            ));
+            out.push_str(&format!("<ruby>{}{}{}</ruby>", word, RUBY_SEP, gloss));
             last = start + word.len();
         }
     }
@@ -172,7 +199,7 @@ mod tests {
         let out = annotate_html("<p>The solitude and murmur.</p>", &g, &k);
         assert_eq!(
             out,
-            "<p>The <ruby t=\"孤独\">solitude</ruby> and murmur.</p>"
+            "<p>The <ruby>solitude\u{E000}孤独</ruby> and murmur.</p>"
         );
     }
 
@@ -195,11 +222,18 @@ mod tests {
     }
 
     #[test]
+    fn removes_ruby_in_place_for_lemma() {
+        let src = "<p>The <ruby>solitude\u{E000}孤独</ruby> and <ruby>murmurs\u{E000}低语</ruby>.</p>";
+        let out = remove_ruby_for_lemma(src, "murmur");
+        assert_eq!(out, "<p>The <ruby>solitude\u{E000}孤独</ruby> and murmurs.</p>");
+    }
+
+    #[test]
     fn skips_tables() {
         let (g, k) = ctx();
         let out = annotate_html("<table><tr><td>solitude</td></tr></table><p>solitude</p>", &g, &k);
         assert!(out.starts_with("<table><tr><td>solitude</td></tr></table>"));
-        assert!(out.contains("<ruby t=\"孤独\">solitude</ruby>"));
+        assert!(out.contains("<ruby>solitude\u{E000}孤独</ruby>"));
     }
 
     #[test]
@@ -208,7 +242,7 @@ mod tests {
         let out = annotate_html("<pre>solitude</pre>&amp; solitude", &g, &k);
         assert_eq!(
             out,
-            "<pre>solitude</pre>&amp; <ruby t=\"孤独\">solitude</ruby>"
+            "<pre>solitude</pre>&amp; <ruby>solitude\u{E000}孤独</ruby>"
         );
     }
 }
