@@ -2,6 +2,16 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-15 — M3 TOC 刀：目录抽屉 + 章节标题
+
+- core：`load_chapters` 返回 `ChapterInfo{title, html}`——标题取消毒后首个 h1-h3 纯文本（40 字截断），fallback"第 N 节"。没用 epub crate 的 ncx toc（NavPoint→spine 下标映射跨书不稳），标题法对技术书足够；若遇标题质量差的书再升级。
+- UI：头部左侧"目录"按钮开关左侧抽屉（260px SolidView，默认 visible:false）；TocList widget（PortalList，每项 ButtonFlat）；点章跳转并收起；当前章 "▸" 高亮（CURRENT_CHAPTER AtomicUsize 共享）。
+- 坑：抽屉项按钮与头部按钮同名 `toc_btn` 会被深度查找撞车 → 重命名 toc_item_btn。**教训：ids! 是全树深搜，命名必须全局唯一。**
+- 待验证：目录开关、点章跳转、当前章高亮、长目录滚动。
+- 修复：`▸` 字形主题字体缺失渲染成豆腐块（用户截图）→ 改颜色高亮。**教训：UI 里的装饰字符只用主题字体确有的字形，不确定就用颜色/布局表达。**
+- 二次修复：设按钮 draw_text.color 会被 ButtonFlat 的 animator（hover/默认状态动画）在重绘时用主题色覆盖——高亮时有时无（翻页/新书后消失）。改为**行背景高亮**（TocItem 换 SolidView，按项 apply draw_bg.color 青绿/底色），View 背景无动画竞争。**教训：不要 apply 会被 widget animator 管理的属性（Button 的 draw_text/draw_bg），要么改 View 层属性，要么走 animator 状态。**
+- 崩溃修复：多章书点目录 abort——`MTLTextureDescriptor height (21510) > 16384`。根因：Para/GlossPara 用 `CachedView`（todo 示例抄来的）把列表项渲染进离屏纹理，超长章节块超过 Metal 纹理上限直接 assert。**文本块不用纹理缓存**：模板根换普通 View（宽 Fill 高 Fit）。**教训：CachedView 只适合小而固定的项（按钮卡片类），任何高度不可控的内容（长文本/表格/代码块）严禁包 CachedView。** 若后续单块布局本身过慢，方案是 split_blocks 里对超长块二次切分，而不是回缓存。
+
 ## 2026-07-15 — 阅读页去 chrome（用户反馈：学 iBooks）
 
 - 用户点名：字号/注音色/字体切换不该显式摆在阅读页；上一章/下一章按钮多余。

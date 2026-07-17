@@ -10,8 +10,14 @@ pub struct EpubMeta {
     pub cover: Option<(Vec<u8>, String)>,
 }
 
-/// 加载全书各章节的 body HTML（已消毒，阅读器可直接渲染）。
-pub fn load_chapter_htmls<P: AsRef<Path>>(path: P) -> Result<Vec<String>, String> {
+/// 一章的渲染数据。
+pub struct ChapterInfo {
+    pub title: String,
+    pub html: String,
+}
+
+/// 加载全书章节（已消毒 + 提取标题，阅读器可直接渲染）。
+pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String> {
     let mut doc = EpubDoc::new(path).map_err(|e| format!("打开 EPUB 失败: {}", e))?;
     let n = doc.get_num_chapters();
     let mut out = Vec::with_capacity(n);
@@ -19,14 +25,47 @@ pub fn load_chapter_htmls<P: AsRef<Path>>(path: P) -> Result<Vec<String>, String
         doc.set_current_chapter(i);
         let html = doc.get_current_str().map(|(s, _mime)| s).unwrap_or_default();
         let body = sanitize_for_reader(&extract_body(&html));
-        if !body.trim().is_empty() {
-            out.push(body);
+        if body.trim().is_empty() {
+            continue;
         }
+        let title = first_heading_text(&body).unwrap_or_else(|| format!("第 {} 节", out.len() + 1));
+        out.push(ChapterInfo { title, html: body });
     }
     if out.is_empty() {
         return Err("未解析出任何章节".to_string());
     }
     Ok(out)
+}
+
+/// 取消毒后 HTML 中第一个 h1-h3 的纯文本作为章节标题。
+fn first_heading_text(html: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    for tag in ["<h1", "<h2", "<h3"] {
+        if let Some(start) = lower.find(tag) {
+            let content_start = html[start..].find('>').map(|p| start + p + 1)?;
+            let close = format!("</{}", &tag[1..]);
+            let end = lower[content_start..].find(&close).map(|p| content_start + p)?;
+            let mut text = String::new();
+            let mut in_tag = false;
+            for c in html[content_start..end].chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => text.push(c),
+                    _ => {}
+                }
+            }
+            let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !t.is_empty() {
+                return Some(if t.chars().count() > 40 {
+                    t.chars().take(40).collect::<String>() + "…"
+                } else {
+                    t
+                });
+            }
+        }
+    }
+    None
 }
 
 /// Makepad Html widget 认识的标签（不在此列的标签会被它连内容一起丢弃，

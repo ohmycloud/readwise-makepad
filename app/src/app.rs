@@ -40,9 +40,14 @@ const READER_FONT_MAX: f32 = 20.0;
 struct OpenBook {
     id: String,
     title: String,
-    /// 各章 body HTML（已剔除 ruby 降级处理）。
+    /// 各章 body HTML（已消毒）。
     chapters: Vec<String>,
+    /// 各章标题（TOC 用）。
+    chapter_titles: Vec<String>,
 }
+
+/// 当前章下标（App 写、TocList 读，做高亮）。
+static CURRENT_CHAPTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// 打开书的结果（后台 → UI）。
 #[derive(Debug)]
@@ -54,15 +59,21 @@ enum ReaderAction {
 /// 后台加载整本书章节 + 恢复进度。
 fn spawn_open_book(item: ShelfItem) {
     std::thread::spawn(move || {
-        let chapters = match readwise_core::books::epub_meta::load_chapter_htmls(
-            std::path::Path::new(&item.file_path),
-        ) {
+        let infos = match readwise_core::books::epub_meta::load_chapters(std::path::Path::new(
+            &item.file_path,
+        )) {
             Ok(list) => list,
             Err(e) => {
                 Cx::post_action(ReaderAction::OpenError(e));
                 return;
             }
         };
+        let mut chapters = Vec::with_capacity(infos.len());
+        let mut chapter_titles = Vec::with_capacity(infos.len());
+        for info in infos {
+            chapter_titles.push(info.title);
+            chapters.push(info.html);
+        }
         let total = chapters.len();
         let resume = DB
             .get()
@@ -74,6 +85,7 @@ fn spawn_open_book(item: ShelfItem) {
             id: item.id,
             title: item.title,
             chapters,
+            chapter_titles,
         });
         Cx::post_action(ReaderAction::Opened { resume_chapter: resume });
     });
@@ -320,6 +332,25 @@ script_mod! {
         }
     }
 
+    mod.widgets.TocListBase = #(TocList::register_widget(vm))
+    mod.widgets.TocList = set_type_default() do mod.widgets.TocListBase{
+        width: Fill height: Fill
+        list := PortalList{
+            width: Fill height: Fill
+            padding: Inset{ left: 8 right: 8 top: 8 bottom: 8 }
+            spacing: 2
+            scroll_bar: ScrollBar{}
+            TocItem := SolidView{
+                width: Fill height: Fit
+                draw_bg.color: #x232323
+                toc_item_btn := ButtonFlat{
+                    width: Fill
+                    text: ""
+                }
+            }
+        }
+    }
+
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
@@ -328,7 +359,8 @@ script_mod! {
             padding: Inset{ left: 32 right: 32 top: 8 bottom: 32 }
             spacing: 6
             scroll_bar: ScrollBar{}
-            Para := CachedView{
+            Para := View{
+                width: Fill height: Fit
                 para_html := Html{
                     width: Fill height: Fit
                     a.color: #xc9c9c9
@@ -336,7 +368,8 @@ script_mod! {
                     a.pressed_color: #x2a8fe0
                 }
             }
-            GlossPara := CachedView{
+            GlossPara := View{
+                width: Fill height: Fit
                 para_html := Html{
                     width: Fill height: Fit
                     text_style_normal.line_spacing: 2.0
@@ -405,6 +438,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 padding: 12 spacing: 12
                                 align: Align{ y: 0.5 }
+                                toc_btn := ButtonFlat{ text: "目录" }
                                 title := Label{
                                     text: "阅读 · 示例章节"
                                     draw_text.text_style.font_size: 15
@@ -417,7 +451,18 @@ script_mod! {
                                     draw_text.text_style.font_size: 9.5
                                 }
                             }
-                            chapter_list := mod.widgets.ChapterList{}
+                            reader_body := View{
+                                width: Fill height: Fill
+                                flow: Right
+                                toc_panel := SolidView{
+                                    visible: false
+                                    width: 260 height: Fill
+                                    flow: Down
+                                    draw_bg.color: #x232323
+                                    toc_list := mod.widgets.TocList{}
+                                }
+                                chapter_list := mod.widgets.ChapterList{}
+                            }
                         }
 
                         page_vocab := View{
@@ -525,6 +570,50 @@ impl Widget for ChapterList {
 }
 
 #[derive(Script, ScriptHook, Widget)]
+struct TocList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for TocList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let guard = CURRENT_BOOK.read().unwrap();
+        let titles: &[String] = guard.as_ref().map(|b| b.chapter_titles.as_slice()).unwrap_or(&[]);
+        let current = CURRENT_CHAPTER.load(std::sync::atomic::Ordering::Relaxed);
+
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, titles.len().max(1));
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let item = list.item(cx, item_id, id!(TocItem));
+                    let text = match titles.get(item_id) {
+                        Some(t) => format!("{}. {}", item_id + 1, t),
+                        None => "（未打开书）".to_string(),
+                    };
+                    let mut item_mut = item.clone();
+                    item.button(cx, ids!(toc_item_btn)).set_text(cx, &text);
+                    if item_id == current {
+                        script_apply_eval!(cx, item_mut, {
+                            draw_bg.color: #x31554b
+                        });
+                    } else {
+                        script_apply_eval!(cx, item_mut, {
+                            draw_bg.color: #x232323
+                        });
+                    }
+                    item.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
 struct BookShelf {
     #[deref]
     view: View,
@@ -610,6 +699,8 @@ pub struct App {
     chapter_idx: usize,
     #[rust]
     on_reader_page: bool,
+    #[rust]
+    toc_open: bool,
 }
 
 impl App {
@@ -625,6 +716,7 @@ impl App {
             (book.id.clone(), book.title.clone(), book.chapters.len(), chunks)
         };
         self.chapter_idx = idx;
+        CURRENT_CHAPTER.store(idx, std::sync::atomic::Ordering::Relaxed);
         *PARAGRAPHS.write().unwrap() = chunks;
         self.ui
             .label(cx, ids!(title))
@@ -918,6 +1010,27 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(font_dec)).clicked(actions) {
             self.adjust_font(cx, -1.0);
+        }
+        if self.ui.button(cx, ids!(toc_btn)).clicked(actions) {
+            self.toc_open = !self.toc_open;
+            self.ui
+                .widget(cx, ids!(toc_panel))
+                .set_visible(cx, self.toc_open);
+            self.ui.redraw(cx);
+        }
+        let toc_list = self
+            .ui
+            .widget(cx, ids!(toc_list))
+            .portal_list(cx, ids!(list));
+        for (item_id, item) in toc_list.items_with_actions(actions) {
+            if item.button(cx, ids!(toc_item_btn)).clicked(actions) {
+                if CURRENT_BOOK.read().unwrap().is_some() {
+                    self.set_chapter(cx, item_id);
+                    self.toc_open = false;
+                    self.ui.widget(cx, ids!(toc_panel)).set_visible(cx, false);
+                    self.ui.redraw(cx);
+                }
+            }
         }
         if self.ui.button(cx, ids!(stream_button)).clicked(actions) {
             self.stream_text = "▶ ".to_string();
