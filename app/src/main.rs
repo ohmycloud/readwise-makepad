@@ -1,4 +1,5 @@
 mod app;
+mod chapter_image;
 mod ruby_word;
 mod sample_chapter;
 

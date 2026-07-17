@@ -2,6 +2,14 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-07-15 — M3 图片刀：EPUB 内嵌图片渲染
+
+- core：`extract_images` 打开书时把包内 image/* 资源提取到 `books/<id>/res/`（按文件名，幂等）；`rewrite_img_src` 把章节里 `<img src>`（含 %XX 解码、按 basename 匹配）改写为提取后的绝对路径；消毒白名单加 img、split_blocks VOID 加 img。
+- app：`chapter_image.rs` 新 widget，走 ruby 同款自定义标签扩展点——Html 遇 `<img>` 查 `img` 模板实例化，`on_after_new_scoped` 读 src 属性，首次 draw 时 `load_image_file_by_path`。样式：宽 Fill 高 320 定高 + ImageFit.Biggest（等比含入，M8 可做按真实宽高比自适应）。
+- 坑：`use makepad_widgets::*` 会引入其 `log` 导出，与 log crate 撞名 → `::log::error!` 全限定。
+- 已知限制：同名不同目录的图片会互覆（basename 匹配）；SVG 插图不支持（Image widget 不解 SVG 文件路径加载）。遇到再处理。
+- 待验证：技术书插图显示、图片章节滚动性能、无图书不回归。
+
 ## 2026-07-15 — M3 TOC 刀：目录抽屉 + 章节标题
 
 - core：`load_chapters` 返回 `ChapterInfo{title, html}`——标题取消毒后首个 h1-h3 纯文本（40 字截断），fallback"第 N 节"。没用 epub crate 的 ncx toc（NavPoint→spine 下标映射跨书不稳），标题法对技术书足够；若遇标题质量差的书再升级。

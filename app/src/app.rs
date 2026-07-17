@@ -366,6 +366,7 @@ script_mod! {
                     a.color: #xc9c9c9
                     a.hover_color: #x62b6ff
                     a.pressed_color: #x2a8fe0
+                    img := mod.widgets.ChapterImage{}
                 }
             }
             GlossPara := View{
@@ -378,6 +379,7 @@ script_mod! {
                     a.hover_color: #x62b6ff
                     a.pressed_color: #x2a8fe0
                     ruby := mod.widgets.RubyWord{}
+                    img := mod.widgets.ChapterImage{}
                 }
             }
         }
@@ -1057,6 +1059,7 @@ impl AppMain for App {
         });
         makepad_widgets::widgets_mod(vm);
         crate::ruby_word::script_mod(vm);
+        crate::chapter_image::script_mod(vm);
         self::script_mod(vm)
     }
 

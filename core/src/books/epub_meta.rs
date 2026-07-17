@@ -1,4 +1,7 @@
 use epub::doc::EpubDoc;
+use std::collections::HashMap;
+use std::fs;
+use std::io::{Read, Seek};
 use std::path::Path;
 
 /// 从 EPUB 解析出的元数据（M2 只取书架需要的）。
@@ -16,9 +19,11 @@ pub struct ChapterInfo {
     pub html: String,
 }
 
-/// 加载全书章节（已消毒 + 提取标题，阅读器可直接渲染）。
+/// 加载全书章节（已消毒 + 提取标题 + 图片落盘并改写 src，阅读器可直接渲染）。
 pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String> {
+    let path = path.as_ref();
     let mut doc = EpubDoc::new(path).map_err(|e| format!("打开 EPUB 失败: {}", e))?;
+    let images = extract_images(&mut doc, path);
     let n = doc.get_num_chapters();
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -28,6 +33,7 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
         if body.trim().is_empty() {
             continue;
         }
+        let body = rewrite_img_src(&body, &images);
         let title = first_heading_text(&body).unwrap_or_else(|| format!("第 {} 节", out.len() + 1));
         out.push(ChapterInfo { title, html: body });
     }
@@ -35,6 +41,98 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
         return Err("未解析出任何章节".to_string());
     }
     Ok(out)
+}
+
+/// 把包内图片资源提取到书目录的 res/（幂等），返回 文件名 → 绝对路径。
+fn extract_images<R: Read + Seek>(doc: &mut EpubDoc<R>, epub_path: &Path) -> HashMap<String, String> {
+    let res_dir = epub_path.parent().unwrap_or(Path::new(".")).join("res");
+    let items: Vec<(String, String)> = doc
+        .resources
+        .iter()
+        .filter(|(_, item)| item.mime.starts_with("image/"))
+        .filter_map(|(id, item)| {
+            item.path
+                .file_name()
+                .map(|n| (id.clone(), n.to_string_lossy().into_owned()))
+        })
+        .collect();
+    let mut map = HashMap::new();
+    if items.is_empty() {
+        return map;
+    }
+    let _ = fs::create_dir_all(&res_dir);
+    for (id, name) in items {
+        let target = res_dir.join(&name);
+        if !target.exists() {
+            if let Some((data, _mime)) = doc.get_resource(&id) {
+                let _ = fs::write(&target, data);
+            }
+        }
+        map.insert(name, target.to_string_lossy().into_owned());
+    }
+    map
+}
+
+/// 最小 %XX 解码（图片文件名常见空格等转义）。
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 把 <img src="包内相对路径"> 改写为提取后的绝对路径（按文件名匹配）。
+fn rewrite_img_src(html: &str, images: &HashMap<String, String>) -> String {
+    if images.is_empty() || !html.contains("<img") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(pos) = html[i..].find("<img") {
+        let tag_start = i + pos;
+        let Some(gt_rel) = html[tag_start..].find('>') else { break };
+        let tag_end = tag_start + gt_rel;
+        out.push_str(&html[i..tag_start]);
+        let tag = &html[tag_start..=tag_end];
+        out.push_str(&rewrite_one_img(tag, images));
+        i = tag_end + 1;
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
+fn rewrite_one_img(tag: &str, images: &HashMap<String, String>) -> String {
+    for quote in ['"', '\''] {
+        let needle = format!("src={}", quote);
+        if let Some(s) = tag.find(&needle) {
+            let val_start = s + needle.len();
+            if let Some(v_end_rel) = tag[val_start..].find(quote) {
+                let val = &tag[val_start..val_start + v_end_rel];
+                let name = percent_decode(val.rsplit('/').next().unwrap_or(val));
+                if let Some(abs) = images.get(&name) {
+                    return format!(
+                        "{}{}{}",
+                        &tag[..val_start],
+                        abs,
+                        &tag[val_start + v_end_rel..]
+                    );
+                }
+                return tag.to_string();
+            }
+        }
+    }
+    tag.to_string()
 }
 
 /// 取消毒后 HTML 中第一个 h1-h3 的纯文本作为章节标题。
@@ -73,7 +171,7 @@ fn first_heading_text(html: &str) -> Option<String> {
 const KEEP_TAGS: &[&str] = &[
     "p", "h1", "h2", "h3", "h4", "h5", "h6", "b", "strong", "i", "em", "blockquote", "code",
     "pre", "sub", "sup", "ul", "ol", "li", "u", "del", "s", "strike", "table", "thead", "tbody",
-    "tr", "th", "td", "br", "hr",
+    "tr", "th", "td", "br", "hr", "img",
 ];
 
 /// 这些标签连同内容一起丢（对阅读无意义或有害）。
@@ -149,7 +247,7 @@ pub fn sanitize_for_reader(html: &str) -> String {
 /// 按块级结构安全分块（PortalList 虚拟化用）：只在标签嵌套深度回到 0 时切，
 /// 不会把 blockquote/表格/列表从中间切断。
 pub fn split_blocks(html: &str) -> Vec<String> {
-    const VOID: &[&str] = &["br", "hr"];
+    const VOID: &[&str] = &["br", "hr", "img"];
     let mut blocks = Vec::new();
     let mut buf = String::new();
     let mut depth: i32 = 0;
