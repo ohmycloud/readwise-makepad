@@ -47,7 +47,11 @@ pub fn annotate_html(
         }
         if rest.starts_with('&') {
             // HTML 实体整体拷贝，防止 &amp; 里的 "amp" 被当单词
-            let end = rest.find(';').filter(|p| *p <= 10).map(|p| p + 1).unwrap_or(1);
+            let end = rest
+                .find(';')
+                .filter(|p| *p <= 10)
+                .map(|p| p + 1)
+                .unwrap_or(1);
             out.push_str(&rest[..end]);
             i += end;
             continue;
@@ -118,9 +122,13 @@ pub fn remove_ruby_for_lemma(html: &str, lemma: &str) -> String {
     let mut i = 0;
     while let Some(pos) = html[i..].find("<ruby") {
         let tag_start = i + pos;
-        let Some(open_end_rel) = html[tag_start..].find('>') else { break };
+        let Some(open_end_rel) = html[tag_start..].find('>') else {
+            break;
+        };
         let content_start = tag_start + open_end_rel + 1;
-        let Some(close_rel) = html[content_start..].find("</ruby>") else { break };
+        let Some(close_rel) = html[content_start..].find("</ruby>") else {
+            break;
+        };
         let content_end = content_start + close_rel;
         let content = &html[content_start..content_end];
         let word = content.split(RUBY_SEP).next().unwrap_or(content);
@@ -143,9 +151,13 @@ pub fn remove_all_ruby(html: &str) -> String {
     let mut i = 0;
     while let Some(pos) = html[i..].find("<ruby") {
         let tag_start = i + pos;
-        let Some(open_end_rel) = html[tag_start..].find('>') else { break };
+        let Some(open_end_rel) = html[tag_start..].find('>') else {
+            break;
+        };
         let content_start = tag_start + open_end_rel + 1;
-        let Some(close_rel) = html[content_start..].find("</ruby>") else { break };
+        let Some(close_rel) = html[content_start..].find("</ruby>") else {
+            break;
+        };
         let content_end = content_start + close_rel;
         let content = &html[content_start..content_end];
         let word = content.split(RUBY_SEP).next().unwrap_or(content);
@@ -200,6 +212,313 @@ fn annotate_text(
     out.push_str(&text[last..]);
 }
 
+/// 把绘制字符区间 [start, end) 包成 <mark> 段（高亮渲染用）。
+/// 计数规则与 TextFlow 绘制一致：标签不计、实体计 1、<ruby> 内只计词部（SEP 前）。
+/// 跨标签的区间按文本节点拆成多个 <mark> 段。
+pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
+    if ranges.is_empty() {
+        return html.to_string();
+    }
+    let covered = |pos: usize| ranges.iter().any(|(s, e)| pos >= *s && pos < *e);
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut char_pos: usize = 0;
+    let mut in_mark = false;
+    let mut i = 0;
+
+    let close_mark = |out: &mut String, in_mark: &mut bool| {
+        if *in_mark {
+            out.push_str("</mark>");
+            *in_mark = false;
+        }
+    };
+
+    while i < html.len() {
+        let rest = &html[i..];
+        if rest.starts_with('<') {
+            let Some(gt_rel) = rest.find('>') else {
+                out.push_str(rest);
+                break;
+            };
+            close_mark(&mut out, &mut in_mark);
+            let tag = &rest[..=gt_rel];
+            out.push_str(tag);
+            // ruby 内文特殊：词部参与计数与高亮，SEP 后释义原样跳过
+            let inner = &tag[1..tag.len() - 1];
+            if inner
+                .trim_start_matches('/')
+                .to_lowercase()
+                .starts_with("ruby")
+                && !inner.starts_with('/')
+            {
+                i += gt_rel + 1;
+                let rrest = &html[i..];
+                if let Some(close_rel) = rrest.find("</ruby>") {
+                    let content = &rrest[..close_rel];
+                    // ruby 词部按整词判定（不拆分高亮段）
+                    let word = content.split(RUBY_SEP).next().unwrap_or(content);
+                    let wlen = word.chars().count();
+                    if wlen > 0 && covered(char_pos) {
+                        // 整词高亮：mark 包不进 ruby 内部（widget 吃整段文本），跳过内部标记
+                    }
+                    char_pos += wlen;
+                    out.push_str(content);
+                    i += close_rel;
+                }
+                continue;
+            }
+            i += gt_rel + 1;
+            continue;
+        }
+        if rest.starts_with('&') {
+            let end = rest
+                .find(';')
+                .filter(|p| *p <= 10)
+                .map(|p| p + 1)
+                .unwrap_or(1);
+            if covered(char_pos) && !in_mark {
+                out.push_str("<mark>");
+                in_mark = true;
+            } else if !covered(char_pos) {
+                close_mark(&mut out, &mut in_mark);
+            }
+            out.push_str(&rest[..end]);
+            char_pos += 1;
+            i += end;
+            continue;
+        }
+        let text_end = rest.find(['<', '&']).unwrap_or(rest.len());
+        for (off, c) in rest[..text_end].char_indices() {
+            let _ = off;
+            if covered(char_pos) {
+                if !in_mark {
+                    out.push_str("<mark>");
+                    in_mark = true;
+                }
+            } else {
+                close_mark(&mut out, &mut in_mark);
+            }
+            out.push(c);
+            char_pos += 1;
+        }
+        i += text_end;
+    }
+    close_mark(&mut out, &mut in_mark);
+    out
+}
+
+/// 永久高亮版本：把颜色名编码进 `<mark>` 内文，避免 Html 复用自定义 widget 时
+/// 颜色属性成为创建时快照。MarkSpan 每帧通过 MARK_SEP 同时收到正文与颜色。
+pub const MARK_SEP: char = '\u{E001}';
+
+/// 返回 Html/TextFlow 实际参与选择的纯文本。
+///
+/// 普通标签不计字符；实体计一个字符；自定义 ruby/mark widget 的私有编码只保留
+/// 用户看到的词或正文。它与高亮注入使用同一套字符空间，供跨 PortalList 项选择
+/// 在列表回收了离屏 widget 后仍能稳定取得完整文本。
+pub fn rendered_text(html: &str) -> String {
+    fn entity_text(entity: &str) -> String {
+        match entity {
+            "&amp;" => "&".to_string(),
+            "&lt;" => "<".to_string(),
+            "&gt;" => ">".to_string(),
+            "&quot;" => "\"".to_string(),
+            "&apos;" | "&#39;" => "'".to_string(),
+            "&nbsp;" => "\u{a0}".to_string(),
+            _ if entity.starts_with("&#x") && entity.ends_with(';') => {
+                u32::from_str_radix(&entity[3..entity.len() - 1], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "�".to_string())
+            }
+            _ if entity.starts_with("&#") && entity.ends_with(';') => entity[2..entity.len() - 1]
+                .parse::<u32>()
+                .ok()
+                .and_then(char::from_u32)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "�".to_string()),
+            _ => "�".to_string(),
+        }
+    }
+
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0usize;
+    while i < html.len() {
+        let rest = &html[i..];
+        if rest.starts_with('<') {
+            let Some(gt_rel) = rest.find('>') else { break };
+            let tag = &rest[1..gt_rel];
+            let name: String = tag
+                .trim_start_matches('/')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_lowercase();
+            i += gt_rel + 1;
+            if !tag.starts_with('/') && (name == "ruby" || name == "mark") {
+                let close = format!("</{}>", name);
+                let Some(close_rel) = html[i..].find(&close) else {
+                    continue;
+                };
+                let content = &html[i..i + close_rel];
+                let visible = if name == "ruby" {
+                    content.split(RUBY_SEP).next().unwrap_or(content)
+                } else {
+                    content.split(MARK_SEP).next().unwrap_or(content)
+                };
+                out.push_str(visible);
+                i += close_rel + close.len();
+            }
+            continue;
+        }
+        if rest.starts_with('&') {
+            let end = rest
+                .find(';')
+                .filter(|p| *p <= 10)
+                .map(|p| p + 1)
+                .unwrap_or(1);
+            out.push_str(&entity_text(&rest[..end]));
+            i += end;
+            continue;
+        }
+        let text_end = rest.find(['<', '&']).unwrap_or(rest.len());
+        out.push_str(&rest[..text_end]);
+        i += text_end;
+    }
+    out
+}
+
+/// 从若干 Html 块中按 TextFlow 字符下标导出跨块选区。
+pub fn rendered_text_for_range(
+    blocks: &[String],
+    range: ((usize, usize), (usize, usize)),
+) -> String {
+    let ((start_block, start_char), (end_block, end_char)) = range;
+    if start_block > end_block || start_block >= blocks.len() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (block_id, block) in blocks
+        .iter()
+        .enumerate()
+        .take(end_block.min(blocks.len() - 1) + 1)
+        .skip(start_block)
+    {
+        let text = rendered_text(block);
+        let len = text.chars().count();
+        let from = if block_id == start_block {
+            start_char.min(len)
+        } else {
+            0
+        };
+        let to = if block_id == end_block {
+            end_char.min(len)
+        } else {
+            len
+        };
+        if to <= from {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.extend(text.chars().skip(from).take(to - from));
+    }
+    out
+}
+
+pub fn inject_colored_marks(html: &str, ranges: &[(usize, usize, &str)]) -> String {
+    if ranges.is_empty() {
+        return html.to_string();
+    }
+    let color_at = |pos: usize| {
+        ranges
+            .iter()
+            .find(|(start, end, _)| pos >= *start && pos < *end)
+            .map(|(_, _, color)| *color)
+    };
+    let mut out = String::with_capacity(html.len() + 96);
+    let mut char_pos = 0usize;
+    let mut active_color: Option<&str> = None;
+    let mut i = 0usize;
+
+    fn transition<'a>(out: &mut String, active: &mut Option<&'a str>, next: Option<&'a str>) {
+        if *active == next {
+            return;
+        }
+        if let Some(color) = active.take() {
+            out.push(MARK_SEP);
+            out.push_str(color);
+            out.push_str("</mark>");
+        }
+        if next.is_some() {
+            out.push_str("<mark>");
+        }
+        *active = next;
+    }
+
+    while i < html.len() {
+        let rest = &html[i..];
+        if rest.starts_with('<') {
+            let Some(gt_rel) = rest.find('>') else {
+                transition(&mut out, &mut active_color, None);
+                out.push_str(rest);
+                break;
+            };
+            transition(&mut out, &mut active_color, None);
+            let tag = &rest[..=gt_rel];
+            out.push_str(tag);
+            let inner = &tag[1..tag.len() - 1];
+            if inner
+                .trim_start_matches('/')
+                .to_lowercase()
+                .starts_with("ruby")
+                && !inner.starts_with('/')
+            {
+                i += gt_rel + 1;
+                let rrest = &html[i..];
+                if let Some(close_rel) = rrest.find("</ruby>") {
+                    let content = &rrest[..close_rel];
+                    let word = content.split(RUBY_SEP).next().unwrap_or(content);
+                    let word_len = word.chars().count();
+                    let color = (0..word_len).find_map(|offset| color_at(char_pos + offset));
+                    out.push_str(content);
+                    if let Some(color) = color {
+                        out.push(MARK_SEP);
+                        out.push_str(color);
+                    }
+                    char_pos += word_len;
+                    i += close_rel;
+                }
+                continue;
+            }
+            i += gt_rel + 1;
+            continue;
+        }
+        if rest.starts_with('&') {
+            let end = rest
+                .find(';')
+                .filter(|p| *p <= 10)
+                .map(|p| p + 1)
+                .unwrap_or(1);
+            transition(&mut out, &mut active_color, color_at(char_pos));
+            out.push_str(&rest[..end]);
+            char_pos += 1;
+            i += end;
+            continue;
+        }
+        let text_end = rest.find(['<', '&']).unwrap_or(rest.len());
+        for c in rest[..text_end].chars() {
+            transition(&mut out, &mut active_color, color_at(char_pos));
+            out.push(c);
+            char_pos += 1;
+        }
+        i += text_end;
+    }
+    transition(&mut out, &mut active_color, None);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,32 +545,73 @@ mod tests {
     #[test]
     fn flattens_lists_to_bullet_paragraphs() {
         let src = "<ul><li>alpha</li><li>beta <b>x</b></li></ul>";
-        assert_eq!(
-            flatten_lists(src),
-            "<p>• alpha</p><p>• beta <b>x</b></p>"
-        );
+        assert_eq!(flatten_lists(src), "<p>• alpha</p><p>• beta <b>x</b></p>");
     }
 
     #[test]
     fn flatten_strips_nested_p_inside_li() {
         let src = "<ul><li><p>alpha</p></li><li><p>beta</p><p>gamma</p></li></ul>";
+        assert_eq!(flatten_lists(src), "<p>• alpha</p><p>• betagamma</p>");
+    }
+
+    #[test]
+    fn injects_marks_across_tags() {
+        // "abc def" 高亮 [2,5) → "ab<mark>c d</mark>ef"，跨 <b> 边界拆段
+        let out = inject_marks("ab<b>c d</b>ef", &[(2, 5)]);
+        assert_eq!(out, "ab<b><mark>c d</mark></b>ef");
+        let out2 = inject_marks("abcdef", &[(1, 3)]);
+        assert_eq!(out2, "a<mark>bc</mark>def");
+    }
+
+    #[test]
+    fn injects_per_mark_colors_without_stale_widget_state() {
+        let out = inject_colored_marks("abcdef", &[(1, 3, "blue"), (4, 6, "orange")]);
         assert_eq!(
-            flatten_lists(src),
-            "<p>• alpha</p><p>• betagamma</p>"
+            out,
+            "a<mark>bc\u{E001}blue</mark>d<mark>ef\u{E001}orange</mark>"
+        );
+        let across = inject_colored_marks("a<b>bc</b>d", &[(0, 4, "teal")]);
+        assert_eq!(
+            across,
+            "<mark>a\u{E001}teal</mark><b><mark>bc\u{E001}teal</mark></b><mark>d\u{E001}teal</mark>"
+        );
+        let ruby = inject_colored_marks("a<ruby>word\u{E000}释义</ruby>z", &[(2, 3, "blue")]);
+        assert_eq!(ruby, "a<ruby>word\u{E000}释义\u{E001}blue</ruby>z");
+    }
+
+    #[test]
+    fn exports_rendered_text_and_cross_block_range() {
+        let blocks = vec![
+            "<p>A &amp; <ruby>word\u{E000}词\u{E001}blue</ruby>.</p>".to_string(),
+            "<p><mark>Next\u{E001}yellow</mark> line</p>".to_string(),
+        ];
+        assert_eq!(rendered_text(&blocks[0]), "A & word.");
+        assert_eq!(rendered_text(&blocks[1]), "Next line");
+        assert_eq!(
+            rendered_text_for_range(&blocks, ((0, 4), (1, 4))),
+            "word.\nNext"
         );
     }
 
     #[test]
     fn removes_ruby_in_place_for_lemma() {
-        let src = "<p>The <ruby>solitude\u{E000}孤独</ruby> and <ruby>murmurs\u{E000}低语</ruby>.</p>";
+        let src =
+            "<p>The <ruby>solitude\u{E000}孤独</ruby> and <ruby>murmurs\u{E000}低语</ruby>.</p>";
         let out = remove_ruby_for_lemma(src, "murmur");
-        assert_eq!(out, "<p>The <ruby>solitude\u{E000}孤独</ruby> and murmurs.</p>");
+        assert_eq!(
+            out,
+            "<p>The <ruby>solitude\u{E000}孤独</ruby> and murmurs.</p>"
+        );
     }
 
     #[test]
     fn skips_tables() {
         let (g, k) = ctx();
-        let out = annotate_html("<table><tr><td>solitude</td></tr></table><p>solitude</p>", &g, &k);
+        let out = annotate_html(
+            "<table><tr><td>solitude</td></tr></table><p>solitude</p>",
+            &g,
+            &k,
+        );
         assert!(out.starts_with("<table><tr><td>solitude</td></tr></table>"));
         assert!(out.contains("<ruby>solitude\u{E000}孤独</ruby>"));
     }

@@ -2,6 +2,33 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-26 — M4 实测修复：注音空库、滚动划词、选区操作浮层
+
+- 注音未显示的直接原因不是设置开关，而是当前 `word_glosses/book_glosses/known_words` 均为空，旧实现对此静默跳过。加入 ECDICT MIT 许可派生的离线基础释义：按项目现有词级表筛选 2-4 级词、压成单条短中文释义，共 4437 条/约 95 KB；新安装或近乎空库启动时 `INSERT OR IGNORE` 补齐，保留用户与书籍语境释义。来源版本、许可与可复现生成脚本一并入库。当前实测库已从 0 补到 4437 条。
+- 选区不再把完整文本寄托于 PortalList 当前仍持有的可见 widget：新增与 TextFlow 相同字符空间的 `rendered_text/rendered_text_for_range`，跨块、离屏回收后仍能导出完整引用；PortalList 每次滚动/复用 item 时从全局范围重新投影选中态。
+- 修复滚轮延伸：Makepad PortalList 遇“滚轮事件且未检测到首鼠标键”会结束内部选择；ChapterList 现在继续持有手势，在滚动后按新视口命中/估算光标块并重画选区，MouseUp 才真正结束。
+- 原底部普通流 `sel_bar` 改成阅读正文共同祖先持有的 Overlay 浮层，避免被页面剩余高度/批次遮住。操作包含复制、笔记、单词加入生词本、浏览器翻译、系统 TTS 发音、高亮、关闭，并显示选中文本预览与动作反馈。
+- 验证：`cargo check --workspace`、`cargo test --workspace`（16/16）、`git diff --check` 通过；`cargo run -p readwise-app` 正常启动、Splash/DSL 无报错，并打印 `Initialized 4437 starter glosses`。严格 clippy 仍被既有 `epub_meta.rs` 两条 lint，以及既有 TOC/RubyWord 的 type-complexity/collapsible lint 拦截；临时允许这些既有规则后本次代码通过。
+
+## 2026-08-26 — M4 高亮收口 + notepad 主链路
+
+- 修复高亮按钮实际无法保存：`ChapterList` 原先收到窗口内任意 `MouseDown` 都先清空 `SEL_RANGE`，点击列表外的“高亮/添加笔记”按钮也会误清；现在只有按下点位于 PortalList 区域内才重置选区。
+- 选区引用：仍用自跟踪镜像保存区间，同时从 PortalList 公开的 `get_selected_text()` 取得纯文本，供 notepad 使用；切章、取消、保存成功统一清理原生选区与镜像状态。
+- 永久高亮改为逐条颜色：`inject_colored_marks` 把颜色名与正文一起编码进 `<mark>`/`<ruby>` 内文（`U+E001` 分隔），MarkSpan 与 RubyWord 每次 `set_text` 重绑颜色，避免 Html 自定义 widget 复用导致颜色快照串位；选区覆盖注音词时按整词着色。历史高亮不再跟随当前设置色整体变色。
+- 迁移独立 `notes` 数据层（与旧版语义兼容）：新增 create/update/list-by-book/delete 同步门面与 Unicode/书籍元信息/CRUD 测试。
+- 阅读页新增右侧笔记栏：选中文本→“添加笔记”→引用预览 + 可选补充→保存；按当前书倒序列出笔记并支持删除。笔记栏由阅读页共同祖先持有，避免把跨列表的业务状态塞进段落 widget。
+- 验证：`cargo test --workspace` 15/15 通过；`cargo run -p readwise-app` 启动成功，无 Splash 注册/解析错误。`cargo clippy --workspace --all-targets -- -D warnings` 仍被既有 `epub_meta.rs` 两条 lint（相同 if 分支、test module 后还有 item）拦截，本次未扩大无关 diff。
+- 待实测：拖选后分别点“高亮/添加笔记”；跨段引用；重启后高亮颜色与笔记仍在；删除笔记；高亮上的选区/点词穿透。
+
+## 2026-07-17 — M4 收官刀：永久高亮标注
+
+- 存储：book_notes（type=annotation/style=highlight/color；section_id=章下标；norm_start/end=块下标×1e6+字符下标——老 schema 原生三列正好够用）。core：add_highlight / get_highlights_by_chapter + Db 包装。
+- 选区区间获取：PortalList 未暴露 range API（只有 has/clear_selection）→ ChapterList 用**公开接口自跟踪镜像**（原始 Mouse 事件 + get_item/selection_point_to_char_index 命中；绘制仍由原生选区负责），SEL_RANGE 静态区共享。已记 TODO：给 makepad 上游提 selection_range() PR。
+- 渲染：`inject_marks`（core，12 测试含跨标签拆段）按"绘制字符空间"把区间包成 `<mark>` 段（与选区同坐标系：标签不计/实体计1/ruby 只计词部）；MarkSpan widget（TextFlowLink 样板：手写 WidgetNode、point_hits_area=false 不挡选区、荧光底用上一帧区域铺、颜色每帧读 HL_SLOT）。
+- UI：选完弹底部 sel_bar（高亮/取消）；保存后入 CURRENT_BOOK.highlights + 当前章原地重建（build_chapter_chunks 统一注入路径，MarkedKnown/注音开关刷新也走它）；设置页"高亮颜色"色板（黄/青/蓝/橙）。
+- v1 已知限制（更新）：① 多色高亮已于 2026-08-26 修复；② 空白折叠可能造成字符偏移漂移（TextFlow 折叠连续空白，注入器按原文计数）——实测偏了再做 sanitize 期空白归一；③ 高亮记录暂未存 text 列（notepad 已单独保存引用文本）。
+- 待验证：拖选→高亮→重启还在；跨段高亮；高亮上的选区/点词穿透；颜色切换即时变色。
+
 ## 2026-07-17 — 注音总开关（用户需求）
 
 - 设置页顶部 CheckBox"生词注音"；勾选才显示注音字号/字色/背景/词字色/词背景五行配置（set_visible 联动），未勾选原样显示文章。

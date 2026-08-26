@@ -17,6 +17,10 @@ static DB: OnceLock<readwise_core::Db> = OnceLock::new();
 /// 书架数据（UI 侧只读渲染，后台线程写）。
 static SHELF: LazyLock<RwLock<Vec<ShelfItem>>> = LazyLock::new(|| RwLock::new(Vec::new()));
 
+/// 当前书的笔记（后台线程刷新，NoteList 只读渲染）。
+static NOTES: LazyLock<RwLock<Vec<readwise_core::notes::models::Note>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
 #[derive(Clone)]
 struct ShelfItem {
     id: String,
@@ -98,6 +102,122 @@ struct OpenBook {
     chapters: Vec<String>,
     /// 各章标题（TOC 用）。
     chapter_titles: Vec<String>,
+    /// 各章高亮（章下标 → 区间列表）。
+    highlights: HashMap<usize, Vec<readwise_core::books::Highlight>>,
+}
+
+/// 当前选区（块+字符区间，ChapterList 自跟踪写入，App 读）。
+type TextPoint = (usize, usize);
+type TextRange = (TextPoint, TextPoint);
+static SEL_RANGE: LazyLock<RwLock<Option<TextRange>>> = LazyLock::new(|| RwLock::new(None));
+
+/// 原生 PortalList 选区导出的纯文本（添加笔记时作为引用）。
+static SELECTED_TEXT: LazyLock<RwLock<String>> = LazyLock::new(|| RwLock::new(String::new()));
+
+/// 选区状态事件（ChapterList → App）。
+#[derive(Debug)]
+enum SelAction {
+    Show,
+    Hide,
+}
+
+/// 笔记后台操作结果。
+#[derive(Debug)]
+enum NoteAction {
+    Refreshed {
+        book_id: String,
+        notes: Vec<readwise_core::notes::models::Note>,
+        message: Option<String>,
+        finish_composer: bool,
+    },
+    Error(String),
+}
+
+fn spawn_load_notes(book_id: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        match db.get_notes_by_book(&book_id) {
+            Ok(notes) => Cx::post_action(NoteAction::Refreshed {
+                book_id,
+                notes,
+                message: None,
+                finish_composer: false,
+            }),
+            Err(e) => Cx::post_action(NoteAction::Error(e)),
+        }
+    });
+}
+
+fn spawn_create_note(item: ShelfItem, quote: String, extra: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        let content = [quote.trim(), extra.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if let Err(e) = db.create_note(&item.id, &item.title, &item.author, &content) {
+            Cx::post_action(NoteAction::Error(e));
+            return;
+        }
+        match db.get_notes_by_book(&item.id) {
+            Ok(notes) => Cx::post_action(NoteAction::Refreshed {
+                book_id: item.id,
+                notes,
+                message: Some("笔记已保存 ✓".to_string()),
+                finish_composer: true,
+            }),
+            Err(e) => Cx::post_action(NoteAction::Error(e)),
+        }
+    });
+}
+
+fn spawn_delete_note(book_id: String, note_id: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(e) = db.delete_note(&note_id) {
+            Cx::post_action(NoteAction::Error(e));
+            return;
+        }
+        match db.get_notes_by_book(&book_id) {
+            Ok(notes) => Cx::post_action(NoteAction::Refreshed {
+                book_id,
+                notes,
+                message: Some("笔记已删除".to_string()),
+                finish_composer: false,
+            }),
+            Err(e) => Cx::post_action(NoteAction::Error(e)),
+        }
+    });
+}
+
+/// 高亮保存结果。
+#[derive(Debug)]
+enum HlAction {
+    Saved(readwise_core::books::Highlight, usize),
+}
+
+fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        let slot = *crate::mark_span::HL_SLOT.read().unwrap();
+        let color = crate::mark_span::HL_COLOR_NAMES[slot.min(3)];
+        let ((sb, sc), (eb, ec)) = range;
+        match db.add_highlight(&book_id, chapter, (sb, sc, eb, ec), color) {
+            Ok(id) => {
+                let hl = readwise_core::books::Highlight {
+                    id,
+                    start_block: sb,
+                    start_char: sc,
+                    end_block: eb,
+                    end_char: ec,
+                    color: color.to_string(),
+                };
+                Cx::post_action(HlAction::Saved(hl, chapter));
+            }
+            Err(e) => ::log::error!("{}", e),
+        }
+    });
 }
 
 /// 当前章下标（App 写、TocList 读，做高亮）。
@@ -106,13 +226,69 @@ static CURRENT_CHAPTER: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 /// 打开书的结果（后台 → UI）。
 #[derive(Debug)]
 enum ReaderAction {
-    Opened { resume_chapter: usize },
+    Opened {
+        resume_chapter: usize,
+        gloss_count: usize,
+    },
     OpenError(String),
+}
+
+fn selected_single_word(text: &str) -> Option<String> {
+    let word = text.trim().trim_matches(|c: char| {
+        !c.is_ascii_alphabetic() && c != '\'' && c != '\u{2019}' && c != '-'
+    });
+    (!word.is_empty()
+        && word.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == '\'' || c == '\u{2019}' || c == '-'))
+    .then(|| word.to_string())
+}
+
+fn percent_encode_query(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+fn speak_text(text: String) {
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("say").arg(&text).status();
+        #[cfg(target_os = "windows")]
+        let result = std::process::Command::new("PowerShell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Add-Type -AssemblyName System.Speech; $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak($args[0])",
+                "--",
+                &text,
+            ])
+            .status();
+        #[cfg(target_os = "linux")]
+        let result = std::process::Command::new("spd-say").arg(&text).status();
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        let result: Result<std::process::ExitStatus, std::io::Error> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "当前平台暂不支持系统发音",
+        ));
+        if let Err(error) = result {
+            ::log::error!("发音失败: {}", error);
+        }
+    });
 }
 
 /// 后台加载整本书章节 + 恢复进度。
 fn spawn_open_book(item: ShelfItem) {
     *CURRENT_ITEM.write().unwrap() = Some(item.clone());
+    NOTES.write().unwrap().clear();
     std::thread::spawn(move || {
         let infos = match readwise_core::books::epub_meta::load_chapters(std::path::Path::new(
             &item.file_path,
@@ -130,9 +306,11 @@ fn spawn_open_book(item: ShelfItem) {
             chapters.push(info.html);
         }
         // 注音：总开关开启且有释义数据才注入（老项目 GlossAnnotator 的等价物）
+        let mut gloss_count = 0usize;
         if *GLOSS_ENABLED.read().unwrap() {
             if let Some(db) = DB.get() {
                 if let Ok((glosses, known)) = db.gloss_context(Some(&item.id)) {
+                    gloss_count = glosses.len();
                     if !glosses.is_empty() {
                         use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
                         for ch in chapters.iter_mut() {
@@ -150,14 +328,55 @@ fn spawn_open_book(item: ShelfItem) {
             .and_then(|s| s.location.parse::<usize>().ok())
             .filter(|idx| *idx < total)
             .unwrap_or(0);
+        let highlights = DB
+            .get()
+            .and_then(|db| db.get_highlights_by_chapter(&item.id).ok())
+            .unwrap_or_default();
         *CURRENT_BOOK.write().unwrap() = Some(OpenBook {
             id: item.id,
             title: item.title,
             chapters,
             chapter_titles,
+            highlights,
         });
-        Cx::post_action(ReaderAction::Opened { resume_chapter: resume });
+        Cx::post_action(ReaderAction::Opened {
+            resume_chapter: resume,
+            gloss_count,
+        });
     });
+}
+
+/// 章节 → PortalList 块（含高亮标记注入）。
+fn build_chapter_chunks(book: &OpenBook, idx: usize) -> Option<Vec<String>> {
+    let chapter = book.chapters.get(idx)?;
+    let mut chunks = readwise_core::books::epub_meta::split_blocks(chapter);
+    if let Some(hls) = book.highlights.get(&idx) {
+        let mut per_block: HashMap<usize, Vec<(usize, usize, &str)>> = HashMap::new();
+        for hl in hls {
+            for b in hl.start_block..=hl.end_block.min(chunks.len().saturating_sub(1)) {
+                let from = if b == hl.start_block {
+                    hl.start_char
+                } else {
+                    0
+                };
+                let to = if b == hl.end_block {
+                    hl.end_char
+                } else {
+                    usize::MAX
+                };
+                per_block
+                    .entry(b)
+                    .or_default()
+                    .push((from, to, hl.color.as_str()));
+            }
+        }
+        for (b, ranges) in per_block {
+            if let Some(chunk) = chunks.get_mut(b) {
+                *chunk = readwise_core::vocab::annotate::inject_colored_marks(chunk, &ranges);
+            }
+        }
+    }
+    Some(chunks)
 }
 
 /// 后台保存阅读进度（章节粒度，location 存章节下标）。
@@ -420,6 +639,41 @@ script_mod! {
         }
     }
 
+    mod.widgets.NoteListBase = #(NoteList::register_widget(vm))
+    mod.widgets.NoteList = set_type_default() do mod.widgets.NoteListBase{
+        width: Fill height: Fill
+        list := PortalList{
+            width: Fill height: Fill
+            spacing: 8
+            scroll_bar: ScrollBar{}
+            NoteCard := RoundedView{
+                width: Fill height: Fit
+                new_batch: true
+                padding: 10
+                flow: Down spacing: 6
+                draw_bg.color: #x292929
+                draw_bg.border_radius: 7.0
+                note_title := Label{
+                    width: Fill
+                    text: ""
+                    draw_text.text_style.font_size: 11
+                }
+                note_preview := Label{
+                    width: Fill
+                    text: ""
+                    draw_text.color: #xaaaaaa
+                    draw_text.text_style.font_size: 9
+                }
+                note_actions := View{
+                    width: Fill height: Fit
+                    flow: Right
+                    align: Align{x: 1.0 y: 0.5}
+                    note_delete_btn := ButtonFlatter{ text: "删除" }
+                }
+            }
+        }
+    }
+
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
@@ -438,6 +692,7 @@ script_mod! {
                     a.hover_color: #x62b6ff
                     a.pressed_color: #x2a8fe0
                     img := mod.widgets.ChapterImage{}
+                    mark := mod.widgets.MarkSpan{}
                 }
             }
             GlossPara := View{
@@ -457,6 +712,7 @@ script_mod! {
                     a.pressed_color: #x2a8fe0
                     ruby := mod.widgets.RubyWord{}
                     img := mod.widgets.ChapterImage{}
+                    mark := mod.widgets.MarkSpan{}
                 }
             }
         }
@@ -518,6 +774,7 @@ script_mod! {
                                 padding: 12 spacing: 12
                                 align: Align{ y: 0.5 }
                                 toc_btn := ButtonFlat{ text: "目录" }
+                                notes_btn := ButtonFlat{ text: "笔记" }
                                 title := Label{
                                     text: "阅读 · 示例章节"
                                     draw_text.text_style.font_size: 15
@@ -532,15 +789,107 @@ script_mod! {
                             }
                             reader_body := View{
                                 width: Fill height: Fill
-                                flow: Right
-                                toc_panel := SolidView{
+                                flow: Overlay
+                                reader_columns := View{
+                                    width: Fill height: Fill
+                                    flow: Right
+                                    toc_panel := SolidView{
                                     visible: false
                                     width: 260 height: Fill
                                     flow: Down
                                     draw_bg.color: #x232323
                                     toc_list := mod.widgets.TocList{}
+                                    }
+                                    chapter_list := mod.widgets.ChapterList{}
+                                    note_panel := SolidView{
+                                    visible: false
+                                    width: 320 height: Fill
+                                    new_batch: true
+                                    flow: Down spacing: 10 padding: 12
+                                    draw_bg.color: #x232323
+                                    note_header := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        note_panel_title := Label{
+                                            width: Fill
+                                            text: "笔记"
+                                            draw_text.text_style.font_size: 14
+                                        }
+                                        note_close_btn := ButtonFlatter{ text: "关闭" }
+                                    }
+                                    note_composer := RoundedView{
+                                        visible: false
+                                        width: Fill height: Fit
+                                        new_batch: true
+                                        flow: Down spacing: 8 padding: 10
+                                        draw_bg.color: #x2d2d2d
+                                        draw_bg.border_radius: 8.0
+                                        Label{
+                                            text: "引用"
+                                            draw_text.color: #x7fb2a6
+                                            draw_text.text_style.font_size: 9
+                                        }
+                                        note_quote := Label{
+                                            width: Fill
+                                            text: ""
+                                            draw_text.color: #xc9c9c9
+                                            draw_text.text_style.font_size: 9.5
+                                        }
+                                        note_extra := TextInput{
+                                            width: Fill height: 38
+                                            empty_text: "补充内容（可选，回车保存）"
+                                        }
+                                        note_compose_actions := View{
+                                            width: Fill height: Fit
+                                            flow: Right spacing: 8
+                                            align: Align{x: 1.0 y: 0.5}
+                                            note_cancel_btn := ButtonFlatter{ text: "取消" }
+                                            note_save_btn := ButtonFlat{ text: "保存" }
+                                        }
+                                    }
+                                    note_hint := Label{
+                                        width: Fill
+                                        text: "选中文本后可添加笔记"
+                                        draw_text.color: #x8a8a8a
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    note_list := mod.widgets.NoteList{}
+                                    }
                                 }
-                                chapter_list := mod.widgets.ChapterList{}
+                                sel_bar := View{
+                                    visible: false
+                                    width: Fill height: Fill
+                                    flow: Down
+                                    align: Align{x: 0.5 y: 1.0}
+                                    padding: Inset{left: 18 right: 18 bottom: 18}
+                                    selection_popup := RoundedView{
+                                        width: Fit height: Fit
+                                        new_batch: true
+                                        padding: Inset{left: 12 right: 12 top: 9 bottom: 9}
+                                        flow: Down spacing: 5
+                                        draw_bg.color: #x303030
+                                        draw_bg.border_radius: 10.0
+                                        selection_actions := View{
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 6
+                                            align: Align{y: 0.5}
+                                            copy_sel_btn := ButtonFlat{text: "复制"}
+                                            note_from_sel_btn := ButtonFlat{text: "笔记"}
+                                            vocab_from_sel_btn := ButtonFlat{text: "生词"}
+                                            translate_sel_btn := ButtonFlat{text: "翻译"}
+                                            speak_sel_btn := ButtonFlat{text: "发音"}
+                                            hl_btn := ButtonFlat{text: "高亮"}
+                                            sel_close_btn := ButtonFlatter{text: "关闭"}
+                                        }
+                                        sel_hint := Label{
+                                            width: Fill
+                                            text: ""
+                                            draw_text.color: #x9a9a9a
+                                            draw_text.text_style.font_size: 8.5
+                                        }
+                                    }
+                                }
                             }
                             word_card := RoundedView{
                                 visible: false
@@ -656,6 +1005,21 @@ script_mod! {
                                 wc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
                                 wc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
                             }
+                            word_bg_row := View{
+                                width: Fill height: Fit
+                                spacing: 12
+                                align: Align{ y: 0.5 }
+                                Label{ text: "词背景" }
+                                wb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "无" } }
+                                wb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深灰" } }
+                                wb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深青" } }
+                                wb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深蓝" } }
+                            }
+                            Label{
+                                text: "文本"
+                                draw_text.text_style.font_size: 13
+                                draw_text.color: #x9a9a9a
+                            }
                             sel_color_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
@@ -666,15 +1030,15 @@ script_mod! {
                                 sc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
                                 sc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "黄" } }
                             }
-                            word_bg_row := View{
+                            hl_color_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "词背景" }
-                                wb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "无" } }
-                                wb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深灰" } }
-                                wb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深青" } }
-                                wb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深蓝" } }
+                                Label{ text: "高亮颜色" }
+                                hc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "黄" } }
+                                hc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
+                                hc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
+                                hc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
                             }
                             settings_hint := Label{
                                 width: Fill
@@ -712,6 +1076,204 @@ script_mod! {
 struct ChapterList {
     #[deref]
     view: View,
+    /// 选区自跟踪（PortalList 未暴露区间 API，用公开的命中接口镜像；
+    /// 仅镜像记录，绘制仍由原生选区完成）。
+    #[rust]
+    sel_anchor: Option<(usize, usize)>,
+    #[rust]
+    selecting: bool,
+    #[rust]
+    last_abs: Option<DVec2>,
+}
+
+impl ChapterList {
+    /// 命中可见块的 (块id, 字符下标)。点位在视口外或块间隙时吸附到
+    /// 最近边界，与 PortalList 原生选择规则保持一致。
+    fn hit_block_char(&self, cx: &Cx, abs: DVec2) -> Option<(usize, usize)> {
+        let list = self.view.portal_list(cx, ids!(list));
+        let first = list.first_id();
+        let vis = list.visible_items() + 1;
+        let list_rect = list.area().rect(cx);
+        let mut visible = Vec::new();
+        for id in first..first + vis {
+            let Some((_, widget)) = list.get_item(id) else {
+                continue;
+            };
+            let rect = widget.area().rect(cx);
+            if rect.size.y > 0.0 {
+                visible.push((id, widget, rect));
+            }
+        }
+        visible.sort_by_key(|(id, _, _)| *id);
+        let (first_id, _, _) = visible.first()?;
+        let (last_id, last_widget, _) = visible.last()?;
+        if abs.y < list_rect.pos.y {
+            return Some((*first_id, 0));
+        }
+        if abs.y > list_rect.pos.y + list_rect.size.y {
+            return Some((*last_id, last_widget.selection_text_len()));
+        }
+        for (id, widget, rect) in &visible {
+            if rect.contains(abs) {
+                return widget
+                    .selection_point_to_char_index(cx, abs)
+                    .map(|char_idx| (*id, char_idx));
+            }
+        }
+        if let Some((id, widget, _)) = visible
+            .iter()
+            .rev()
+            .find(|(_, _, rect)| rect.pos.y + rect.size.y <= abs.y)
+        {
+            return Some((*id, widget.selection_text_len()));
+        }
+        Some((*first_id, 0))
+    }
+
+    fn set_cursor(&self, cursor: (usize, usize)) {
+        let Some(anchor) = self.sel_anchor else {
+            return;
+        };
+        let range = if cursor < anchor {
+            (cursor, anchor)
+        } else {
+            (anchor, cursor)
+        };
+        *SEL_RANGE.write().unwrap() = Some(range);
+    }
+
+    /// PortalList 会复用/回收离屏 item，因此每次滚动与重绘都要把全局区间
+    /// 重新投影到当前可见 widget，而不能依赖上一次的原生选择状态。
+    fn apply_visible_selection(&self, cx: &mut Cx) {
+        let range = *SEL_RANGE.read().unwrap();
+        let list = self.view.portal_list(cx, ids!(list));
+        let first = list.first_id();
+        let vis = list.visible_items() + 1;
+        for id in first..first + vis {
+            let Some((_, widget)) = list.get_item(id) else {
+                continue;
+            };
+            match range {
+                None => widget.selection_clear(),
+                Some((start, end)) if id < start.0 || id > end.0 => widget.selection_clear(),
+                Some((start, end)) if id == start.0 && id == end.0 => {
+                    widget.selection_set(start.1, end.1)
+                }
+                Some((start, _)) if id == start.0 => {
+                    widget.selection_set(start.1, widget.selection_text_len())
+                }
+                Some((_, end)) if id == end.0 => widget.selection_set(0, end.1),
+                Some(_) => widget.selection_select_all(),
+            }
+            widget.redraw(cx);
+        }
+        list.redraw(cx);
+    }
+
+    fn extend_after_scroll(&mut self, cx: &mut Cx) {
+        let Some(abs) = self.last_abs else { return };
+        if let Some(hit) = self.hit_block_char(cx, abs) {
+            self.set_cursor(hit);
+            self.apply_visible_selection(cx);
+            return;
+        }
+
+        // 新的可见项会在下一帧才绑定；先按视口比例估算块，再在后续 MouseMove
+        // 中用精确字形命中修正。这样按住鼠标滚轮时选区会立即跨块延伸。
+        let list = self.view.portal_list(cx, ids!(list));
+        let first = list.first_id();
+        let visible = list.visible_items().max(1);
+        let rect = list.area().rect(cx);
+        let fraction = ((abs.y - rect.pos.y) / rect.size.y.max(1.0)).clamp(0.0, 0.999);
+        let max_id = PARAGRAPHS.read().unwrap().len().saturating_sub(1);
+        let id = (first + (fraction * visible as f64) as usize).min(max_id);
+        let len = PARAGRAPHS
+            .read()
+            .unwrap()
+            .get(id)
+            .map(|block| {
+                readwise_core::vocab::annotate::rendered_text(block)
+                    .chars()
+                    .count()
+            })
+            .unwrap_or(0);
+        let char_idx = self
+            .sel_anchor
+            .map(|anchor| if id >= anchor.0 { len } else { 0 })
+            .unwrap_or(0);
+        self.set_cursor((id, char_idx));
+        self.apply_visible_selection(cx);
+    }
+
+    fn track_selection(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::MouseDown(e) => {
+                let list = self.view.portal_list(cx, ids!(list));
+                if !list.area().rect(cx).contains(e.abs) {
+                    return;
+                }
+                if std::env::var("SEL_DEBUG").is_ok() {
+                    eprintln!("[SEL] down abs={:?}", e.abs);
+                }
+                *SEL_RANGE.write().unwrap() = None;
+                SELECTED_TEXT.write().unwrap().clear();
+                self.selecting = false;
+                self.sel_anchor = None;
+                self.last_abs = Some(e.abs);
+                Cx::post_action(SelAction::Hide);
+                let first = list.first_id();
+                let vis = list.visible_items() + 1;
+                let on_interactive = (first..first + vis).any(|id| {
+                    list.get_item(id)
+                        .map(|(_, w)| w.find_interactive_widget_from_point(cx, e.abs).is_some())
+                        .unwrap_or(false)
+                });
+                if !on_interactive {
+                    if let Some(hit) = self.hit_block_char(cx, e.abs) {
+                        self.sel_anchor = Some(hit);
+                        self.selecting = true;
+                    }
+                }
+                if std::env::var("SEL_DEBUG").is_ok() {
+                    eprintln!(
+                        "[SEL] down: interactive={} anchor={:?}",
+                        on_interactive, self.sel_anchor
+                    );
+                }
+            }
+            Event::MouseMove(e) => {
+                if self.selecting {
+                    self.last_abs = Some(e.abs);
+                    if let Some(cur) = self.hit_block_char(cx, e.abs) {
+                        self.set_cursor(cur);
+                        self.apply_visible_selection(cx);
+                    }
+                }
+            }
+            Event::Scroll(_) if self.selecting => self.extend_after_scroll(cx),
+            Event::MouseUp(_) if self.selecting => {
+                self.selecting = false;
+                let range = *SEL_RANGE.read().unwrap();
+                let non_empty = range.map(|(a, b)| a != b).unwrap_or(false);
+                if let Some(range) = range.filter(|(a, b)| a != b) {
+                    *SELECTED_TEXT.write().unwrap() =
+                        readwise_core::vocab::annotate::rendered_text_for_range(
+                            &PARAGRAPHS.read().unwrap(),
+                            range,
+                        );
+                }
+                if std::env::var("SEL_DEBUG").is_ok() {
+                    eprintln!("[SEL] up: range={:?} show={}", range, non_empty);
+                }
+                Cx::post_action(if non_empty {
+                    SelAction::Show
+                } else {
+                    SelAction::Hide
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Widget for ChapterList {
@@ -744,6 +1306,21 @@ impl Widget for ChapterList {
                         3 => script_apply_eval!(cx, html, { draw_selection.color: #xd9c96a88 }),
                         _ => script_apply_eval!(cx, html, { draw_selection.color: #x7fb2a688 }),
                     }
+                    if let Some((start, end)) = *SEL_RANGE.read().unwrap() {
+                        if item_id < start.0 || item_id > end.0 {
+                            item.selection_clear();
+                        } else if item_id == start.0 && item_id == end.0 {
+                            item.selection_set(start.1, end.1);
+                        } else if item_id == start.0 {
+                            item.selection_set(start.1, item.selection_text_len());
+                        } else if item_id == end.0 {
+                            item.selection_set(0, end.1);
+                        } else {
+                            item.selection_select_all();
+                        }
+                    } else {
+                        item.selection_clear();
+                    }
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -754,6 +1331,7 @@ impl Widget for ChapterList {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
+        self.track_selection(cx, event);
     }
 }
 
@@ -766,7 +1344,10 @@ struct TocList {
 impl Widget for TocList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let guard = CURRENT_BOOK.read().unwrap();
-        let titles: &[String] = guard.as_ref().map(|b| b.chapter_titles.as_slice()).unwrap_or(&[]);
+        let titles: &[String] = guard
+            .as_ref()
+            .map(|b| b.chapter_titles.as_slice())
+            .unwrap_or(&[]);
         let current = CURRENT_CHAPTER.load(std::sync::atomic::Ordering::Relaxed);
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
@@ -788,6 +1369,54 @@ impl Widget for TocList {
                         script_apply_eval!(cx, item_mut, {
                             draw_bg.color: #x232323
                         });
+                    }
+                    item.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
+struct NoteList {
+    #[deref]
+    view: View,
+}
+
+fn preview_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}…", preview)
+    } else {
+        preview
+    }
+}
+
+impl Widget for NoteList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let notes = NOTES.read().unwrap();
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, notes.len().max(1));
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let item = list.item(cx, item_id, id!(NoteCard));
+                    if let Some(note) = notes.get(item_id) {
+                        item.label(cx, ids!(note_title)).set_text(cx, &note.title);
+                        item.label(cx, ids!(note_preview))
+                            .set_text(cx, &preview_text(&note.content, 120));
+                        item.widget(cx, ids!(note_actions)).set_visible(cx, true);
+                    } else {
+                        item.label(cx, ids!(note_title)).set_text(cx, "还没有笔记");
+                        item.label(cx, ids!(note_preview))
+                            .set_text(cx, "选中文本，点击「添加笔记」创建第一条。");
+                        item.widget(cx, ids!(note_actions)).set_visible(cx, false);
                     }
                     item.draw_all_unscoped(cx);
                 }
@@ -889,6 +1518,10 @@ pub struct App {
     on_reader_page: bool,
     #[rust]
     toc_open: bool,
+    #[rust]
+    note_open: bool,
+    #[rust]
+    note_quote_text: String,
     /// 释义卡片当前展示的 (word, lemma, gloss)。
     #[rust]
     card: Option<(String, String, String)>,
@@ -903,9 +1536,18 @@ impl App {
             if idx >= book.chapters.len() {
                 return;
             }
-            let chunks = readwise_core::books::epub_meta::split_blocks(&book.chapters[idx]);
-            (book.id.clone(), book.title.clone(), book.chapters.len(), chunks)
+            let Some(chunks) = build_chapter_chunks(book, idx) else {
+                return;
+            };
+            (
+                book.id.clone(),
+                book.title.clone(),
+                book.chapters.len(),
+                chunks,
+            )
         };
+        self.clear_reader_selection(cx);
+        self.close_note_composer(cx);
         self.chapter_idx = idx;
         CURRENT_CHAPTER.store(idx, std::sync::atomic::Ordering::Relaxed);
         *PARAGRAPHS.write().unwrap() = chunks;
@@ -1049,14 +1691,22 @@ impl App {
         let gloss = *GLOSS_COLOR.read().unwrap();
         let cells = [ids!(gc0), ids!(gc1), ids!(gc2), ids!(gc3)];
         for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if GLOSS_PRESETS[i].1 == gloss { color_slot[i] } else { 0 };
+            let slot = if GLOSS_PRESETS[i].1 == gloss {
+                color_slot[i]
+            } else {
+                0
+            };
             self.paint_swatch(cx, cell, slot);
         }
 
         let gbg = *GLOSS_BG.read().unwrap();
         let cells = [ids!(gb0), ids!(gb1), ids!(gb2), ids!(gb3)];
         for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if BG_PRESETS[i].1 == gbg { bg_slot[i] } else { 0 };
+            let slot = if BG_PRESETS[i].1 == gbg {
+                bg_slot[i]
+            } else {
+                0
+            };
             self.paint_swatch(cx, cell, slot);
         }
 
@@ -1064,14 +1714,22 @@ impl App {
         let cells = [ids!(wc0), ids!(wc1), ids!(wc2), ids!(wc3)];
         let wc_slot = [5usize, 1, 2, 3];
         for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if WORD_COLOR_PRESETS[i].1 == wcol { wc_slot[i] } else { 0 };
+            let slot = if WORD_COLOR_PRESETS[i].1 == wcol {
+                wc_slot[i]
+            } else {
+                0
+            };
             self.paint_swatch(cx, cell, slot);
         }
 
         let wbg = *WORD_BG.read().unwrap();
         let cells = [ids!(wb0), ids!(wb1), ids!(wb2), ids!(wb3)];
         for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if BG_PRESETS[i].1 == wbg { bg_slot[i] } else { 0 };
+            let slot = if BG_PRESETS[i].1 == wbg {
+                bg_slot[i]
+            } else {
+                0
+            };
             self.paint_swatch(cx, cell, slot);
         }
 
@@ -1082,6 +1740,86 @@ impl App {
             let slot = if i == sel { sel_slot[i] } else { 0 };
             self.paint_swatch(cx, cell, slot);
         }
+
+        let hl = *crate::mark_span::HL_SLOT.read().unwrap();
+        let cells = [ids!(hc0), ids!(hc1), ids!(hc2), ids!(hc3)];
+        let hl_slot = [9usize, 1, 2, 3];
+        for (i, cell) in cells.into_iter().enumerate() {
+            let slot = if i == hl { hl_slot[i] } else { 0 };
+            self.paint_swatch(cx, cell, slot);
+        }
+    }
+
+    /// 用当前章内容重建 PortalList 块（保滚动位置：块数不变时 first_id 不动）。
+    fn refresh_current_chapter(&mut self, cx: &mut Cx) {
+        let chunks = {
+            let guard = CURRENT_BOOK.read().unwrap();
+            guard
+                .as_ref()
+                .and_then(|b| build_chapter_chunks(b, self.chapter_idx))
+        };
+        if let Some(chunks) = chunks {
+            *PARAGRAPHS.write().unwrap() = chunks;
+        }
+        self.ui.redraw(cx);
+    }
+
+    fn clear_reader_selection(&mut self, cx: &mut Cx) {
+        *SEL_RANGE.write().unwrap() = None;
+        SELECTED_TEXT.write().unwrap().clear();
+        self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
+        let list = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list));
+        if let Some(mut inner) = list.borrow_mut() {
+            inner.clear_selection(cx);
+        };
+    }
+
+    fn open_note_composer(&mut self, cx: &mut Cx) {
+        let quote = SELECTED_TEXT.read().unwrap().trim().to_string();
+        if quote.is_empty() {
+            return;
+        }
+        self.note_quote_text = quote;
+        self.note_open = true;
+        self.ui.widget(cx, ids!(note_panel)).set_visible(cx, true);
+        self.ui
+            .widget(cx, ids!(note_composer))
+            .set_visible(cx, true);
+        self.ui
+            .label(cx, ids!(note_quote))
+            .set_text(cx, &self.note_quote_text);
+        self.ui.text_input(cx, ids!(note_extra)).set_text(cx, "");
+        self.ui
+            .label(cx, ids!(note_hint))
+            .set_text(cx, "补充内容可留空；保存后引用会一并进入笔记。");
+        self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
+        self.ui.redraw(cx);
+    }
+
+    fn close_note_composer(&mut self, cx: &mut Cx) {
+        self.note_quote_text.clear();
+        self.ui
+            .widget(cx, ids!(note_composer))
+            .set_visible(cx, false);
+        self.ui.text_input(cx, ids!(note_extra)).set_text(cx, "");
+        self.ui.redraw(cx);
+    }
+
+    fn save_note_from_composer(&mut self, cx: &mut Cx, extra: String) {
+        let Some(item) = CURRENT_ITEM.read().unwrap().clone() else {
+            self.ui
+                .label(cx, ids!(note_hint))
+                .set_text(cx, "请先从书库打开一本书");
+            return;
+        };
+        if self.note_quote_text.trim().is_empty() && extra.trim().is_empty() {
+            return;
+        }
+        self.ui.label(cx, ids!(note_hint)).set_text(cx, "保存中…");
+        spawn_create_note(item, self.note_quote_text.clone(), extra);
     }
 
     /// 注音相关配置行的显隐（跟随总开关）。
@@ -1117,16 +1855,7 @@ impl App {
                     }
                 }
             }
-            let chunks = {
-                let guard = CURRENT_BOOK.read().unwrap();
-                guard
-                    .as_ref()
-                    .and_then(|b| b.chapters.get(self.chapter_idx))
-                    .map(|ch| readwise_core::books::epub_meta::split_blocks(ch))
-            };
-            if let Some(chunks) = chunks {
-                *PARAGRAPHS.write().unwrap() = chunks;
-            }
+            self.refresh_current_chapter(cx);
         }
         self.ui.redraw(cx);
     }
@@ -1167,6 +1896,13 @@ impl App {
         for (i, cell) in sc.into_iter().enumerate() {
             if self.ui.button(cx, cell).clicked(actions) {
                 *SELECTION_SLOT.write().unwrap() = i;
+                changed = true;
+            }
+        }
+        let hc = [ids!(hc0.b), ids!(hc1.b), ids!(hc2.b), ids!(hc3.b)];
+        for (i, cell) in hc.into_iter().enumerate() {
+            if self.ui.button(cx, cell).clicked(actions) {
+                *crate::mark_span::HL_SLOT.write().unwrap() = i;
                 changed = true;
             }
         }
@@ -1260,9 +1996,11 @@ impl MatchEvent for App {
                         self.ui.label(cx, ids!(vocab_list)).set_text(cx, &list);
                         self.refresh_swatches(cx);
                         let gloss_on = *GLOSS_ENABLED.read().unwrap();
-                        self.ui
-                            .check_box(cx, ids!(gloss_enable))
-                            .set_active(cx, gloss_on, Animate::No);
+                        self.ui.check_box(cx, ids!(gloss_enable)).set_active(
+                            cx,
+                            gloss_on,
+                            Animate::No,
+                        );
                         self.set_gloss_rows_visible(cx, gloss_on);
                         spawn_load_shelf();
                     }
@@ -1276,31 +2014,109 @@ impl MatchEvent for App {
             if let Some(card) = action.downcast_ref::<CardAction>() {
                 match card {
                     CardAction::VocabAdded(added) => {
-                        let hint = if *added { "已加入生词本 ✓" } else { "生词本里已有这个词" };
+                        let hint = if *added {
+                            "已加入生词本 ✓"
+                        } else {
+                            "生词本里已有这个词"
+                        };
                         self.ui.label(cx, ids!(card_hint)).set_text(cx, hint);
+                        self.ui.label(cx, ids!(sel_hint)).set_text(cx, hint);
                     }
                     CardAction::MarkedKnown => {
                         self.card = None;
                         self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
-                        // 只刷新当前章内容（块数不变，滚动位置保持）
-                        let chunks = {
-                            let guard = CURRENT_BOOK.read().unwrap();
-                            guard.as_ref().and_then(|b| b.chapters.get(self.chapter_idx)).map(
-                                |ch| readwise_core::books::epub_meta::split_blocks(ch),
-                            )
-                        };
-                        if let Some(chunks) = chunks {
-                            *PARAGRAPHS.write().unwrap() = chunks;
+                        self.refresh_current_chapter(cx);
+                    }
+                }
+                continue;
+            }
+            if let Some(sel) = action.downcast_ref::<SelAction>() {
+                let show = matches!(sel, SelAction::Show);
+                self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, show);
+                if show {
+                    let text = SELECTED_TEXT.read().unwrap();
+                    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let preview: String = compact.chars().take(72).collect();
+                    let suffix = if compact.chars().count() > 72 {
+                        "…"
+                    } else {
+                        ""
+                    };
+                    self.ui
+                        .label(cx, ids!(sel_hint))
+                        .set_text(cx, &format!("已选择：{}{}", preview, suffix));
+                }
+                self.ui.redraw(cx);
+                continue;
+            }
+            if let Some(HlAction::Saved(hl, chapter)) = action.downcast_ref::<HlAction>() {
+                if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+                    book.highlights
+                        .entry(*chapter)
+                        .or_default()
+                        .push(hl.clone());
+                }
+                self.clear_reader_selection(cx);
+                self.refresh_current_chapter(cx);
+                continue;
+            }
+            if let Some(note) = action.downcast_ref::<NoteAction>() {
+                match note {
+                    NoteAction::Refreshed {
+                        book_id,
+                        notes,
+                        message,
+                        finish_composer,
+                    } => {
+                        let is_current = CURRENT_BOOK
+                            .read()
+                            .unwrap()
+                            .as_ref()
+                            .map(|book| book.id.as_str() == book_id.as_str())
+                            .unwrap_or(false);
+                        if !is_current {
+                            continue;
+                        }
+                        let count = notes.len();
+                        *NOTES.write().unwrap() = notes.clone();
+                        let text = message
+                            .clone()
+                            .unwrap_or_else(|| format!("共 {} 条笔记", count));
+                        self.ui.label(cx, ids!(note_hint)).set_text(cx, &text);
+                        if *finish_composer {
+                            self.close_note_composer(cx);
+                            self.clear_reader_selection(cx);
                         }
                         self.ui.redraw(cx);
+                    }
+                    NoteAction::Error(e) => {
+                        self.ui
+                            .label(cx, ids!(note_hint))
+                            .set_text(cx, &format!("笔记操作失败：{}", e));
                     }
                 }
                 continue;
             }
             if let Some(reader) = action.downcast_ref::<ReaderAction>() {
                 match reader {
-                    ReaderAction::Opened { resume_chapter } => {
+                    ReaderAction::Opened {
+                        resume_chapter,
+                        gloss_count,
+                    } => {
                         self.set_chapter(cx, *resume_chapter);
+                        if *GLOSS_ENABLED.read().unwrap() && *gloss_count == 0 {
+                            self.ui
+                                .label(cx, ids!(status))
+                                .set_text(cx, "注音未显示：释义库为空（需生成或导入词义数据）");
+                        }
+                        if let Some(book_id) = CURRENT_BOOK
+                            .read()
+                            .unwrap()
+                            .as_ref()
+                            .map(|book| book.id.clone())
+                        {
+                            spawn_load_notes(book_id);
+                        }
                     }
                     ReaderAction::OpenError(e) => {
                         self.ui
@@ -1349,7 +2165,9 @@ impl MatchEvent for App {
                 }
             }
             if let RubyWordAction::Clicked { word, gloss } = action.cast() {
-                let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']).to_string();
+                let word = word
+                    .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+                    .to_string();
                 let lemma = readwise_core::vocab::lemma::lemmatize(&word);
                 self.ui.label(cx, ids!(card_word)).set_text(cx, &word);
                 self.ui.label(cx, ids!(card_gloss)).set_text(cx, &gloss);
@@ -1415,6 +2233,81 @@ impl MatchEvent for App {
         if let Some(on) = self.ui.check_box(cx, ids!(gloss_enable)).changed(actions) {
             self.toggle_gloss(cx, on);
         }
+        if self.ui.button(cx, ids!(hl_btn)).clicked(actions) {
+            let range = *SEL_RANGE.read().unwrap();
+            let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
+            if let (Some(range), Some(book_id)) = (range, book_id) {
+                spawn_add_highlight(book_id, self.chapter_idx, range);
+            }
+        }
+        if self.ui.button(cx, ids!(note_from_sel_btn)).clicked(actions) {
+            self.open_note_composer(cx);
+        }
+        if self.ui.button(cx, ids!(copy_sel_btn)).clicked(actions) {
+            let text = SELECTED_TEXT.read().unwrap().trim().to_string();
+            if !text.is_empty() {
+                cx.copy_to_clipboard(&text);
+                self.ui
+                    .label(cx, ids!(sel_hint))
+                    .set_text(cx, "已复制到剪贴板 ✓");
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(vocab_from_sel_btn))
+            .clicked(actions)
+        {
+            let selected = SELECTED_TEXT.read().unwrap().clone();
+            if let Some(word) = selected_single_word(&selected) {
+                let lemma = readwise_core::vocab::lemma::lemmatize(&word);
+                let book_id = CURRENT_ITEM.read().unwrap().as_ref().map(|i| i.id.clone());
+                self.ui.label(cx, ids!(sel_hint)).set_text(cx, "加入中…");
+                spawn_add_vocab(lemma, word, String::new(), book_id);
+            } else {
+                self.ui
+                    .label(cx, ids!(sel_hint))
+                    .set_text(cx, "加入生词仅支持选择一个英文单词");
+            }
+        }
+        if self.ui.button(cx, ids!(translate_sel_btn)).clicked(actions) {
+            let text = SELECTED_TEXT.read().unwrap().trim().to_string();
+            if !text.is_empty() {
+                let url = format!(
+                    "https://translate.google.com/?sl=en&tl=zh-CN&text={}&op=translate",
+                    percent_encode_query(&text)
+                );
+                cx.open_url(&url, OpenUrlInPlace::No);
+                self.ui
+                    .label(cx, ids!(sel_hint))
+                    .set_text(cx, "已在浏览器中打开翻译");
+            }
+        }
+        if self.ui.button(cx, ids!(speak_sel_btn)).clicked(actions) {
+            let text = SELECTED_TEXT.read().unwrap().trim().to_string();
+            if !text.is_empty() {
+                speak_text(text);
+                self.ui.label(cx, ids!(sel_hint)).set_text(cx, "正在发音…");
+            }
+        }
+        if self.ui.button(cx, ids!(sel_close_btn)).clicked(actions) {
+            self.clear_reader_selection(cx);
+            self.ui.redraw(cx);
+        }
+        if self.ui.button(cx, ids!(note_save_btn)).clicked(actions) {
+            let extra = self.ui.text_input(cx, ids!(note_extra)).text();
+            self.save_note_from_composer(cx, extra);
+        }
+        if let Some((extra, _)) = self.ui.text_input(cx, ids!(note_extra)).returned(actions) {
+            self.save_note_from_composer(cx, extra);
+        }
+        if self.ui.button(cx, ids!(note_cancel_btn)).clicked(actions) {
+            self.close_note_composer(cx);
+        }
+        if self.ui.button(cx, ids!(note_close_btn)).clicked(actions) {
+            self.note_open = false;
+            self.ui.widget(cx, ids!(note_panel)).set_visible(cx, false);
+            self.close_note_composer(cx);
+        }
         if self.ui.button(cx, ids!(close_card_btn)).clicked(actions) {
             self.card = None;
             self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
@@ -1440,6 +2333,13 @@ impl MatchEvent for App {
                 .set_visible(cx, self.toc_open);
             self.ui.redraw(cx);
         }
+        if self.ui.button(cx, ids!(notes_btn)).clicked(actions) {
+            self.note_open = !self.note_open;
+            self.ui
+                .widget(cx, ids!(note_panel))
+                .set_visible(cx, self.note_open);
+            self.ui.redraw(cx);
+        }
         let toc_list = self
             .ui
             .widget(cx, ids!(toc_list))
@@ -1451,6 +2351,20 @@ impl MatchEvent for App {
                     self.toc_open = false;
                     self.ui.widget(cx, ids!(toc_panel)).set_visible(cx, false);
                     self.ui.redraw(cx);
+                }
+            }
+        }
+        let note_list = self
+            .ui
+            .widget(cx, ids!(note_list))
+            .portal_list(cx, ids!(list));
+        for (item_id, item) in note_list.items_with_actions(actions) {
+            if item.button(cx, ids!(note_delete_btn)).clicked(actions) {
+                let note_id = NOTES.read().unwrap().get(item_id).map(|n| n.id.clone());
+                let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
+                if let (Some(book_id), Some(note_id)) = (book_id, note_id) {
+                    self.ui.label(cx, ids!(note_hint)).set_text(cx, "删除中…");
+                    spawn_delete_note(book_id, note_id);
                 }
             }
         }
@@ -1480,6 +2394,7 @@ impl AppMain for App {
         makepad_widgets::widgets_mod(vm);
         crate::ruby_word::script_mod(vm);
         crate::chapter_image::script_mod(vm);
+        crate::mark_span::script_mod(vm);
         self::script_mod(vm)
     }
 

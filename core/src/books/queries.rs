@@ -20,7 +20,11 @@ pub async fn import_book(
     data_dir: &Path,
     src: &Path,
 ) -> Result<SimpleBook, String> {
-    if src.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) != Some("epub".to_string())
+    if src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        != Some("epub".to_string())
     {
         return Err(format!("暂只支持 EPUB：{}", src.display()));
     }
@@ -44,7 +48,10 @@ pub async fn import_book(
     };
 
     let now = chrono::Utc::now().timestamp_millis();
-    let mut tx = pool.begin().await.map_err(|e| format!("开启事务失败: {}", e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("开启事务失败: {}", e))?;
 
     sqlx::query(
         r#"INSERT INTO books (id, title, author, format, file_path, cover_path, file_size, language, tags, created_at, updated_at)
@@ -75,7 +82,9 @@ pub async fn import_book(
     .await
     .map_err(|e| format!("创建书籍状态失败: {}", e))?;
 
-    tx.commit().await.map_err(|e| format!("提交事务失败: {}", e))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("提交事务失败: {}", e))?;
 
     Ok(SimpleBook {
         id,
@@ -149,6 +158,83 @@ pub async fn delete_book(pool: &SqlitePool, data_dir: &Path, id: &str) -> Result
     Ok(())
 }
 
+/// 高亮区间（块下标 + 块内字符下标，字符按 TextFlow 实际绘制文本计）。
+#[derive(Debug, Clone)]
+pub struct Highlight {
+    pub id: String,
+    pub start_block: usize,
+    pub start_char: usize,
+    pub end_block: usize,
+    pub end_char: usize,
+    pub color: String,
+}
+
+const PACK: i64 = 1_000_000;
+
+/// 新增一条高亮（book_notes: type=annotation, style=highlight）。
+pub async fn add_highlight(
+    pool: &SqlitePool,
+    book_id: &str,
+    chapter: usize,
+    range: (usize, usize, usize, usize),
+    color: &str,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+    let (sb, sc, eb, ec) = range;
+    sqlx::query(
+        r#"INSERT INTO book_notes (id, book_id, type, cfi, text, style, color, section_id, norm_start, norm_end, note, created_at, updated_at)
+           VALUES (?, ?, 'annotation', '', NULL, 'highlight', ?, ?, ?, ?, '', ?, ?)"#,
+    )
+    .bind(&id)
+    .bind(book_id)
+    .bind(color)
+    .bind(chapter.to_string())
+    .bind(sb as i64 * PACK + sc as i64)
+    .bind(eb as i64 * PACK + ec as i64)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("保存高亮失败: {}", e))?;
+    Ok(id)
+}
+
+/// 全书高亮，按章节分组。
+pub async fn get_highlights_by_chapter(
+    pool: &SqlitePool,
+    book_id: &str,
+) -> Result<std::collections::HashMap<usize, Vec<Highlight>>, String> {
+    let rows = sqlx::query(
+        "SELECT id, section_id, norm_start, norm_end, color FROM book_notes
+         WHERE book_id = ? AND type = 'annotation' AND style = 'highlight'",
+    )
+    .bind(book_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("读取高亮失败: {}", e))?;
+
+    let mut map: std::collections::HashMap<usize, Vec<Highlight>> =
+        std::collections::HashMap::new();
+    for row in rows.iter() {
+        let section: String = row.get("section_id");
+        let Ok(chapter) = section.parse::<usize>() else {
+            continue;
+        };
+        let ns: i64 = row.get::<Option<i64>, _>("norm_start").unwrap_or(0);
+        let ne: i64 = row.get::<Option<i64>, _>("norm_end").unwrap_or(0);
+        map.entry(chapter).or_default().push(Highlight {
+            id: row.get("id"),
+            start_block: (ns / PACK) as usize,
+            start_char: (ns % PACK) as usize,
+            end_block: (ne / PACK) as usize,
+            end_char: (ne % PACK) as usize,
+            color: row.get::<Option<String>, _>("color").unwrap_or_default(),
+        });
+    }
+    Ok(map)
+}
+
 /// 读取一本书的阅读状态（恢复进度用）。
 pub async fn get_status(pool: &SqlitePool, id: &str) -> Result<Option<BookStatus>, String> {
     let row = sqlx::query("SELECT * FROM book_status WHERE book_id = ?")
@@ -220,7 +306,10 @@ pub async fn scan_import_dir(
     let entries = fs::read_dir(import_dir).map_err(|e| format!("读取导入目录失败: {}", e))?;
     for entry in entries.flatten() {
         let path: PathBuf = entry.path();
-        if path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase())
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
             != Some("epub".to_string())
         {
             continue;

@@ -101,6 +101,8 @@ pub struct RubyWord {
     word: String,
     #[rust]
     gloss: String,
+    #[rust]
+    highlight_slot: Option<usize>,
 }
 
 impl ScriptHook for RubyWord {
@@ -141,6 +143,16 @@ impl WidgetNode for RubyWord {
 
 impl Widget for RubyWord {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        let (v, highlight) = match v.rsplit_once(readwise_core::vocab::annotate::MARK_SEP) {
+            Some((text, color)) => (text, Some(color)),
+            None => (v, None),
+        };
+        self.highlight_slot = highlight.map(|color| match color {
+            "teal" | "green" => 1,
+            "blue" => 2,
+            "orange" | "red" | "violet" => 3,
+            _ => 0,
+        });
         // 正式管线：内文 = 词 + RUBY_SEP + 释义（随文本每帧刷新，widget 复用不串位）；
         // 无分隔符时保留创建时从 t 属性读的释义（M0 demo 兼容）。
         match v.split_once(readwise_core::vocab::annotate::RUBY_SEP) {
@@ -162,9 +174,21 @@ impl Widget for RubyWord {
             return DrawStep::done();
         };
 
+        if let Some(slot) = self.highlight_slot {
+            self.draw_fill.color = crate::mark_span::hl_color(slot);
+            for area in self.drawn_areas.clone() {
+                self.draw_fill.draw_abs(cx, area.rect(cx));
+            }
+        }
+
         // 注音词背景：用上一帧的区域先铺底（首帧无区域，下一帧补上）
         if let Some((r, g, b, a)) = *WORD_BG.read().unwrap() {
-            self.draw_fill.color = Vec4f { x: r, y: g, z: b, w: a };
+            self.draw_fill.color = Vec4f {
+                x: r,
+                y: g,
+                z: b,
+                w: a,
+            };
             for area in self.drawn_areas.clone() {
                 self.draw_fill.draw_abs(cx, area.rect(cx));
             }
@@ -172,7 +196,12 @@ impl Widget for RubyWord {
 
         let word_color = *WORD_COLOR.read().unwrap();
         if let Some((r, g, b)) = word_color {
-            tf.font_colors.push(Vec4f { x: r, y: g, z: b, w: 1.0 });
+            tf.font_colors.push(Vec4f {
+                x: r,
+                y: g,
+                z: b,
+                w: 1.0,
+            });
         }
         tf.areas_tracker.push_tracker();
         tf.draw_text(cx, &self.word);
@@ -205,11 +234,22 @@ impl Widget for RubyWord {
                 // 设置页可配置的注音字号/颜色
                 self.draw_gloss.text_style.font_size = *GLOSS_FONT_SIZE.read().unwrap();
                 let (r, g, b) = *GLOSS_COLOR.read().unwrap();
-                self.draw_gloss.color = Vec4f { x: r, y: g, z: b, w: 1.0 };
+                self.draw_gloss.color = Vec4f {
+                    x: r,
+                    y: g,
+                    z: b,
+                    w: 1.0,
+                };
                 let rect = first.rect(cx);
-                let laidout =
-                    self.draw_gloss
-                        .layout(cx, 0.0, 0.0, None, false, Align::default(), &self.gloss);
+                let laidout = self.draw_gloss.layout(
+                    cx,
+                    0.0,
+                    0.0,
+                    None,
+                    false,
+                    Align::default(),
+                    &self.gloss,
+                );
                 let row = laidout.rows.first();
                 let gloss_w = row
                     .map(|r| (r.width_in_lpxs * self.draw_gloss.font_scale) as f64)
@@ -224,7 +264,12 @@ impl Widget for RubyWord {
                 let x = rect.pos.x + (rect.size.x - gloss_w) * 0.5;
                 let y = rect.pos.y - gloss_box_h - self.gloss_gap as f64;
                 if let Some((r, g, b, a)) = *GLOSS_BG.read().unwrap() {
-                    self.draw_fill.color = Vec4f { x: r, y: g, z: b, w: a };
+                    self.draw_fill.color = Vec4f {
+                        x: r,
+                        y: g,
+                        z: b,
+                        w: a,
+                    };
                     self.draw_fill.draw_abs(
                         cx,
                         Rect {
@@ -234,9 +279,19 @@ impl Widget for RubyWord {
                     );
                 }
                 if *GLOSS_DEBUG {
-                    self.draw_debug.color = Vec4f { x: 0.2, y: 0.8, z: 0.3, w: 0.25 };
+                    self.draw_debug.color = Vec4f {
+                        x: 0.2,
+                        y: 0.8,
+                        z: 0.3,
+                        w: 0.25,
+                    };
                     self.draw_debug.draw_abs(cx, rect);
-                    self.draw_debug.color = Vec4f { x: 0.9, y: 0.15, z: 0.15, w: 0.35 };
+                    self.draw_debug.color = Vec4f {
+                        x: 0.9,
+                        y: 0.15,
+                        z: 0.15,
+                        w: 0.35,
+                    };
                     self.draw_debug.draw_abs(
                         cx,
                         Rect {

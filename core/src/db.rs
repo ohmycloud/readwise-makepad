@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::books::{self, models::*};
+use crate::notes::{self, models::Note};
 use crate::vocab::{self, models::*};
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -42,34 +43,102 @@ impl Db {
     // —— 书库 ——
 
     pub fn import_book(&self, src: &std::path::Path) -> Result<SimpleBook, String> {
-        self.rt.block_on(books::import_book(&self.pool, &self.data_dir, src))
+        self.rt
+            .block_on(books::import_book(&self.pool, &self.data_dir, src))
     }
 
     pub fn get_shelf_items(&self) -> Result<Vec<BookShelfItem>, String> {
-        self.rt.block_on(books::get_shelf_items(&self.pool, &self.data_dir))
+        self.rt
+            .block_on(books::get_shelf_items(&self.pool, &self.data_dir))
     }
 
     pub fn delete_book(&self, id: &str) -> Result<(), String> {
-        self.rt.block_on(books::delete_book(&self.pool, &self.data_dir, id))
+        self.rt
+            .block_on(books::delete_book(&self.pool, &self.data_dir, id))
     }
 
-    pub fn update_progress(&self, id: &str, current: i64, total: i64, location: &str) -> Result<(), String> {
-        self.rt.block_on(books::update_progress(&self.pool, id, current, total, location))
+    pub fn update_progress(
+        &self,
+        id: &str,
+        current: i64,
+        total: i64,
+        location: &str,
+    ) -> Result<(), String> {
+        self.rt.block_on(books::update_progress(
+            &self.pool, id, current, total, location,
+        ))
     }
 
     pub fn get_status(&self, id: &str) -> Result<Option<BookStatus>, String> {
         self.rt.block_on(books::get_status(&self.pool, id))
     }
 
+    pub fn add_highlight(
+        &self,
+        book_id: &str,
+        chapter: usize,
+        range: (usize, usize, usize, usize),
+        color: &str,
+    ) -> Result<String, String> {
+        self.rt.block_on(books::add_highlight(
+            &self.pool, book_id, chapter, range, color,
+        ))
+    }
+
+    pub fn get_highlights_by_chapter(
+        &self,
+        book_id: &str,
+    ) -> Result<std::collections::HashMap<usize, Vec<books::Highlight>>, String> {
+        self.rt
+            .block_on(books::get_highlights_by_chapter(&self.pool, book_id))
+    }
+
+    // —— 笔记 ——
+
+    pub fn create_note(
+        &self,
+        book_id: &str,
+        book_title: &str,
+        book_author: &str,
+        content: &str,
+    ) -> Result<Note, String> {
+        self.rt.block_on(notes::create_note(
+            &self.pool,
+            book_id,
+            book_title,
+            book_author,
+            content,
+        ))
+    }
+
+    pub fn update_note(&self, id: &str, content: &str) -> Result<Note, String> {
+        self.rt
+            .block_on(notes::update_note(&self.pool, id, content))
+    }
+
+    pub fn get_notes_by_book(&self, book_id: &str) -> Result<Vec<Note>, String> {
+        self.rt
+            .block_on(notes::get_notes_by_book(&self.pool, book_id))
+    }
+
+    pub fn delete_note(&self, id: &str) -> Result<(), String> {
+        self.rt.block_on(notes::delete_note(&self.pool, id))
+    }
+
     /// 扫描导入目录，返回新导入数量。
     pub fn scan_import_dir(&self) -> Result<usize, String> {
         let import_dir = self.data_dir.join("import");
         std::fs::create_dir_all(&import_dir).ok();
-        self.rt.block_on(books::scan_import_dir(&self.pool, &self.data_dir, &import_dir))
+        self.rt.block_on(books::scan_import_dir(
+            &self.pool,
+            &self.data_dir,
+            &import_dir,
+        ))
     }
 
     pub fn save_book_words(&self, book_id: &str, words: &[BookWord]) -> Result<(), String> {
-        self.rt.block_on(vocab::save_book_words(&self.pool, book_id, words))
+        self.rt
+            .block_on(vocab::save_book_words(&self.pool, book_id, words))
     }
 
     pub fn get_book_words(&self, book_id: &str) -> Result<Vec<BookWord>, String> {
@@ -77,23 +146,28 @@ impl Db {
     }
 
     pub fn save_book_glosses(&self, book_id: &str, glosses: &[GlossInput]) -> Result<(), String> {
-        self.rt.block_on(vocab::save_book_glosses(&self.pool, book_id, glosses))
+        self.rt
+            .block_on(vocab::save_book_glosses(&self.pool, book_id, glosses))
     }
 
     pub fn get_book_glosses(&self, book_id: &str) -> Result<Vec<WordGloss>, String> {
-        self.rt.block_on(vocab::get_book_glosses(&self.pool, book_id))
+        self.rt
+            .block_on(vocab::get_book_glosses(&self.pool, book_id))
     }
 
     pub fn get_word_glosses(&self, lemmas: &[String]) -> Result<Vec<WordGloss>, String> {
-        self.rt.block_on(vocab::get_word_glosses(&self.pool, lemmas))
+        self.rt
+            .block_on(vocab::get_word_glosses(&self.pool, lemmas))
     }
 
     pub fn add_known_word(&self, lemma: &str, source: &str) -> Result<(), String> {
-        self.rt.block_on(vocab::add_known_word(&self.pool, lemma, source))
+        self.rt
+            .block_on(vocab::add_known_word(&self.pool, lemma, source))
     }
 
     pub fn remove_known_word(&self, lemma: &str) -> Result<(), String> {
-        self.rt.block_on(vocab::remove_known_word(&self.pool, lemma))
+        self.rt
+            .block_on(vocab::remove_known_word(&self.pool, lemma))
     }
 
     pub fn get_known_words(&self) -> Result<Vec<String>, String> {
@@ -109,23 +183,31 @@ impl Db {
     }
 
     pub fn vocab_book_remove(&self, lemma: &str) -> Result<(), String> {
-        self.rt.block_on(vocab::vocab_book_remove(&self.pool, lemma))
+        self.rt
+            .block_on(vocab::vocab_book_remove(&self.pool, lemma))
     }
 
     pub fn vocab_book_set_status(&self, lemma: &str, status: &str) -> Result<(), String> {
-        self.rt.block_on(vocab::vocab_book_set_status(&self.pool, lemma, status))
+        self.rt
+            .block_on(vocab::vocab_book_set_status(&self.pool, lemma, status))
     }
 
     pub fn vocab_book_review(&self, lemma: &str) -> Result<(), String> {
-        self.rt.block_on(vocab::vocab_book_review(&self.pool, lemma))
+        self.rt
+            .block_on(vocab::vocab_book_review(&self.pool, lemma))
     }
 
     /// 注音上下文：全局释义 +（可选）本书语境释义覆盖，以及已认识词集合。
     pub fn gloss_context(
         &self,
         book_id: Option<&str>,
-    ) -> Result<(std::collections::HashMap<String, String>, std::collections::HashSet<String>), String>
-    {
+    ) -> Result<
+        (
+            std::collections::HashMap<String, String>,
+            std::collections::HashSet<String>,
+        ),
+        String,
+    > {
         self.rt.block_on(async {
             let rows = sqlx::query("SELECT lemma, gloss FROM word_glosses")
                 .fetch_all(&self.pool)
@@ -143,12 +225,13 @@ impl Db {
                     glosses.insert(g.lemma, g.gloss);
                 }
             }
-            let known: std::collections::HashSet<String> =
-                vocab::get_known_words(&self.pool).await?.into_iter().collect();
+            let known: std::collections::HashSet<String> = vocab::get_known_words(&self.pool)
+                .await?
+                .into_iter()
+                .collect();
             Ok((glosses, known))
         })
     }
-
 }
 
 /// 打开/创建数据库并执行 schema（自老项目 database.rs 迁移，去 tauri 化：
@@ -180,12 +263,56 @@ pub async fn initialize(data_dir: &Path) -> Result<SqlitePool, String> {
         .map_err(|e| format!("初始化 schema 失败: {}", e))?;
 
     ensure_book_note_columns(&pool).await?;
+    initialize_starter_glosses(&pool).await?;
 
     if is_new_db {
         initialize_default_skills(&pool).await?;
     }
 
     Ok(pool)
+}
+
+/// 新安装或释义缓存近乎为空时，补入离线基础词义。
+///
+/// 只包含现有词级表的 2-4 级词，避免一级常用词满屏注音；用户/书籍语境释义
+/// 仍通过 INSERT OR IGNORE 保持更高优先级。来源与许可见 data/ECDICT-LICENSE.md。
+async fn initialize_starter_glosses(pool: &SqlitePool) -> Result<(), String> {
+    use sqlx::Row;
+
+    let count: i64 = sqlx::query("SELECT COUNT(*) AS count FROM word_glosses")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("统计释义缓存失败: {}", e))?
+        .get("count");
+    if count >= 1000 {
+        return Ok(());
+    }
+
+    let glosses: std::collections::HashMap<String, String> =
+        serde_json::from_str(include_str!("./vocab/data/starter-glosses.json"))
+            .map_err(|e| format!("解析内置基础释义失败: {}", e))?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("开启基础释义事务失败: {}", e))?;
+    for (lemma, gloss) in &glosses {
+        sqlx::query(
+            "INSERT OR IGNORE INTO word_glosses (lemma, gloss, level, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(lemma)
+        .bind(gloss)
+        .bind(crate::vocab::lemma::word_level(lemma))
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("写入基础释义失败: {}", e))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("提交基础释义失败: {}", e))?;
+    log::info!("Initialized {} starter glosses", glosses.len());
+    Ok(())
 }
 
 async fn ensure_book_note_columns(pool: &SqlitePool) -> Result<(), String> {
@@ -208,8 +335,8 @@ async fn ensure_book_note_columns(pool: &SqlitePool) -> Result<(), String> {
 
 async fn initialize_default_skills(pool: &SqlitePool) -> Result<(), String> {
     let default_skills_json = include_str!("./default-skills.json");
-    let default_skills: Vec<DefaultSkill> =
-        serde_json::from_str(default_skills_json).map_err(|e| format!("解析默认 skills 失败: {}", e))?;
+    let default_skills: Vec<DefaultSkill> = serde_json::from_str(default_skills_json)
+        .map_err(|e| format!("解析默认 skills 失败: {}", e))?;
 
     log::info!("Initializing {} default skills...", default_skills.len());
 
