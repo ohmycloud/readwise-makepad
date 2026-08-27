@@ -48,6 +48,96 @@ struct ChatData {
 
 static CHAT_DATA: LazyLock<RwLock<ChatData>> = LazyLock::new(|| RwLock::new(ChatData::default()));
 
+/// AI 技能 / Prompt 模板（后台刷新，SkillList 与发送请求只读）。
+static SKILLS: LazyLock<RwLock<Vec<readwise_core::skills::models::Skill>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+#[derive(Debug)]
+enum SkillAction {
+    Loaded(Vec<readwise_core::skills::models::Skill>),
+    Saved(Vec<readwise_core::skills::models::Skill>),
+    Toggled(Vec<readwise_core::skills::models::Skill>),
+    Deleted {
+        skills: Vec<readwise_core::skills::models::Skill>,
+        id: String,
+    },
+    Error(String),
+}
+
+fn spawn_load_skills() {
+    std::thread::spawn(|| {
+        let Some(db) = DB.get() else { return };
+        match db.list_skills() {
+            Ok(skills) => Cx::post_action(SkillAction::Loaded(skills)),
+            Err(error) => Cx::post_action(SkillAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_save_skill(id: Option<String>, name: String, content: String, is_active: bool) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        let result = match id {
+            Some(id) => db.update_skill(&id, &name, &content, is_active).map(|_| ()),
+            None => db.create_skill(&name, &content, is_active).map(|_| ()),
+        };
+        if let Err(error) = result {
+            Cx::post_action(SkillAction::Error(error));
+            return;
+        }
+        match db.list_skills() {
+            Ok(skills) => Cx::post_action(SkillAction::Saved(skills)),
+            Err(error) => Cx::post_action(SkillAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_toggle_skill(id: String, is_active: bool) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(error) = db.set_skill_active(&id, is_active) {
+            Cx::post_action(SkillAction::Error(error));
+            return;
+        }
+        match db.list_skills() {
+            Ok(skills) => Cx::post_action(SkillAction::Toggled(skills)),
+            Err(error) => Cx::post_action(SkillAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_delete_skill(id: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(error) = db.delete_skill(&id) {
+            Cx::post_action(SkillAction::Error(error));
+            return;
+        }
+        match db.list_skills() {
+            Ok(skills) => Cx::post_action(SkillAction::Deleted { skills, id }),
+            Err(error) => Cx::post_action(SkillAction::Error(error)),
+        }
+    });
+}
+
+fn active_system_prompt() -> String {
+    let prompts = SKILLS
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|skill| skill.is_system && skill.is_active)
+        .map(|skill| skill.content.trim())
+        .filter(|content| !content.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if prompts.is_empty() {
+        "You are a concise reading assistant. Explain English text clearly, and answer in the user's language."
+            .to_string()
+    } else {
+        prompts
+    }
+}
+
 enum AiWireOutcome {
     NonStreamComplete(String),
     Failure(String),
@@ -1074,6 +1164,55 @@ script_mod! {
         }
     }
 
+    mod.widgets.SkillListBase = #(SkillList::register_widget(vm))
+    mod.widgets.SkillList = set_type_default() do mod.widgets.SkillListBase{
+        width: Fill height: Fill
+        list := PortalList{
+            width: Fill height: Fill
+            spacing: 8
+            padding: Inset{right: 8 bottom: 8}
+            scroll_bar: ScrollBar{}
+            SkillCard := RoundedView{
+                width: Fill height: Fit
+                flow: Down spacing: 7 padding: 10
+                new_batch: true
+                draw_bg.color: #x292929
+                draw_bg.border_radius: 8.0
+                skill_top := View{
+                    width: Fill height: Fit
+                    flow: Right spacing: 8
+                    align: Align{y: 0.5}
+                    skill_name := Label{
+                        width: Fill height: Fit
+                        text: ""
+                        draw_text.text_style.font_size: 11
+                    }
+                    skill_kind := Label{
+                        width: Fit height: Fit
+                        text: ""
+                        draw_text.color: #x7fb2a6
+                        draw_text.text_style.font_size: 8.5
+                    }
+                }
+                skill_preview := Label{
+                    width: Fill height: Fit
+                    text: ""
+                    draw_text.color: #xaaaaaa
+                    draw_text.text_style.font_size: 9
+                }
+                skill_actions := View{
+                    width: Fill height: Fit
+                    flow: Right spacing: 4
+                    align: Align{y: 0.5}
+                    skill_active := CheckBox{text: "启用"}
+                    skill_use := ButtonFlatter{text: "下次提问使用"}
+                    skill_edit := ButtonFlatter{text: "编辑"}
+                    skill_delete := ButtonFlatter{text: "删除"}
+                }
+            }
+        }
+    }
+
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
@@ -1136,6 +1275,7 @@ script_mod! {
                         nav_library := ButtonFlat{ width: Fill text: "书库" }
                         nav_reader := ButtonFlat{ width: Fill text: "阅读" }
                         nav_chat := ButtonFlat{ width: Fill text: "AI 对话" }
+                        nav_skills := ButtonFlat{ width: Fill text: "AI 技能" }
                         nav_vocab := ButtonFlat{ width: Fill text: "生词本" }
                         nav_settings := ButtonFlat{ width: Fill text: "设置" }
                         sidebar_fill := View{ width: Fill height: Fill }
@@ -1402,6 +1542,21 @@ script_mod! {
                                     draw_text.color: #x8f8f8f
                                     draw_text.text_style.font_size: 9
                                 }
+                                chat_skill_row := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8
+                                    align: Align{y: 0.5}
+                                    chat_skill_status := Label{
+                                        width: Fill height: Fit
+                                        text: "未选择技能模板"
+                                        draw_text.color: #x7fb2a6
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    chat_skill_clear := ButtonFlatter{
+                                        visible: false
+                                        text: "取消模板"
+                                    }
+                                }
                             }
                             chat_list := mod.widgets.ChatList{}
                             chat_composer := View{
@@ -1419,6 +1574,96 @@ script_mod! {
                                     width: 72 height: 42 text: "停止"
                                 }
                                 chat_clear := ButtonFlatter{width: 72 height: 42 text: "新对话"}
+                            }
+                        }
+
+                        page_skills := View{
+                            width: Fill height: Fill
+                            flow: Down
+                            skills_header := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 10
+                                padding: Inset{left: 24 right: 24 top: 20 bottom: 8}
+                                align: Align{y: 0.5}
+                                skills_heading := View{
+                                    width: Fill height: Fit
+                                    flow: Down spacing: 4
+                                    Label{
+                                        text: "AI 技能"
+                                        draw_text.text_style.font_size: 18
+                                    }
+                                    skills_status := Label{
+                                        width: Fill height: Fit
+                                        text: "正在读取技能…"
+                                        draw_text.color: #x8f8f8f
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                }
+                                skill_new := Button{text: "新建模板"}
+                            }
+                            skills_body := View{
+                                width: Fill height: Fill
+                                flow: Right spacing: 14
+                                padding: Inset{left: 24 right: 24 bottom: 20}
+                                skills_left := RoundedView{
+                                    width: 330 height: Fill
+                                    padding: 10
+                                    new_batch: true
+                                    draw_bg.color: #x232323
+                                    draw_bg.border_radius: 9.0
+                                    skill_list := mod.widgets.SkillList{}
+                                }
+                                skill_editor := RoundedView{
+                                    width: Fill height: Fill
+                                    flow: Down spacing: 9 padding: 14
+                                    new_batch: true
+                                    draw_bg.color: #x252525
+                                    draw_bg.border_radius: 9.0
+                                    skill_editor_title := Label{
+                                        width: Fill height: Fit
+                                        text: "新建技能"
+                                        draw_text.text_style.font_size: 14
+                                    }
+                                    Label{
+                                        text: "名称"
+                                        draw_text.color: #xaaaaaa
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    skill_name_input := TextInput{
+                                        width: Fill height: 40
+                                        empty_text: "例如：逐句精读"
+                                    }
+                                    skill_active_edit := CheckBox{
+                                        text: "启用这个技能"
+                                        active: true
+                                    }
+                                    Label{
+                                        text: "Prompt 模板（Markdown）"
+                                        draw_text.color: #xaaaaaa
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    skill_content_input := TextInput{
+                                        width: Fill height: Fill
+                                        flow: Flow.Right{wrap: true}
+                                        is_multiline: true
+                                        submit_on_enter: false
+                                        empty_text: "写下模型执行此任务时应遵循的目标、步骤和输出格式…"
+                                        scroll_bar: ScrollBar{}
+                                    }
+                                    skill_editor_hint := Label{
+                                        width: Fill height: Fit
+                                        text: "自定义技能可用于下一次 AI 提问；启用的系统技能会自动作为全局系统提示词。"
+                                        draw_text.color: #x8f8f8f
+                                        draw_text.text_style.font_size: 8.5
+                                    }
+                                    skill_editor_actions := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{x: 1.0 y: 0.5}
+                                        skill_cancel := ButtonFlat{text: "清空"}
+                                        skill_save := Button{text: "保存"}
+                                    }
+                                }
                             }
                         }
 
@@ -1977,6 +2222,61 @@ impl Widget for ChatList {
 }
 
 #[derive(Script, ScriptHook, Widget)]
+struct SkillList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for SkillList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let skills = SKILLS.read().unwrap();
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, skills.len().max(1));
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let item = list.item(cx, item_id, id!(SkillCard));
+                    if let Some(skill) = skills.get(item_id) {
+                        item.label(cx, ids!(skill_name)).set_text(cx, &skill.name);
+                        item.label(cx, ids!(skill_kind)).set_text(
+                            cx,
+                            if skill.is_system {
+                                "系统"
+                            } else {
+                                "自定义"
+                            },
+                        );
+                        item.label(cx, ids!(skill_preview))
+                            .set_text(cx, &preview_text(&skill.content, 100));
+                        item.check_box(cx, ids!(skill_active)).set_active(
+                            cx,
+                            skill.is_active,
+                            Animate::No,
+                        );
+                        item.widget(cx, ids!(skill_actions)).set_visible(cx, true);
+                        item.widget(cx, ids!(skill_use))
+                            .set_visible(cx, !skill.is_system && skill.is_active);
+                        item.widget(cx, ids!(skill_delete))
+                            .set_visible(cx, !skill.is_system);
+                    } else {
+                        item.label(cx, ids!(skill_name)).set_text(cx, "还没有技能");
+                        item.label(cx, ids!(skill_kind)).set_text(cx, "");
+                        item.label(cx, ids!(skill_preview))
+                            .set_text(cx, "点击「新建模板」创建第一个 Prompt 模板。");
+                        item.widget(cx, ids!(skill_actions)).set_visible(cx, false);
+                    }
+                    item.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
 struct BookShelf {
     #[deref]
     view: View,
@@ -2069,6 +2369,11 @@ pub struct App {
     #[rust]
     chat_thread_id: Option<String>,
     #[rust]
+    editing_skill_id: Option<String>,
+    /// 仅应用到下一条用户消息的自定义技能。
+    #[rust]
+    pending_skill_id: Option<String>,
+    #[rust]
     chapter_idx: usize,
     #[rust]
     on_reader_page: bool,
@@ -2094,9 +2399,109 @@ impl App {
             ids!(ai_endpoint),
             ids!(ai_model),
             ids!(ai_api_key),
+            ids!(skill_name_input),
+            ids!(skill_content_input),
         ]
         .into_iter()
         .any(|path| self.ui.text_input(cx, path).key_focus(cx))
+    }
+
+    fn clear_skill_editor(&mut self, cx: &mut Cx) {
+        self.editing_skill_id = None;
+        self.ui
+            .label(cx, ids!(skill_editor_title))
+            .set_text(cx, "新建技能");
+        self.ui
+            .text_input(cx, ids!(skill_name_input))
+            .set_text(cx, "");
+        self.ui
+            .text_input(cx, ids!(skill_name_input))
+            .set_is_read_only(cx, false);
+        self.ui
+            .text_input(cx, ids!(skill_content_input))
+            .set_text(cx, "");
+        self.ui
+            .check_box(cx, ids!(skill_active_edit))
+            .set_active(cx, true, Animate::No);
+        self.ui.label(cx, ids!(skill_editor_hint)).set_text(
+            cx,
+            "自定义技能可用于下一次 AI 提问；启用的系统技能会自动作为全局系统提示词。",
+        );
+    }
+
+    fn edit_skill(&mut self, cx: &mut Cx, skill: &readwise_core::skills::models::Skill) {
+        self.editing_skill_id = Some(skill.id.clone());
+        self.ui.label(cx, ids!(skill_editor_title)).set_text(
+            cx,
+            if skill.is_system {
+                "编辑系统技能"
+            } else {
+                "编辑技能"
+            },
+        );
+        self.ui
+            .text_input(cx, ids!(skill_name_input))
+            .set_text(cx, &skill.name);
+        self.ui
+            .text_input(cx, ids!(skill_name_input))
+            .set_is_read_only(cx, skill.is_system);
+        self.ui
+            .text_input(cx, ids!(skill_content_input))
+            .set_text(cx, &skill.content);
+        self.ui
+            .check_box(cx, ids!(skill_active_edit))
+            .set_active(cx, skill.is_active, Animate::No);
+        self.ui.label(cx, ids!(skill_editor_hint)).set_text(
+            cx,
+            if skill.is_system {
+                "系统技能启用后自动作为所有 AI 对话的系统提示词；系统技能不可删除。"
+            } else {
+                "保存后可从左侧点击「下次提问使用」，模板只应用一次。"
+            },
+        );
+    }
+
+    fn refresh_pending_skill_indicator(&self, cx: &mut Cx) {
+        let selected = self.pending_skill_id.as_ref().and_then(|id| {
+            SKILLS
+                .read()
+                .unwrap()
+                .iter()
+                .find(|skill| &skill.id == id && skill.is_active && !skill.is_system)
+                .map(|skill| skill.name.clone())
+        });
+        match selected {
+            Some(name) => {
+                self.ui
+                    .label(cx, ids!(chat_skill_status))
+                    .set_text(cx, &format!("下一条消息将使用技能：{}", name));
+                self.ui
+                    .widget(cx, ids!(chat_skill_clear))
+                    .set_visible(cx, true);
+            }
+            None => {
+                self.ui
+                    .label(cx, ids!(chat_skill_status))
+                    .set_text(cx, "未选择技能模板");
+                self.ui
+                    .widget(cx, ids!(chat_skill_clear))
+                    .set_visible(cx, false);
+            }
+        }
+    }
+
+    fn use_skill_next(&mut self, cx: &mut Cx, skill: &readwise_core::skills::models::Skill) {
+        if skill.is_system || !skill.is_active {
+            return;
+        }
+        self.pending_skill_id = Some(skill.id.clone());
+        self.refresh_pending_skill_indicator(cx);
+        self.ui
+            .page_flip(cx, ids!(pages))
+            .set_active_page(cx, id!(page_chat));
+        self.on_reader_page = false;
+        self.set_chat_status(cx, &format!("已选择「{}」，请输入要处理的内容", skill.name));
+        self.ui.redraw(cx);
     }
 
     fn stop_ai_timeout(&mut self, cx: &mut Cx) {
@@ -2237,42 +2642,68 @@ impl App {
         if text.trim().is_empty() {
             return false;
         }
-        let Some(backend) = &mut self.ai_backend else {
+        if self.ai_backend.is_none() {
             self.set_chat_status(cx, "AI 尚未配置，请先到设置页保存接口信息");
             return false;
-        };
+        }
         if self.chat_thread_id.is_none() {
             self.chat_thread_id = Some(readwise_core::threads::new_thread_id());
         }
+
+        let pending_skill = self.pending_skill_id.as_ref().and_then(|id| {
+            SKILLS
+                .read()
+                .unwrap()
+                .iter()
+                .find(|skill| &skill.id == id && skill.is_active && !skill.is_system)
+                .cloned()
+        });
+        let system_prompt = active_system_prompt();
+        let visible_text = text.trim().to_string();
+        let request_text = pending_skill.as_ref().map_or_else(
+            || visible_text.clone(),
+            |skill| {
+                format!(
+                    "请严格按照下面的技能模板完成用户请求。\n\n【技能：{}】\n{}\n\n【用户请求】\n{}",
+                    skill.name, skill.content, visible_text
+                )
+            },
+        );
 
         let request_messages = {
             let mut data = CHAT_DATA.write().unwrap();
             data.messages.push(ChatMessage {
                 role: ChatRole::User,
-                text: text.trim().to_string(),
+                text: visible_text,
             });
             data.streaming_text.clear();
             data.is_streaming = true;
             data.messages
                 .iter()
-                .map(|message| match message.role {
+                .enumerate()
+                .map(|(index, message)| match message.role {
+                    ChatRole::User if index + 1 == data.messages.len() => {
+                        Message::user(&request_text)
+                    }
                     ChatRole::User => Message::user(&message.text),
                     ChatRole::Assistant => Message::assistant(&message.text),
                 })
                 .collect()
         };
         self.ai_stream.reset();
+        let backend = self.ai_backend.as_mut().unwrap();
         self.ai_request = Some(backend.send_request(
             cx,
             AiRequest {
                 messages: request_messages,
-                system_prompt: Some(
-                    "You are a concise reading assistant. Explain English text clearly, and answer in the user's language."
-                        .to_string(),
-                ),
+                system_prompt: Some(system_prompt),
                 ..Default::default()
             },
         ));
+        if pending_skill.is_some() {
+            self.pending_skill_id = None;
+            self.refresh_pending_skill_indicator(cx);
+        }
         self.ai_timeout = cx.start_timeout(60.0);
         self.set_chat_streaming_controls(cx, true);
         self.set_chat_status(cx, "正在生成…");
@@ -2811,12 +3242,81 @@ impl MatchEvent for App {
                         self.set_gloss_rows_visible(cx, gloss_on);
                         spawn_load_shelf();
                         spawn_load_ai_state();
+                        spawn_load_skills();
                     }
                     DbAction::Failed(e) => {
                         let status = format!("数据库失败:\n{}", e);
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
                     }
                 }
+                continue;
+            }
+            if let Some(skill_action) = action.downcast_ref::<SkillAction>() {
+                match skill_action {
+                    SkillAction::Loaded(skills) => {
+                        let count = skills.len();
+                        *SKILLS.write().unwrap() = skills.clone();
+                        self.ui.label(cx, ids!(skills_status)).set_text(
+                            cx,
+                            &format!(
+                                "共 {} 个技能 · 系统技能自动生效，自定义技能可用于下一次提问",
+                                count
+                            ),
+                        );
+                    }
+                    SkillAction::Saved(skills) => {
+                        *SKILLS.write().unwrap() = skills.clone();
+                        let pending_still_available =
+                            self.pending_skill_id.as_ref().is_some_and(|id| {
+                                skills.iter().any(|skill| {
+                                    &skill.id == id && skill.is_active && !skill.is_system
+                                })
+                            });
+                        if !pending_still_available {
+                            self.pending_skill_id = None;
+                        }
+                        self.refresh_pending_skill_indicator(cx);
+                        self.clear_skill_editor(cx);
+                        self.ui
+                            .label(cx, ids!(skills_status))
+                            .set_text(cx, "技能已保存 ✓");
+                    }
+                    SkillAction::Toggled(skills) => {
+                        *SKILLS.write().unwrap() = skills.clone();
+                        let pending_still_available =
+                            self.pending_skill_id.as_ref().is_some_and(|id| {
+                                skills.iter().any(|skill| {
+                                    &skill.id == id && skill.is_active && !skill.is_system
+                                })
+                            });
+                        if !pending_still_available {
+                            self.pending_skill_id = None;
+                        }
+                        self.refresh_pending_skill_indicator(cx);
+                        self.ui
+                            .label(cx, ids!(skills_status))
+                            .set_text(cx, "技能状态已更新 ✓");
+                    }
+                    SkillAction::Deleted { skills, id } => {
+                        *SKILLS.write().unwrap() = skills.clone();
+                        if self.editing_skill_id.as_deref() == Some(id.as_str()) {
+                            self.clear_skill_editor(cx);
+                        }
+                        if self.pending_skill_id.as_deref() == Some(id.as_str()) {
+                            self.pending_skill_id = None;
+                            self.refresh_pending_skill_indicator(cx);
+                        }
+                        self.ui
+                            .label(cx, ids!(skills_status))
+                            .set_text(cx, "技能已删除");
+                    }
+                    SkillAction::Error(error) => {
+                        self.ui
+                            .label(cx, ids!(skills_status))
+                            .set_text(cx, &format!("技能操作失败：{}", error));
+                    }
+                }
+                self.ui.redraw(cx);
                 continue;
             }
             if let Some(ai_state) = action.downcast_ref::<AiStateAction>() {
@@ -3061,6 +3561,32 @@ impl MatchEvent for App {
                 }
             }
         }
+        let skill_list = self
+            .ui
+            .widget(cx, ids!(skill_list))
+            .portal_list(cx, ids!(list));
+        for (item_id, item) in skill_list.items_with_actions(actions) {
+            let skill = SKILLS.read().unwrap().get(item_id).cloned();
+            let Some(skill) = skill else { continue };
+            if let Some(is_active) = item.check_box(cx, ids!(skill_active)).changed(actions) {
+                self.ui
+                    .label(cx, ids!(skills_status))
+                    .set_text(cx, "正在更新技能状态…");
+                spawn_toggle_skill(skill.id.clone(), is_active);
+            }
+            if item.button(cx, ids!(skill_use)).clicked(actions) {
+                self.use_skill_next(cx, &skill);
+            }
+            if item.button(cx, ids!(skill_edit)).clicked(actions) {
+                self.edit_skill(cx, &skill);
+            }
+            if item.button(cx, ids!(skill_delete)).clicked(actions) && !skill.is_system {
+                self.ui
+                    .label(cx, ids!(skills_status))
+                    .set_text(cx, "正在删除技能…");
+                spawn_delete_skill(skill.id.clone());
+            }
+        }
         if self.ui.button(cx, ids!(nav_library)).clicked(actions) {
             pages.set_active_page(cx, id!(page_library));
             self.on_reader_page = false;
@@ -3073,6 +3599,10 @@ impl MatchEvent for App {
             pages.set_active_page(cx, id!(page_chat));
             self.on_reader_page = false;
         }
+        if self.ui.button(cx, ids!(nav_skills)).clicked(actions) {
+            pages.set_active_page(cx, id!(page_skills));
+            self.on_reader_page = false;
+        }
         if self.ui.button(cx, ids!(nav_vocab)).clicked(actions) {
             pages.set_active_page(cx, id!(page_vocab));
             self.on_reader_page = false;
@@ -3080,6 +3610,34 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(nav_settings)).clicked(actions) {
             pages.set_active_page(cx, id!(page_settings));
             self.on_reader_page = false;
+        }
+        if self.ui.button(cx, ids!(skill_new)).clicked(actions)
+            || self.ui.button(cx, ids!(skill_cancel)).clicked(actions)
+        {
+            self.clear_skill_editor(cx);
+        }
+        if self.ui.button(cx, ids!(skill_save)).clicked(actions) {
+            let name = self.ui.text_input(cx, ids!(skill_name_input)).text();
+            let content = self.ui.text_input(cx, ids!(skill_content_input)).text();
+            if name.trim().is_empty() {
+                self.ui
+                    .label(cx, ids!(skills_status))
+                    .set_text(cx, "技能名称不能为空");
+            } else if content.trim().is_empty() {
+                self.ui
+                    .label(cx, ids!(skills_status))
+                    .set_text(cx, "技能内容不能为空");
+            } else {
+                let is_active = self.ui.check_box(cx, ids!(skill_active_edit)).active(cx);
+                self.ui
+                    .label(cx, ids!(skills_status))
+                    .set_text(cx, "正在保存技能…");
+                spawn_save_skill(self.editing_skill_id.clone(), name, content, is_active);
+            }
+        }
+        if self.ui.button(cx, ids!(chat_skill_clear)).clicked(actions) {
+            self.pending_skill_id = None;
+            self.refresh_pending_skill_indicator(cx);
         }
         if self.ui.button(cx, ids!(font_inc)).clicked(actions) {
             self.adjust_font(cx, 1.0);

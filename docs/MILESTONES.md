@@ -77,9 +77,9 @@
 
 ## M5 AI 功能（进行中）
 
-- [ ] OpenAI-compatible 流式 chat（已接官方 `makepad_ai` SSE、停止/新对话、设置与 threads 持久化；待真实端点实测）
-- [ ] 阅读页 side-chat（选区浮层“问 AI”在阅读页右侧栏流式交互；待真实端点复测）
-- [ ] skills（prompt 模板）管理
+- [x] OpenAI-compatible 流式 chat（官方 `makepad_ai` SSE、停止/新对话、错误反馈、设置与 threads 持久化；真实端点实测通过）
+- [x] 阅读页 side-chat（选区浮层“问 AI”在阅读页右侧栏流式交互；真实端点实测通过）
+- [x] skills（Prompt 模板）管理：增删改、启停、系统技能全局生效、自定义技能一次性应用到下一条提问
 - [ ] 桌面端可选：llamacpp 本地推理（子进程方案，`#[cfg(desktop)]`）
 - [ ] 移动端：仅远程 API
 

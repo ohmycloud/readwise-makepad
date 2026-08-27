@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::books::{self, models::*};
 use crate::notes::{self, models::Note};
+use crate::skills::{self, models::Skill};
 use crate::threads::{self, models::*};
 use crate::vocab::{self, models::*};
 
@@ -152,7 +153,8 @@ impl Db {
     }
 
     pub fn latest_thread(&self, book_id: Option<&str>) -> Result<Option<Thread>, String> {
-        self.rt.block_on(threads::latest_thread(&self.pool, book_id))
+        self.rt
+            .block_on(threads::latest_thread(&self.pool, book_id))
     }
 
     pub fn save_thread(
@@ -164,13 +166,47 @@ impl Db {
         messages: &[ThreadMessage],
     ) -> Result<Thread, String> {
         self.rt.block_on(threads::save_thread(
-            &self.pool,
-            thread_id,
-            book_id,
-            title,
-            metadata,
-            messages,
+            &self.pool, thread_id, book_id, title, metadata, messages,
         ))
+    }
+
+    // —— AI 技能 / Prompt 模板 ——
+
+    pub fn list_skills(&self) -> Result<Vec<Skill>, String> {
+        self.rt.block_on(skills::queries::list_skills(&self.pool))
+    }
+
+    pub fn create_skill(
+        &self,
+        name: &str,
+        content: &str,
+        is_active: bool,
+    ) -> Result<Skill, String> {
+        self.rt.block_on(skills::queries::create_skill(
+            &self.pool, name, content, is_active,
+        ))
+    }
+
+    pub fn update_skill(
+        &self,
+        id: &str,
+        name: &str,
+        content: &str,
+        is_active: bool,
+    ) -> Result<Skill, String> {
+        self.rt.block_on(skills::queries::update_skill(
+            &self.pool, id, name, content, is_active,
+        ))
+    }
+
+    pub fn set_skill_active(&self, id: &str, is_active: bool) -> Result<(), String> {
+        self.rt
+            .block_on(skills::queries::set_skill_active(&self.pool, id, is_active))
+    }
+
+    pub fn delete_skill(&self, id: &str) -> Result<(), String> {
+        self.rt
+            .block_on(skills::queries::delete_skill(&self.pool, id))
     }
 
     // —— 笔记 ——
@@ -345,9 +381,7 @@ pub async fn initialize(data_dir: &Path) -> Result<SqlitePool, String> {
     ensure_book_note_columns(&pool).await?;
     initialize_starter_glosses(&pool).await?;
 
-    if is_new_db {
-        initialize_default_skills(&pool).await?;
-    }
+    initialize_default_skills(&pool).await?;
 
     Ok(pool)
 }
@@ -426,7 +460,8 @@ async fn initialize_default_skills(pool: &SqlitePool) -> Result<(), String> {
 
         sqlx::query(
             r#"
-            INSERT INTO skills (id, name, content, is_active, is_system, created_at, updated_at)
+            INSERT OR IGNORE INTO skills
+                (id, name, content, is_active, is_system, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
