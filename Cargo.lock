@@ -957,6 +957,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "makepad-ai"
+version = "1.0.0"
+source = "git+https://github.com/makepad/makepad?branch=dev#4f9ce7a8bb3fd19e5c61dcf13edd2e6d4a04cefc"
+dependencies = [
+ "makepad-live-id",
+ "makepad-micro-serde",
+ "makepad-widgets",
+]
+
+[[package]]
 name = "makepad-android-state"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1734,8 +1744,10 @@ name = "readwise-app"
 version = "0.1.0"
 dependencies = [
  "log 0.4.33",
+ "makepad-ai",
  "makepad-widgets",
  "readwise-core",
+ "serde_json",
 ]
 
 [[package]]

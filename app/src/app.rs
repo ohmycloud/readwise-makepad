@@ -1,8 +1,14 @@
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
+use makepad_ai::{
+    AiBackend, AiEvent, AiRequest, BackendConfig, Message, OpenAiBackend, RequestId, StreamDelta,
+};
 use makepad_widgets::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock, RwLock};
+
+type AiSettings = readwise_core::ai::AiSettings;
 
 app_main!(App);
 
@@ -20,6 +26,287 @@ static SHELF: LazyLock<RwLock<Vec<ShelfItem>>> = LazyLock::new(|| RwLock::new(Ve
 /// 当前书的笔记（后台线程刷新，NoteList 只读渲染）。
 static NOTES: LazyLock<RwLock<Vec<readwise_core::notes::models::Note>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChatRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone)]
+struct ChatMessage {
+    role: ChatRole,
+    text: String,
+}
+
+#[derive(Default)]
+struct ChatData {
+    messages: Vec<ChatMessage>,
+    streaming_text: String,
+    is_streaming: bool,
+}
+
+static CHAT_DATA: LazyLock<RwLock<ChatData>> = LazyLock::new(|| RwLock::new(ChatData::default()));
+
+enum AiWireOutcome {
+    NonStreamComplete(String),
+    Failure(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AiSseUpdate {
+    ReasoningStarted,
+    Text(String),
+    Done,
+    Failure(String),
+}
+
+/// `HttpStreamChunk` 是任意网络分片，不保证恰好落在一个 SSE/UTF-8 边界上。
+/// makepad_ai 当前逐 chunk 解析会丢掉被拆开的 JSON，因此在 App 层保留增量缓冲。
+#[derive(Default)]
+struct AiSseDecoder {
+    pending: Vec<u8>,
+    saw_reasoning: bool,
+    saw_content: bool,
+}
+
+impl AiSseDecoder {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Vec<AiSseUpdate> {
+        self.pending.extend_from_slice(bytes);
+        let mut updates = Vec::new();
+        while let Some((frame_end, delimiter_len)) = sse_frame_boundary(&self.pending) {
+            let mut consumed: Vec<u8> = self.pending.drain(..frame_end + delimiter_len).collect();
+            consumed.truncate(frame_end);
+            let Ok(frame) = String::from_utf8(consumed) else {
+                updates.push(AiSseUpdate::Failure(
+                    "AI 返回了无效的 UTF-8 流数据".to_string(),
+                ));
+                continue;
+            };
+            let payload = frame
+                .lines()
+                .filter_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
+                .map(|data| data.strip_prefix(' ').unwrap_or(data))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if payload.is_empty() {
+                continue;
+            }
+            if payload == "[DONE]" {
+                updates.push(AiSseUpdate::Done);
+                continue;
+            }
+            let json: serde_json::Value = match serde_json::from_str(&payload) {
+                Ok(json) => json,
+                Err(error) => {
+                    updates.push(AiSseUpdate::Failure(format!(
+                        "无法解析 AI 流式响应：{error}"
+                    )));
+                    continue;
+                }
+            };
+            updates.extend(self.decode_json(&json));
+        }
+        updates
+    }
+
+    fn finish(&mut self) -> Vec<AiSseUpdate> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        if let Ok(text) = std::str::from_utf8(&self.pending) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+                self.pending.clear();
+                return self.decode_json(&json);
+            }
+        }
+        self.pending.extend_from_slice(b"\n\n");
+        self.push(&[])
+    }
+
+    fn decode_json(&mut self, json: &serde_json::Value) -> Vec<AiSseUpdate> {
+        if let Some(error) = json
+            .pointer("/error/message")
+            .and_then(|error| error.as_str())
+            .or_else(|| json.get("error").and_then(|error| error.as_str()))
+        {
+            return vec![AiSseUpdate::Failure(error.to_string())];
+        }
+        let mut updates = Vec::new();
+        let reasoning = json
+            .pointer("/choices/0/delta/reasoning_content")
+            .or_else(|| json.pointer("/choices/0/message/reasoning_content"))
+            .and_then(|value| value.as_str())
+            .filter(|text| !text.is_empty());
+        if reasoning.is_some() && !self.saw_reasoning {
+            self.saw_reasoning = true;
+            updates.push(AiSseUpdate::ReasoningStarted);
+        }
+        if let Some(text) = json
+            .pointer("/choices/0/delta/content")
+            .or_else(|| json.pointer("/choices/0/message/content"))
+            .and_then(|value| value.as_str())
+            .filter(|text| !text.is_empty())
+        {
+            self.saw_content = true;
+            updates.push(AiSseUpdate::Text(text.to_string()));
+        }
+        updates
+    }
+}
+
+fn sse_frame_boundary(bytes: &[u8]) -> Option<(usize, usize)> {
+    let lf = bytes.windows(2).position(|window| window == b"\n\n");
+    let crlf = bytes.windows(4).position(|window| window == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) if lf <= crlf => Some((lf, 2)),
+        (Some(_), Some(crlf)) => Some((crlf, 4)),
+        (Some(lf), None) => Some((lf, 2)),
+        (None, Some(crlf)) => Some((crlf, 4)),
+        (None, None) => None,
+    }
+}
+
+fn response_error_text(status: u16, body: Option<String>) -> String {
+    let detail = body
+        .as_deref()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+        .and_then(|json| {
+            json.pointer("/error/message")
+                .or_else(|| json.get("message"))
+                .or_else(|| json.get("detail"))
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            body.map(|body| {
+                let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+                compact.chars().take(240).collect()
+            })
+        })
+        .filter(|detail| !detail.is_empty())
+        .unwrap_or_else(|| "服务端未返回错误详情".to_string());
+    format!("HTTP {status}：{detail}")
+}
+
+fn response_message_content(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| {
+            json.pointer("/choices/0/message/content")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+}
+
+fn inspect_ai_network_event(event: &Event, request: RequestId) -> Option<AiWireOutcome> {
+    let Event::NetworkResponses(responses) = event else {
+        return None;
+    };
+    for response in responses {
+        match response {
+            NetworkResponse::HttpResponse {
+                request_id,
+                response,
+            } if *request_id == request.0 => {
+                let body = response.get_string_body();
+                if !(200..300).contains(&response.status_code) {
+                    return Some(AiWireOutcome::Failure(response_error_text(
+                        response.status_code,
+                        body,
+                    )));
+                }
+                let content = body.as_deref().and_then(response_message_content);
+                return Some(match content {
+                    Some(content) => AiWireOutcome::NonStreamComplete(content),
+                    None => AiWireOutcome::Failure(
+                        "服务端返回成功，但响应既不是 SSE，也没有 choices[0].message.content"
+                            .to_string(),
+                    ),
+                });
+            }
+            NetworkResponse::HttpStreamChunk {
+                request_id,
+                response,
+            }
+            | NetworkResponse::HttpStreamComplete {
+                request_id,
+                response,
+            } if *request_id == request.0
+                && response.status_code != 0
+                && !(200..300).contains(&response.status_code) =>
+            {
+                return Some(AiWireOutcome::Failure(response_error_text(
+                    response.status_code,
+                    response.get_string_body(),
+                )));
+            }
+            NetworkResponse::HttpError { request_id, error } if *request_id == request.0 => {
+                return Some(AiWireOutcome::Failure(error.message.clone()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod ai_response_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_non_stream_reply_and_error_message() {
+        assert_eq!(
+            response_message_content(r#"{"choices":[{"message":{"content":"hello"}}]}"#),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            response_error_text(
+                401,
+                Some(r#"{"error":{"message":"invalid key"}}"#.to_string())
+            ),
+            "HTTP 401：invalid key"
+        );
+    }
+
+    #[test]
+    fn decodes_sse_across_network_and_utf8_boundaries() {
+        let stream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .as_bytes();
+        let split = stream
+            .windows("你好".len())
+            .position(|window| window == "你好".as_bytes())
+            .unwrap()
+            + 1;
+        let mut decoder = AiSseDecoder::default();
+        let mut updates = decoder.push(&stream[..split]);
+        updates.extend(decoder.push(&stream[split..]));
+        assert!(updates.contains(&AiSseUpdate::ReasoningStarted));
+        assert!(updates.contains(&AiSseUpdate::Text("你好".to_string())));
+        assert!(updates.contains(&AiSseUpdate::Done));
+        assert!(decoder.saw_content);
+    }
+
+    #[test]
+    fn surfaces_plain_json_errors_from_a_streaming_request() {
+        let mut decoder = AiSseDecoder::default();
+        assert!(decoder
+            .push(br#"{"error":{"message":"invalid model"}}"#)
+            .is_empty());
+        assert_eq!(
+            decoder.finish(),
+            vec![AiSseUpdate::Failure("invalid model".to_string())]
+        );
+    }
+}
 
 #[derive(Clone)]
 struct ShelfItem {
@@ -113,6 +400,9 @@ static SEL_RANGE: LazyLock<RwLock<Option<TextRange>>> = LazyLock::new(|| RwLock:
 
 /// 原生 PortalList 选区导出的纯文本（添加笔记时作为引用）。
 static SELECTED_TEXT: LazyLock<RwLock<String>> = LazyLock::new(|| RwLock::new(String::new()));
+
+/// 选区菜单覆盖在 ChapterList 上方；菜单按下到抬起期间阻止指针事件继续穿透正文。
+static SELECTION_POPUP_POINTER: AtomicBool = AtomicBool::new(false);
 
 /// 选区状态事件（ChapterList → App）。
 #[derive(Debug)]
@@ -558,6 +848,77 @@ fn spawn_db_init() {
     });
 }
 
+#[derive(Debug)]
+enum AiStateAction {
+    Loaded {
+        settings: readwise_core::ai::AiSettings,
+        thread_id: Option<String>,
+        messages: Vec<readwise_core::threads::models::ThreadMessage>,
+    },
+    SettingsSaved(readwise_core::ai::AiSettings),
+    ThreadSaved(String),
+    Error(String),
+}
+
+fn spawn_load_ai_state() {
+    std::thread::spawn(|| {
+        let Some(db) = DB.get() else { return };
+        let settings = match db.load_ai_settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                Cx::post_action(AiStateAction::Error(error));
+                return;
+            }
+        };
+        match db.latest_thread(None) {
+            Ok(thread) => Cx::post_action(AiStateAction::Loaded {
+                settings,
+                thread_id: thread.as_ref().map(|thread| thread.id.clone()),
+                messages: thread.map(|thread| thread.messages).unwrap_or_default(),
+            }),
+            Err(error) => Cx::post_action(AiStateAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_save_ai_settings(settings: readwise_core::ai::AiSettings) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        match db.save_ai_settings(&settings) {
+            Ok(()) => Cx::post_action(AiStateAction::SettingsSaved(settings)),
+            Err(error) => Cx::post_action(AiStateAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_save_chat(thread_id: Option<String>, messages: Vec<ChatMessage>) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if messages.is_empty() {
+            return;
+        }
+        let stored: Vec<_> = messages
+            .iter()
+            .map(|message| readwise_core::threads::models::ThreadMessage {
+                role: match message.role {
+                    ChatRole::User => readwise_core::threads::models::ThreadRole::User,
+                    ChatRole::Assistant => readwise_core::threads::models::ThreadRole::Assistant,
+                },
+                content: message.text.clone(),
+            })
+            .collect();
+        let title = messages
+            .iter()
+            .find(|message| message.role == ChatRole::User)
+            .map(|message| preview_text(&message.text, 32))
+            .unwrap_or_else(|| "新对话".to_string());
+        match db.save_thread(thread_id.as_deref(), None, &title, "{}", &stored) {
+            Ok(thread) => Cx::post_action(AiStateAction::ThreadSaved(thread.id)),
+            Err(error) => Cx::post_action(AiStateAction::Error(error)),
+        }
+    });
+}
+
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
@@ -674,6 +1035,45 @@ script_mod! {
         }
     }
 
+    mod.widgets.ChatListBase = #(ChatList::register_widget(vm))
+    mod.widgets.ChatList = set_type_default() do mod.widgets.ChatListBase{
+        width: Fill height: Fill
+        list := PortalList{
+            width: Fill height: Fill
+            auto_tail: true
+            smooth_tail: true
+            spacing: 8
+            padding: Inset{left: 20 right: 20 top: 12 bottom: 12}
+            scroll_bar: ScrollBar{}
+            User := RoundedView{
+                width: Fill height: Fit
+                margin: Inset{left: 90}
+                padding: 12
+                new_batch: true
+                draw_bg.color: #x24433e
+                draw_bg.border_radius: 9.0
+                message := Label{
+                    width: Fill height: Fit
+                    text: ""
+                    draw_text.text_style.font_size: 11
+                }
+            }
+            Assistant := RoundedView{
+                width: Fill height: Fit
+                margin: Inset{right: 90}
+                padding: 12
+                new_batch: true
+                draw_bg.color: #x292929
+                draw_bg.border_radius: 9.0
+                message := Label{
+                    width: Fill height: Fit
+                    text: ""
+                    draw_text.text_style.font_size: 11
+                }
+            }
+        }
+    }
+
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
@@ -735,6 +1135,7 @@ script_mod! {
                         }
                         nav_library := ButtonFlat{ width: Fill text: "书库" }
                         nav_reader := ButtonFlat{ width: Fill text: "阅读" }
+                        nav_chat := ButtonFlat{ width: Fill text: "AI 对话" }
                         nav_vocab := ButtonFlat{ width: Fill text: "生词本" }
                         nav_settings := ButtonFlat{ width: Fill text: "设置" }
                         sidebar_fill := View{ width: Fill height: Fill }
@@ -775,6 +1176,7 @@ script_mod! {
                                 align: Align{ y: 0.5 }
                                 toc_btn := ButtonFlat{ text: "目录" }
                                 notes_btn := ButtonFlat{ text: "笔记" }
+                                reader_ai_btn := ButtonFlat{ text: "AI" }
                                 title := Label{
                                     text: "阅读 · 示例章节"
                                     draw_text.text_style.font_size: 15
@@ -856,6 +1258,49 @@ script_mod! {
                                     }
                                     note_list := mod.widgets.NoteList{}
                                     }
+                                    reader_ai_panel := SolidView{
+                                    visible: false
+                                    width: 360 height: Fill
+                                    new_batch: true
+                                    flow: Down spacing: 10 padding: 12
+                                    draw_bg.color: #x232323
+                                    reader_ai_header := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        Label{
+                                            width: Fill
+                                            text: "阅读 AI"
+                                            draw_text.text_style.font_size: 14
+                                        }
+                                        reader_ai_close := ButtonFlatter{text: "关闭"}
+                                    }
+                                    reader_chat_status := Label{
+                                        width: Fill height: Fit
+                                        text: "选择文字后点“问 AI”，或在下方直接提问"
+                                        draw_text.color: #x8f8f8f
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    reader_chat_list := mod.widgets.ChatList{}
+                                    reader_ai_composer := View{
+                                        width: Fill height: Fit
+                                        flow: Down spacing: 8
+                                        reader_chat_input := TextInput{
+                                            width: Fill height: 42
+                                            empty_text: "继续追问，按回车发送"
+                                        }
+                                        reader_ai_actions := View{
+                                            width: Fill height: Fit
+                                            flow: Right spacing: 6
+                                            reader_chat_send := Button{width: 64 text: "发送"}
+                                            reader_chat_cancel := ButtonFlat{
+                                                visible: false
+                                                width: 64 text: "停止"
+                                            }
+                                            reader_chat_clear := ButtonFlatter{width: 72 text: "新对话"}
+                                        }
+                                    }
+                                    }
                                 }
                                 sel_bar := View{
                                     visible: false
@@ -878,6 +1323,7 @@ script_mod! {
                                             note_from_sel_btn := ButtonFlat{text: "笔记"}
                                             vocab_from_sel_btn := ButtonFlat{text: "生词"}
                                             translate_sel_btn := ButtonFlat{text: "翻译"}
+                                            ask_ai_sel_btn := ButtonFlat{text: "问 AI"}
                                             speak_sel_btn := ButtonFlat{text: "发音"}
                                             hl_btn := ButtonFlat{text: "高亮"}
                                             sel_close_btn := ButtonFlatter{text: "关闭"}
@@ -942,7 +1388,41 @@ script_mod! {
                             }
                         }
 
-                        page_settings := View{
+                        page_chat := View{
+                            width: Fill height: Fill
+                            flow: Down
+                            chat_header := View{
+                                width: Fill height: Fit
+                                flow: Down spacing: 4
+                                padding: Inset{left: 24 right: 24 top: 20 bottom: 8}
+                                Label{ text: "AI 对话" draw_text.text_style.font_size: 18 }
+                                chat_status := Label{
+                                    width: Fill
+                                    text: "正在读取 AI 设置…"
+                                    draw_text.color: #x8f8f8f
+                                    draw_text.text_style.font_size: 9
+                                }
+                            }
+                            chat_list := mod.widgets.ChatList{}
+                            chat_composer := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 8
+                                padding: Inset{left: 20 right: 20 top: 8 bottom: 18}
+                                align: Align{y: 0.5}
+                                chat_input := TextInput{
+                                    width: Fill height: 42
+                                    empty_text: "输入问题，按回车发送"
+                                }
+                                chat_send := Button{width: 72 height: 42 text: "发送"}
+                                chat_cancel := ButtonFlat{
+                                    visible: false
+                                    width: 72 height: 42 text: "停止"
+                                }
+                                chat_clear := ButtonFlatter{width: 72 height: 42 text: "新对话"}
+                            }
+                        }
+
+                        page_settings := ScrollYView{
                             width: Fill height: Fill
                             flow: Down padding: 24 spacing: 12
                             Label{ text: "设置" draw_text.text_style.font_size: 18 }
@@ -1047,22 +1527,34 @@ script_mod! {
                                 draw_text.text_style.font_size: 9
                             }
                             Label{
-                                text: "开发工具"
+                                text: "AI（OpenAI 兼容接口）"
                                 draw_text.text_style.font_size: 13
                                 draw_text.color: #x9a9a9a
                             }
-                            dev_tools := View{
+                            ai_endpoint := TextInput{
+                                width: Fill height: 38
+                                empty_text: "API 根地址或完整 /chat/completions 地址"
+                            }
+                            ai_model := TextInput{
+                                width: Fill height: 38
+                                empty_text: "模型名称（必填）"
+                            }
+                            ai_api_key := TextInput{
+                                width: Fill height: 38
+                                is_password: true
+                                empty_text: "API Key（本地免鉴权服务可留空）"
+                            }
+                            ai_settings_actions := View{
                                 width: Fill height: Fit
                                 spacing: 12
-                                stream_button := Button{ text: "流式测试" }
+                                ai_save := Button{ text: "保存 AI 设置" }
                                 reload_button := Button{ text: "重载示例章节" }
                             }
-                            stream_panel := View{
+                            ai_settings_status := Label{
                                 width: Fill height: Fit
-                                stream_label := Label{
-                                    width: Fill
-                                    text: "点「流式测试」验证后台线程 → UI 打字机效果"
-                                }
+                                text: "密钥保存在本机应用数据库中。"
+                                draw_text.color: #x8f8f8f
+                                draw_text.text_style.font_size: 9
                             }
                         }
                     }
@@ -1330,6 +1822,14 @@ impl Widget for ChapterList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if SELECTION_POPUP_POINTER.load(Ordering::Relaxed)
+            && matches!(
+                event,
+                Event::MouseDown(_) | Event::MouseMove(_) | Event::MouseUp(_)
+            )
+        {
+            return;
+        }
         self.view.handle_event(cx, event, scope);
         self.track_selection(cx, event);
     }
@@ -1431,6 +1931,52 @@ impl Widget for NoteList {
 }
 
 #[derive(Script, ScriptHook, Widget)]
+struct ChatList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for ChatList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let data = CHAT_DATA.read().unwrap();
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                let message_count = data.messages.len();
+                list.set_item_range(cx, 0, message_count + usize::from(data.is_streaming));
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    if data.is_streaming && item_id == message_count {
+                        let item = list.item(cx, item_id, id!(Assistant));
+                        let text = if data.streaming_text.is_empty() {
+                            "思考中…"
+                        } else {
+                            &data.streaming_text
+                        };
+                        item.label(cx, ids!(message)).set_text(cx, text);
+                        item.draw_all_unscoped(cx);
+                        continue;
+                    }
+                    let Some(message) = data.messages.get(item_id) else {
+                        continue;
+                    };
+                    let template = match message.role {
+                        ChatRole::User => id!(User),
+                        ChatRole::Assistant => id!(Assistant),
+                    };
+                    let item = list.item(cx, item_id, template);
+                    item.label(cx, ids!(message)).set_text(cx, &message.text);
+                    item.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
 struct BookShelf {
     #[deref]
     view: View,
@@ -1511,7 +2057,17 @@ pub struct App {
     #[rust]
     reload_count: usize,
     #[rust]
-    stream_text: String,
+    ai_backend: Option<OpenAiBackend>,
+    #[rust]
+    ai_request: Option<RequestId>,
+    #[rust]
+    ai_stream: AiSseDecoder,
+    #[rust]
+    ai_timeout: Timer,
+    #[rust]
+    ai_settings: AiSettings,
+    #[rust]
+    chat_thread_id: Option<String>,
     #[rust]
     chapter_idx: usize,
     #[rust]
@@ -1521,6 +2077,8 @@ pub struct App {
     #[rust]
     note_open: bool,
     #[rust]
+    reader_ai_open: bool,
+    #[rust]
     note_quote_text: String,
     /// 释义卡片当前展示的 (word, lemma, gloss)。
     #[rust]
@@ -1528,6 +2086,286 @@ pub struct App {
 }
 
 impl App {
+    fn text_input_has_focus(&self, cx: &Cx) -> bool {
+        [
+            ids!(note_extra),
+            ids!(reader_chat_input),
+            ids!(chat_input),
+            ids!(ai_endpoint),
+            ids!(ai_model),
+            ids!(ai_api_key),
+        ]
+        .into_iter()
+        .any(|path| self.ui.text_input(cx, path).key_focus(cx))
+    }
+
+    fn stop_ai_timeout(&mut self, cx: &mut Cx) {
+        if self.ai_timeout.0 != 0 {
+            cx.stop_timer(self.ai_timeout);
+            self.ai_timeout = Timer::default();
+        }
+    }
+
+    fn decode_ai_stream_event(&mut self, event: &Event, request: RequestId) -> Vec<AiSseUpdate> {
+        let Event::NetworkResponses(responses) = event else {
+            return Vec::new();
+        };
+        let mut updates = Vec::new();
+        for response in responses {
+            match response {
+                NetworkResponse::HttpStreamChunk {
+                    request_id,
+                    response,
+                } if *request_id == request.0 => {
+                    if let Some(bytes) = response.get_body() {
+                        updates.extend(self.ai_stream.push(bytes));
+                    }
+                }
+                NetworkResponse::HttpStreamComplete { request_id, .. }
+                    if *request_id == request.0 =>
+                {
+                    updates.extend(self.ai_stream.finish());
+                }
+                _ => {}
+            }
+        }
+        updates
+    }
+
+    fn set_chat_status(&self, cx: &mut Cx, text: &str) {
+        self.ui.label(cx, ids!(chat_status)).set_text(cx, text);
+        self.ui
+            .label(cx, ids!(reader_chat_status))
+            .set_text(cx, text);
+    }
+
+    fn set_chat_streaming_controls(&self, cx: &mut Cx, visible: bool) {
+        self.ui
+            .widget(cx, ids!(chat_cancel))
+            .set_visible(cx, visible);
+        self.ui
+            .widget(cx, ids!(reader_chat_cancel))
+            .set_visible(cx, visible);
+    }
+
+    fn set_reader_ai_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.reader_ai_open = visible;
+        if visible {
+            self.toc_open = false;
+            self.ui.widget(cx, ids!(toc_panel)).set_visible(cx, false);
+        }
+        self.ui
+            .widget(cx, ids!(reader_ai_panel))
+            .set_visible(cx, visible);
+        self.ui.redraw(cx);
+    }
+
+    fn configure_ai_backend(&mut self, cx: &mut Cx) {
+        if self.ai_request.is_some() {
+            self.cancel_chat(cx);
+        }
+        let endpoint = match readwise_core::ai::normalize_chat_endpoint(&self.ai_settings.endpoint)
+        {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                self.ai_backend = None;
+                self.set_chat_status(cx, &error);
+                return;
+            }
+        };
+        let model = self.ai_settings.model.trim();
+        if model.is_empty() {
+            self.ai_backend = None;
+            self.set_chat_status(cx, "请先到设置页填写模型名称");
+            return;
+        }
+        self.ai_backend = Some(OpenAiBackend::new(BackendConfig::OpenAI {
+            api_key: self.ai_settings.api_key.clone(),
+            model: model.to_string(),
+            base_url: Some(endpoint.clone()),
+            reasoning_effort: None,
+        }));
+        self.set_chat_status(
+            cx,
+            &format!("已就绪 · {} · {}", self.ai_settings.model.trim(), endpoint),
+        );
+    }
+
+    fn redraw_chat(&self, cx: &mut Cx) {
+        let main_list = self
+            .ui
+            .widget(cx, ids!(chat_list))
+            .portal_list(cx, ids!(list));
+        let reader_list = self
+            .ui
+            .widget(cx, ids!(reader_chat_list))
+            .portal_list(cx, ids!(list));
+        let items = {
+            let data = CHAT_DATA.read().unwrap();
+            data.messages.len() + usize::from(data.is_streaming)
+        };
+        if items > 0 {
+            main_list.set_tail_range(true);
+            main_list.set_first_id_and_scroll(items - 1, 0.0);
+            reader_list.set_tail_range(true);
+            reader_list.set_first_id_and_scroll(items - 1, 0.0);
+        }
+        self.ui.redraw(cx);
+    }
+
+    fn send_chat(&mut self, cx: &mut Cx) {
+        let text = self.ui.text_input(cx, ids!(chat_input)).text();
+        if self.send_chat_text(cx, text) {
+            self.ui.text_input(cx, ids!(chat_input)).set_text(cx, "");
+        }
+    }
+
+    fn send_reader_chat(&mut self, cx: &mut Cx) {
+        let text = self.ui.text_input(cx, ids!(reader_chat_input)).text();
+        if self.send_chat_text(cx, text) {
+            self.ui
+                .text_input(cx, ids!(reader_chat_input))
+                .set_text(cx, "");
+        }
+    }
+
+    fn send_chat_text(&mut self, cx: &mut Cx, text: String) -> bool {
+        if self.ai_request.is_some() {
+            self.set_chat_status(cx, "上一条回答仍在生成，可先停止");
+            return false;
+        }
+        if text.trim().is_empty() {
+            return false;
+        }
+        let Some(backend) = &mut self.ai_backend else {
+            self.set_chat_status(cx, "AI 尚未配置，请先到设置页保存接口信息");
+            return false;
+        };
+        if self.chat_thread_id.is_none() {
+            self.chat_thread_id = Some(readwise_core::threads::new_thread_id());
+        }
+
+        let request_messages = {
+            let mut data = CHAT_DATA.write().unwrap();
+            data.messages.push(ChatMessage {
+                role: ChatRole::User,
+                text: text.trim().to_string(),
+            });
+            data.streaming_text.clear();
+            data.is_streaming = true;
+            data.messages
+                .iter()
+                .map(|message| match message.role {
+                    ChatRole::User => Message::user(&message.text),
+                    ChatRole::Assistant => Message::assistant(&message.text),
+                })
+                .collect()
+        };
+        self.ai_stream.reset();
+        self.ai_request = Some(backend.send_request(
+            cx,
+            AiRequest {
+                messages: request_messages,
+                system_prompt: Some(
+                    "You are a concise reading assistant. Explain English text clearly, and answer in the user's language."
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        ));
+        self.ai_timeout = cx.start_timeout(60.0);
+        self.set_chat_streaming_controls(cx, true);
+        self.set_chat_status(cx, "正在生成…");
+        self.redraw_chat(cx);
+        true
+    }
+
+    fn cancel_chat(&mut self, cx: &mut Cx) {
+        self.stop_ai_timeout(cx);
+        let Some(request_id) = self.ai_request.take() else {
+            return;
+        };
+        if let Some(backend) = &mut self.ai_backend {
+            backend.cancel_request(cx, request_id);
+        }
+        let messages = {
+            let mut data = CHAT_DATA.write().unwrap();
+            let partial = std::mem::take(&mut data.streaming_text);
+            if !partial.is_empty() {
+                data.messages.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    text: partial,
+                });
+            }
+            data.is_streaming = false;
+            data.messages.clone()
+        };
+        spawn_save_chat(self.chat_thread_id.clone(), messages);
+        self.set_chat_streaming_controls(cx, false);
+        self.set_chat_status(cx, "已停止，已保留当前内容");
+        self.ai_stream.reset();
+        self.redraw_chat(cx);
+    }
+
+    fn clear_chat(&mut self, cx: &mut Cx) {
+        self.cancel_chat(cx);
+        *CHAT_DATA.write().unwrap() = ChatData::default();
+        self.chat_thread_id = None;
+        self.set_chat_status(cx, "新对话已就绪");
+        self.ui.redraw(cx);
+    }
+
+    fn finish_chat(&mut self, cx: &mut Cx, fallback_text: String) {
+        self.stop_ai_timeout(cx);
+        let messages = {
+            let mut data = CHAT_DATA.write().unwrap();
+            let mut answer = std::mem::take(&mut data.streaming_text);
+            if answer.is_empty() {
+                answer = fallback_text;
+            }
+            if !answer.is_empty() {
+                data.messages.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    text: answer,
+                });
+            }
+            data.is_streaming = false;
+            data.messages.clone()
+        };
+        self.ai_request = None;
+        self.ai_stream.reset();
+        self.set_chat_streaming_controls(cx, false);
+        self.set_chat_status(cx, "回答完成 · 正在保存对话");
+        spawn_save_chat(self.chat_thread_id.clone(), messages);
+        self.redraw_chat(cx);
+    }
+
+    fn fail_chat(&mut self, cx: &mut Cx, error: String) {
+        self.stop_ai_timeout(cx);
+        if let Some(request_id) = self.ai_request.take() {
+            if let Some(backend) = &mut self.ai_backend {
+                backend.cancel_request(cx, request_id);
+            }
+        }
+        let messages = {
+            let mut data = CHAT_DATA.write().unwrap();
+            let partial = std::mem::take(&mut data.streaming_text);
+            if !partial.is_empty() {
+                data.messages.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    text: partial,
+                });
+            }
+            data.is_streaming = false;
+            data.messages.clone()
+        };
+        self.set_chat_streaming_controls(cx, false);
+        self.set_chat_status(cx, &format!("请求失败：{error}"));
+        self.ai_stream.reset();
+        spawn_save_chat(self.chat_thread_id.clone(), messages);
+        self.redraw_chat(cx);
+    }
+
     /// 切换到指定章节：按 </p> 切块喂给 PortalList，更新标题/页码，保存进度，滚回顶部。
     fn set_chapter(&mut self, cx: &mut Cx, idx: usize) {
         let (id, title, total, chunks) = {
@@ -1618,7 +2456,10 @@ impl App {
 
     /// 阅读页快捷键：空格/PgDn/→ 下一屏，PgUp/← 上一屏，Shift+←/→ 跨章，Home 回章首。
     fn handle_reader_key(&mut self, cx: &mut Cx, ke: &KeyEvent) {
-        if !self.on_reader_page || CURRENT_BOOK.read().unwrap().is_none() {
+        if !self.on_reader_page
+            || CURRENT_BOOK.read().unwrap().is_none()
+            || self.text_input_has_focus(cx)
+        {
             return;
         }
         let shift = ke.modifiers.shift;
@@ -1926,50 +2767,16 @@ impl App {
     }
 }
 
-/// 后台线程 → UI 的流式消息（模拟 AI 打字机，M5 换成真实 SSE）。
-#[derive(Debug)]
-enum StreamAction {
-    Chunk(String),
-    Done,
-}
-
-fn spawn_stream_demo() {
-    std::thread::spawn(|| {
-        let words = [
-            "月光",
-            "如水",
-            "，",
-            "虎影",
-            "徘徊",
-            "。",
-            "Streaming ",
-            "tokens ",
-            "arrive ",
-            "one ",
-            "by ",
-            "one",
-            "，",
-            "后台",
-            "线程",
-            "经",
-            "Cx::post_action",
-            "推送",
-            "，",
-            "UI",
-            "线程",
-            "逐词",
-            "上屏",
-            "。",
-        ];
-        for w in words {
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            Cx::post_action(StreamAction::Chunk(w.to_string()));
-        }
-        Cx::post_action(StreamAction::Done);
-    });
-}
-
 impl MatchEvent for App {
+    fn handle_timer(&mut self, cx: &mut Cx, event: &TimerEvent) {
+        if self.ai_request.is_some() && self.ai_timeout.is_timer(event).is_some() {
+            self.fail_chat(
+                cx,
+                "请求超过 60 秒仍未完成，请检查网络或接口设置".to_string(),
+            );
+        }
+    }
+
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
             if let Some(db_action) = action.downcast_ref::<DbAction>() {
@@ -2003,10 +2810,73 @@ impl MatchEvent for App {
                         );
                         self.set_gloss_rows_visible(cx, gloss_on);
                         spawn_load_shelf();
+                        spawn_load_ai_state();
                     }
                     DbAction::Failed(e) => {
                         let status = format!("数据库失败:\n{}", e);
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
+                    }
+                }
+                continue;
+            }
+            if let Some(ai_state) = action.downcast_ref::<AiStateAction>() {
+                match ai_state {
+                    AiStateAction::Loaded {
+                        settings,
+                        thread_id,
+                        messages,
+                    } => {
+                        self.ai_settings = settings.clone();
+                        self.chat_thread_id = thread_id.clone();
+                        self.ui
+                            .text_input(cx, ids!(ai_endpoint))
+                            .set_text(cx, &settings.endpoint);
+                        self.ui
+                            .text_input(cx, ids!(ai_model))
+                            .set_text(cx, &settings.model);
+                        self.ui
+                            .text_input(cx, ids!(ai_api_key))
+                            .set_text(cx, &settings.api_key);
+                        *CHAT_DATA.write().unwrap() = ChatData {
+                            messages: messages
+                                .iter()
+                                .map(|message| ChatMessage {
+                                    role: match message.role {
+                                        readwise_core::threads::models::ThreadRole::User => {
+                                            ChatRole::User
+                                        }
+                                        readwise_core::threads::models::ThreadRole::Assistant => {
+                                            ChatRole::Assistant
+                                        }
+                                    },
+                                    text: message.content.clone(),
+                                })
+                                .collect(),
+                            ..Default::default()
+                        };
+                        self.configure_ai_backend(cx);
+                        self.ui.redraw(cx);
+                    }
+                    AiStateAction::SettingsSaved(settings) => {
+                        self.ai_settings = settings.clone();
+                        self.ui
+                            .text_input(cx, ids!(ai_endpoint))
+                            .set_text(cx, &settings.endpoint);
+                        self.configure_ai_backend(cx);
+                        self.ui
+                            .label(cx, ids!(ai_settings_status))
+                            .set_text(cx, "AI 设置已保存 ✓");
+                    }
+                    AiStateAction::ThreadSaved(thread_id) => {
+                        if self.chat_thread_id.as_deref() == Some(thread_id.as_str()) {
+                            self.set_chat_status(cx, "回答完成 · 对话已保存 ✓");
+                        }
+                    }
+                    AiStateAction::Error(error) => {
+                        self.ui
+                            .label(cx, ids!(ai_settings_status))
+                            .set_text(cx, &format!("AI 数据操作失败：{}", error));
+                        self.set_chat_status(cx, &format!("AI 数据操作失败：{}", error));
                     }
                 }
                 continue;
@@ -2145,16 +3015,6 @@ impl MatchEvent for App {
                 }
                 continue;
             }
-            if let Some(stream) = action.downcast_ref::<StreamAction>() {
-                match stream {
-                    StreamAction::Chunk(text) => self.stream_text.push_str(text),
-                    StreamAction::Done => self.stream_text.push_str(" ✅"),
-                }
-                self.ui
-                    .label(cx, ids!(stream_label))
-                    .set_text(cx, &self.stream_text);
-                continue;
-            }
             let Some(action) = action.as_widget_action() else {
                 continue;
             };
@@ -2208,6 +3068,10 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(nav_reader)).clicked(actions) {
             pages.set_active_page(cx, id!(page_reader));
             self.on_reader_page = true;
+        }
+        if self.ui.button(cx, ids!(nav_chat)).clicked(actions) {
+            pages.set_active_page(cx, id!(page_chat));
+            self.on_reader_page = false;
         }
         if self.ui.button(cx, ids!(nav_vocab)).clicked(actions) {
             pages.set_active_page(cx, id!(page_vocab));
@@ -2282,6 +3146,21 @@ impl MatchEvent for App {
                     .set_text(cx, "已在浏览器中打开翻译");
             }
         }
+        if self.ui.button(cx, ids!(ask_ai_sel_btn)).clicked(actions) {
+            let selected = SELECTED_TEXT.read().unwrap().trim().to_string();
+            if !selected.is_empty() {
+                let prompt = format!("请解释下面这段英文，并指出重要词语和表达：\n\n{}", selected);
+                self.clear_reader_selection(cx);
+                self.note_open = false;
+                self.ui.widget(cx, ids!(note_panel)).set_visible(cx, false);
+                self.set_reader_ai_visible(cx, true);
+                if !self.send_chat_text(cx, prompt.clone()) {
+                    self.ui
+                        .text_input(cx, ids!(reader_chat_input))
+                        .set_text(cx, &prompt);
+                }
+            }
+        }
         if self.ui.button(cx, ids!(speak_sel_btn)).clicked(actions) {
             let text = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !text.is_empty() {
@@ -2335,10 +3214,24 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(notes_btn)).clicked(actions) {
             self.note_open = !self.note_open;
+            if self.note_open {
+                self.set_reader_ai_visible(cx, false);
+            }
             self.ui
                 .widget(cx, ids!(note_panel))
                 .set_visible(cx, self.note_open);
             self.ui.redraw(cx);
+        }
+        if self.ui.button(cx, ids!(reader_ai_btn)).clicked(actions) {
+            let visible = !self.reader_ai_open;
+            if visible {
+                self.note_open = false;
+                self.ui.widget(cx, ids!(note_panel)).set_visible(cx, false);
+            }
+            self.set_reader_ai_visible(cx, visible);
+        }
+        if self.ui.button(cx, ids!(reader_ai_close)).clicked(actions) {
+            self.set_reader_ai_visible(cx, false);
         }
         let toc_list = self
             .ui
@@ -2368,12 +3261,71 @@ impl MatchEvent for App {
                 }
             }
         }
-        if self.ui.button(cx, ids!(stream_button)).clicked(actions) {
-            self.stream_text = "▶ ".to_string();
-            self.ui
-                .label(cx, ids!(stream_label))
-                .set_text(cx, &self.stream_text);
-            spawn_stream_demo();
+        if self.ui.button(cx, ids!(chat_send)).clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(chat_input))
+                .returned(actions)
+                .is_some()
+        {
+            self.send_chat(cx);
+        }
+        if self.ui.button(cx, ids!(reader_chat_send)).clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(reader_chat_input))
+                .returned(actions)
+                .is_some()
+        {
+            self.send_reader_chat(cx);
+        }
+        if self.ui.button(cx, ids!(chat_cancel)).clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(reader_chat_cancel))
+                .clicked(actions)
+            || self.ui.text_input(cx, ids!(chat_input)).escaped(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(reader_chat_input))
+                .escaped(actions)
+        {
+            self.cancel_chat(cx);
+        }
+        if self.ui.button(cx, ids!(chat_clear)).clicked(actions)
+            || self.ui.button(cx, ids!(reader_chat_clear)).clicked(actions)
+        {
+            self.clear_chat(cx);
+        }
+        if self.ui.button(cx, ids!(ai_save)).clicked(actions) {
+            let endpoint_input = self.ui.text_input(cx, ids!(ai_endpoint)).text();
+            let endpoint = readwise_core::ai::normalize_chat_endpoint(&endpoint_input);
+            let settings = endpoint.map(|endpoint| readwise_core::ai::AiSettings {
+                endpoint,
+                model: self
+                    .ui
+                    .text_input(cx, ids!(ai_model))
+                    .text()
+                    .trim()
+                    .to_string(),
+                api_key: self.ui.text_input(cx, ids!(ai_api_key)).text(),
+            });
+            if let Err(error) = &settings {
+                self.ui
+                    .label(cx, ids!(ai_settings_status))
+                    .set_text(cx, error);
+            } else if let Ok(settings) = settings {
+                if settings.model.is_empty() {
+                    self.ui
+                        .label(cx, ids!(ai_settings_status))
+                        .set_text(cx, "模型名称不能为空");
+                    return;
+                }
+                self.ui
+                    .label(cx, ids!(ai_settings_status))
+                    .set_text(cx, "正在保存…");
+                spawn_save_ai_settings(settings);
+            }
         }
         if self.ui.button(cx, ids!(reload_button)).clicked(actions) {
             self.reload_count += 1;
@@ -2399,6 +3351,100 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::MouseDown(e) = event {
+            let popup_captures_pointer = SEL_RANGE.read().unwrap().is_some()
+                && self
+                    .ui
+                    .widget(cx, ids!(selection_popup))
+                    .area()
+                    .clipped_rect(cx)
+                    .contains(e.abs);
+            SELECTION_POPUP_POINTER.store(popup_captures_pointer, Ordering::Relaxed);
+        }
+        let wire_outcome = self
+            .ai_request
+            .and_then(|request| inspect_ai_network_event(event, request));
+        let stream_updates = if let Some(request) = self.ai_request {
+            self.decode_ai_stream_event(event, request)
+        } else {
+            Vec::new()
+        };
+        let ai_events = self
+            .ai_backend
+            .as_mut()
+            .map(|backend| backend.handle_event(cx, event))
+            .unwrap_or_default();
+        if let Some(outcome) = wire_outcome {
+            match outcome {
+                AiWireOutcome::NonStreamComplete(text) => {
+                    if let Some(request_id) = self.ai_request {
+                        if let Some(backend) = &mut self.ai_backend {
+                            backend.cancel_request(cx, request_id);
+                        }
+                    }
+                    self.finish_chat(cx, text);
+                }
+                AiWireOutcome::Failure(error) => self.fail_chat(cx, error),
+            }
+        } else {
+            let mut stream_failure = None;
+            for update in stream_updates {
+                match update {
+                    AiSseUpdate::ReasoningStarted => {
+                        self.set_chat_status(cx, "模型正在思考…");
+                        self.redraw_chat(cx);
+                    }
+                    AiSseUpdate::Text(text) => {
+                        CHAT_DATA.write().unwrap().streaming_text.push_str(&text);
+                        self.set_chat_status(cx, "正在输出回答…");
+                        self.redraw_chat(cx);
+                    }
+                    AiSseUpdate::Done => {}
+                    AiSseUpdate::Failure(error) => {
+                        stream_failure.get_or_insert(error);
+                    }
+                }
+            }
+            if let Some(error) = stream_failure {
+                self.fail_chat(cx, error);
+            } else {
+                for ai_event in ai_events {
+                    match ai_event {
+                        AiEvent::StreamDelta {
+                            request_id,
+                            delta: StreamDelta::TextDelta { text },
+                        } if self.ai_request == Some(request_id) && !self.ai_stream.saw_content => {
+                            CHAT_DATA.write().unwrap().streaming_text.push_str(&text);
+                            self.redraw_chat(cx);
+                        }
+                        AiEvent::Complete {
+                            request_id,
+                            response,
+                        } if self.ai_request == Some(request_id) => {
+                            let fallback = response.message.text();
+                            let has_text = !fallback.is_empty()
+                                || !CHAT_DATA.read().unwrap().streaming_text.is_empty();
+                            if has_text {
+                                self.finish_chat(cx, fallback);
+                            } else {
+                                let error = if self.ai_stream.saw_reasoning {
+                                    "模型完成了思考，但没有返回可显示的正文（可能达到输出上限）"
+                                } else {
+                                    "服务端完成了请求，但没有返回文本"
+                                };
+                                self.fail_chat(cx, error.to_string());
+                            }
+                        }
+                        AiEvent::Error { request_id, error }
+                            if self.ai_request == Some(request_id) =>
+                        {
+                            self.fail_chat(cx, error);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         match event {
             Event::Startup => spawn_db_init(),
             Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
@@ -2434,5 +3480,8 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if matches!(event, Event::MouseUp(_)) {
+            SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
+        }
     }
 }

@@ -3,6 +3,7 @@ resolver = "2"
 members = ["app", "core"]
 
 [workspace.dependencies]
+makepad-ai = { git = "https://github.com/makepad/makepad", branch = "dev" }
 makepad-widgets = { git = "https://github.com/makepad/makepad", branch = "dev" }
 
 [profile.release]

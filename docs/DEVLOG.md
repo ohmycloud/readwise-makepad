@@ -2,6 +2,20 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-27 — M5 第一刀：真实 AI 流式对话 + 阅读选区问 AI
+
+- 用户实测补修：阅读页顶层快捷键原先无视键盘焦点，右侧 AI、笔记、主 AI 页和设置页的 `TextInput` 输入空格/方向键时会同时驱动正文翻页；现仅在所有文本输入框均未聚焦时响应阅读快捷键。
+- macOS 流式无回复根因：Makepad 的 `NSURLSession` 流式 chunk/complete 事件按设计携带 `status_code = 0`（该回调无状态码），旧兼容层误判成 HTTP 失败并在第一个 chunk 取消请求；现只判定非零的非 2xx 状态码。另加入跨任意网络/UTF-8 分片的 SSE 增量缓冲，兼容 DeepSeek 先发 `reasoning_content` 再发 `content`，思考阶段给出状态反馈但不展示内部推理；普通 JSON 错误、网络错误、空回答和 60 秒超时均显示在主/侧 AI 状态栏。
+- 用户实测补修：选区菜单原本只是视觉浮在正文上方，点击仍会穿透到 `ChapterList`；正文的原始 `MouseDown` 抢先清空 `SELECTED_TEXT`，随后“问 AI”等按钮动作只能读到空文本。顶层现在按菜单实际区域捕获一次完整指针手势，正文列表在按下、移动、抬起阶段不再接收穿透事件；“问 AI”会保留选文、打开右侧栏并提交提示，同时消除复制、笔记、生词、翻译、发音和高亮的同类隐患。
+- 用户实测补修：阅读选区“问 AI”改为留在阅读页并打开 360px 右侧对话栏，主 AI 页与侧栏共享消息、流式状态、停止/新对话和持久化线程。
+- 无回复根因：设置保存的是 SDK 语义的 DeepSeek 根地址 `https://api.deepseek.com`，而 `makepad_ai` 把配置当完整 POST URL；现按服务商规则归一到 `/chat/completions`（同时兼容常见 `/v1` 与完整 URL）。并在官方后端外补齐 HTTP 非 2xx、非 SSE 200、空响应检测，错误不再静默挂起。
+- 用官方 `makepad_ai::OpenAiBackend` 替换 M0 的模拟打字机，复用 Makepad 原生网络事件处理 OpenAI-compatible SSE；支持多轮上下文、停止生成、错误反馈和新对话。
+- 新增 AI 对话页与 PortalList 消息气泡；设置页可配置完整 chat-completions 端点、模型名和 API Key（本地免鉴权服务允许空 key），密钥输入默认遮罩。
+- 迁移 threads 数据层：强类型消息 JSON、最近全局线程恢复、upsert 保存；新增 `app_settings` 表持久化 AI 配置。回答完成、停止和请求失败均保存当前会话。
+- 阅读选区浮层新增“问 AI”：把完整跨块选区组装为阅读解释提示，直接切到 AI 页并发起流式请求。
+- M4 经用户实测通过，milestone 正式关闭。M5 的 chat/side-chat 代码完成，等待用户用真实端点验证后勾选。
+- 验证：`cargo check --workspace --offline`、`cargo test --workspace --offline`（18/18）、`cargo clippy --workspace --all-targets --offline`、`git diff --check` 均通过；桌面 App 真实启动且 schema 迁移成功，无 Splash/DSL 错误。Clippy 仅保留既有 EPUB/TOC/RubyWord lint。
+
 ## 2026-08-26 — M4 实测修复：注音空库、滚动划词、选区操作浮层
 
 - 注音未显示的直接原因不是设置开关，而是当前 `word_glosses/book_glosses/known_words` 均为空，旧实现对此静默跳过。加入 ECDICT MIT 许可派生的离线基础释义：按项目现有词级表筛选 2-4 级词、压成单条短中文释义，共 4437 条/约 95 KB；新安装或近乎空库启动时 `INSERT OR IGNORE` 补齐，保留用户与书籍语境释义。来源版本、许可与可复现生成脚本一并入库。当前实测库已从 0 补到 4437 条。

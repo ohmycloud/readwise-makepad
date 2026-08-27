@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::books::{self, models::*};
 use crate::notes::{self, models::Note};
+use crate::threads::{self, models::*};
 use crate::vocab::{self, models::*};
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -91,6 +92,85 @@ impl Db {
     ) -> Result<std::collections::HashMap<usize, Vec<books::Highlight>>, String> {
         self.rt
             .block_on(books::get_highlights_by_chapter(&self.pool, book_id))
+    }
+
+    // —— AI 设置与对话 ——
+
+    pub fn load_ai_settings(&self) -> Result<crate::ai::AiSettings, String> {
+        self.rt.block_on(async {
+            use sqlx::Row;
+
+            let rows = sqlx::query(
+                "SELECT key, value FROM app_settings WHERE key IN ('ai.endpoint', 'ai.model', 'ai.api_key')",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| format!("读取 AI 设置失败: {}", e))?;
+            let mut settings = crate::ai::AiSettings::default();
+            for row in rows {
+                let key: String = row.get("key");
+                let value: String = row.get("value");
+                match key.as_str() {
+                    "ai.endpoint" => settings.endpoint = value,
+                    "ai.model" => settings.model = value,
+                    "ai.api_key" => settings.api_key = value,
+                    _ => {}
+                }
+            }
+            Ok(settings)
+        })
+    }
+
+    pub fn save_ai_settings(&self, settings: &crate::ai::AiSettings) -> Result<(), String> {
+        self.rt.block_on(async {
+            let now = chrono::Utc::now().timestamp_millis();
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| format!("开启 AI 设置事务失败: {}", e))?;
+            for (key, value) in [
+                ("ai.endpoint", settings.endpoint.as_str()),
+                ("ai.model", settings.model.as_str()),
+                ("ai.api_key", settings.api_key.as_str()),
+            ] {
+                sqlx::query(
+                    "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) \
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                )
+                .bind(key)
+                .bind(value)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("保存 AI 设置失败: {}", e))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|e| format!("提交 AI 设置失败: {}", e))
+        })
+    }
+
+    pub fn latest_thread(&self, book_id: Option<&str>) -> Result<Option<Thread>, String> {
+        self.rt.block_on(threads::latest_thread(&self.pool, book_id))
+    }
+
+    pub fn save_thread(
+        &self,
+        thread_id: Option<&str>,
+        book_id: Option<&str>,
+        title: &str,
+        metadata: &str,
+        messages: &[ThreadMessage],
+    ) -> Result<Thread, String> {
+        self.rt.block_on(threads::save_thread(
+            &self.pool,
+            thread_id,
+            book_id,
+            title,
+            metadata,
+            messages,
+        ))
     }
 
     // —— 笔记 ——
