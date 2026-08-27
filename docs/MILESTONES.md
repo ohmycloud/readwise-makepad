@@ -80,8 +80,8 @@
 - [x] OpenAI-compatible 流式 chat（官方 `makepad_ai` SSE、停止/新对话、错误反馈、设置与 threads 持久化；真实端点实测通过）
 - [x] 阅读页 side-chat（选区浮层“问 AI”在阅读页右侧栏流式交互；真实端点实测通过）
 - [x] skills（Prompt 模板）管理：增删改、启停、系统技能全局生效、自定义技能一次性应用到下一条提问
-- [ ] 桌面端可选：llamacpp 本地推理（子进程方案，`#[cfg(desktop)]`）
-- [ ] 移动端：仅远程 API
+- [ ] 桌面端可选：llama.cpp 本地推理（进程管理、设置持久化、健康检查、取消加载、异常退出回退均已完成；待真实 `llama-server` + GGUF 实测）
+- [x] 移动端：仅远程 API（子进程实现按目标平台隔离，`aarch64-apple-ios` 交叉编译通过）
 
 验收：三个 AI 功能（chat/side-chat/skills）流式输出不挂起。
 

@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock, RwLock};
 
 type AiSettings = readwise_core::ai::AiSettings;
+type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
+type LocalAiSession = readwise_core::local_ai::LocalAiSession;
 
 app_main!(App);
 
@@ -19,6 +21,15 @@ static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> =
 
 /// 全局数据库句柄：后台线程初始化后写入，各处只读使用。
 static DB: OnceLock<readwise_core::Db> = OnceLock::new();
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+static LOCAL_AI_MANAGER: LazyLock<
+    std::sync::Mutex<readwise_core::local_ai::LocalAiManager>,
+> = LazyLock::new(|| {
+    std::sync::Mutex::new(readwise_core::local_ai::LocalAiManager::default())
+});
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+static LOCAL_AI_CANCEL: AtomicBool = AtomicBool::new(false);
 
 /// 书架数据（UI 侧只读渲染，后台线程写）。
 static SHELF: LazyLock<RwLock<Vec<ShelfItem>>> = LazyLock::new(|| RwLock::new(Vec::new()));
@@ -950,6 +961,87 @@ enum AiStateAction {
     Error(String),
 }
 
+#[derive(Debug)]
+enum LocalAiAction {
+    Loaded(readwise_core::local_ai::LocalAiSettings),
+    Saved(readwise_core::local_ai::LocalAiSettings),
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    Started {
+        settings: readwise_core::local_ai::LocalAiSettings,
+        session: readwise_core::local_ai::LocalAiSession,
+    },
+    Stopped,
+    StartFailed(String),
+    Error(String),
+}
+
+fn spawn_load_local_ai_settings() {
+    std::thread::spawn(|| {
+        let Some(db) = DB.get() else { return };
+        match db.load_local_ai_settings() {
+            Ok(settings) => Cx::post_action(LocalAiAction::Loaded(settings)),
+            Err(error) => Cx::post_action(LocalAiAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_save_local_ai_settings(settings: readwise_core::local_ai::LocalAiSettings) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        match db.save_local_ai_settings(&settings) {
+            Ok(()) => Cx::post_action(LocalAiAction::Saved(settings)),
+            Err(error) => Cx::post_action(LocalAiAction::Error(error)),
+        }
+    });
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn spawn_start_local_ai(settings: readwise_core::local_ai::LocalAiSettings) {
+    LOCAL_AI_CANCEL.store(false, Ordering::Relaxed);
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(error) = db.save_local_ai_settings(&settings) {
+            Cx::post_action(LocalAiAction::StartFailed(error));
+            return;
+        }
+        let result = LOCAL_AI_MANAGER
+            .lock()
+            .map_err(|_| "本地 AI 进程状态锁已损坏".to_string())
+            .and_then(|mut manager| manager.start_cancellable(&settings, &LOCAL_AI_CANCEL));
+        match result {
+            Ok(session) => Cx::post_action(LocalAiAction::Started { settings, session }),
+            Err(error) => Cx::post_action(LocalAiAction::StartFailed(error)),
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn spawn_start_local_ai(_settings: readwise_core::local_ai::LocalAiSettings) {
+    Cx::post_action(LocalAiAction::StartFailed(
+        "移动端不支持启动 llama.cpp 子进程，请使用远程 API".to_string(),
+    ));
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn spawn_stop_local_ai() {
+    LOCAL_AI_CANCEL.store(true, Ordering::Relaxed);
+    std::thread::spawn(|| {
+        let result = LOCAL_AI_MANAGER
+            .lock()
+            .map_err(|_| "本地 AI 进程状态锁已损坏".to_string())
+            .and_then(|mut manager| manager.stop());
+        match result {
+            Ok(()) => Cx::post_action(LocalAiAction::Stopped),
+            Err(error) => Cx::post_action(LocalAiAction::Error(error)),
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn spawn_stop_local_ai() {
+    Cx::post_action(LocalAiAction::Stopped);
+}
+
 fn spawn_load_ai_state() {
     std::thread::spawn(|| {
         let Some(db) = DB.get() else { return };
@@ -1801,6 +1893,78 @@ script_mod! {
                                 draw_text.color: #x8f8f8f
                                 draw_text.text_style.font_size: 9
                             }
+                            local_ai_section := View{
+                                visible: false
+                                width: Fill height: Fit
+                                flow: Down spacing: 9
+                                Label{
+                                    text: "本地 AI（桌面 llama.cpp）"
+                                    draw_text.text_style.font_size: 13
+                                    draw_text.color: #x9a9a9a
+                                }
+                                Label{
+                                    width: Fill height: Fit
+                                    text: "填写已安装的 llama-server 与 GGUF 文件路径。服务只监听 127.0.0.1；启动后聊天会自动切换到本地模型。"
+                                    draw_text.color: #x8f8f8f
+                                    draw_text.text_style.font_size: 9
+                                }
+                                local_ai_binary := TextInput{
+                                    width: Fill height: 38
+                                    empty_text: "llama-server 路径，或 PATH 中的 llama-server"
+                                }
+                                local_ai_model_path := TextInput{
+                                    width: Fill height: 38
+                                    empty_text: "GGUF 模型完整路径"
+                                }
+                                local_ai_numbers := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 10
+                                    align: Align{y: 0.5}
+                                    Label{text: "端口"}
+                                    local_ai_port := TextInput{
+                                        width: 72 height: 38
+                                        is_numeric_only: true
+                                        text: "8080"
+                                    }
+                                    Label{text: "上下文"}
+                                    local_ai_context := TextInput{
+                                        width: 82 height: 38
+                                        is_numeric_only: true
+                                        text: "4096"
+                                    }
+                                    Label{text: "线程（0=自动）"}
+                                    local_ai_threads := TextInput{
+                                        width: 62 height: 38
+                                        is_numeric_only: true
+                                        text: "0"
+                                    }
+                                    Label{text: "GPU 层"}
+                                    local_ai_gpu_layers := TextInput{
+                                        width: 62 height: 38
+                                        is_numeric_only: true
+                                        text: "0"
+                                    }
+                                }
+                                local_ai_auto_start := CheckBox{
+                                    text: "应用启动时自动加载本地模型"
+                                }
+                                local_ai_actions := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 10
+                                    local_ai_start := Button{text: "启动并使用"}
+                                    local_ai_save := ButtonFlat{text: "仅保存设置"}
+                                    local_ai_stop := ButtonFlatter{
+                                        visible: false
+                                        text: "停止本地服务"
+                                    }
+                                }
+                                local_ai_status := Label{
+                                    width: Fill height: Fit
+                                    text: "本地服务未启动。macOS 可通过 brew install llama.cpp 安装。"
+                                    draw_text.color: #x8f8f8f
+                                    draw_text.text_style.font_size: 9
+                                }
+                            }
                         }
                     }
                 }
@@ -2367,6 +2531,12 @@ pub struct App {
     #[rust]
     ai_settings: AiSettings,
     #[rust]
+    local_ai_settings: LocalAiSettings,
+    #[rust]
+    local_ai_session: Option<LocalAiSession>,
+    #[rust]
+    local_ai_poll_timer: Timer,
+    #[rust]
     chat_thread_id: Option<String>,
     #[rust]
     editing_skill_id: Option<String>,
@@ -2399,11 +2569,97 @@ impl App {
             ids!(ai_endpoint),
             ids!(ai_model),
             ids!(ai_api_key),
+            ids!(local_ai_binary),
+            ids!(local_ai_model_path),
+            ids!(local_ai_port),
+            ids!(local_ai_context),
+            ids!(local_ai_threads),
+            ids!(local_ai_gpu_layers),
             ids!(skill_name_input),
             ids!(skill_content_input),
         ]
         .into_iter()
         .any(|path| self.ui.text_input(cx, path).key_focus(cx))
+    }
+
+    fn apply_local_ai_settings_to_ui(
+        &self,
+        cx: &mut Cx,
+        settings: &readwise_core::local_ai::LocalAiSettings,
+    ) {
+        self.ui
+            .text_input(cx, ids!(local_ai_binary))
+            .set_text(cx, &settings.binary_path);
+        self.ui
+            .text_input(cx, ids!(local_ai_model_path))
+            .set_text(cx, &settings.model_path);
+        self.ui
+            .text_input(cx, ids!(local_ai_port))
+            .set_text(cx, &settings.port.to_string());
+        self.ui
+            .text_input(cx, ids!(local_ai_context))
+            .set_text(cx, &settings.context_size.to_string());
+        self.ui
+            .text_input(cx, ids!(local_ai_threads))
+            .set_text(cx, &settings.threads.to_string());
+        self.ui
+            .text_input(cx, ids!(local_ai_gpu_layers))
+            .set_text(cx, &settings.gpu_layers.to_string());
+        self.ui.check_box(cx, ids!(local_ai_auto_start)).set_active(
+            cx,
+            settings.auto_start,
+            Animate::No,
+        );
+    }
+
+    fn local_ai_settings_from_ui(
+        &self,
+        cx: &Cx,
+    ) -> Result<readwise_core::local_ai::LocalAiSettings, String> {
+        fn number<T: std::str::FromStr>(value: String, label: &str) -> Result<T, String> {
+            value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{label}必须是有效整数"))
+        }
+
+        Ok(readwise_core::local_ai::LocalAiSettings {
+            binary_path: self
+                .ui
+                .text_input(cx, ids!(local_ai_binary))
+                .text()
+                .trim()
+                .to_string(),
+            model_path: self
+                .ui
+                .text_input(cx, ids!(local_ai_model_path))
+                .text()
+                .trim()
+                .to_string(),
+            port: number(self.ui.text_input(cx, ids!(local_ai_port)).text(), "端口")?,
+            context_size: number(
+                self.ui.text_input(cx, ids!(local_ai_context)).text(),
+                "上下文长度",
+            )?,
+            threads: number(
+                self.ui.text_input(cx, ids!(local_ai_threads)).text(),
+                "线程数",
+            )?,
+            gpu_layers: number(
+                self.ui.text_input(cx, ids!(local_ai_gpu_layers)).text(),
+                "GPU 层数",
+            )?,
+            auto_start: self.ui.check_box(cx, ids!(local_ai_auto_start)).active(cx),
+        })
+    }
+
+    fn set_local_ai_running(&self, cx: &mut Cx, running: bool) {
+        self.ui
+            .widget(cx, ids!(local_ai_start))
+            .set_visible(cx, !running);
+        self.ui
+            .widget(cx, ids!(local_ai_stop))
+            .set_visible(cx, running);
     }
 
     fn clear_skill_editor(&mut self, cx: &mut Cx) {
@@ -2569,30 +2825,53 @@ impl App {
         if self.ai_request.is_some() {
             self.cancel_chat(cx);
         }
-        let endpoint = match readwise_core::ai::normalize_chat_endpoint(&self.ai_settings.endpoint)
-        {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                self.ai_backend = None;
-                self.set_chat_status(cx, &error);
-                return;
-            }
+        let (endpoint, model, api_key, is_local) = if let Some(session) = &self.local_ai_session {
+            (
+                session.endpoint(),
+                readwise_core::local_ai::LOCAL_MODEL_ALIAS.to_string(),
+                String::new(),
+                true,
+            )
+        } else {
+            let endpoint =
+                match readwise_core::ai::normalize_chat_endpoint(&self.ai_settings.endpoint) {
+                    Ok(endpoint) => endpoint,
+                    Err(error) => {
+                        self.ai_backend = None;
+                        self.set_chat_status(cx, &error);
+                        return;
+                    }
+                };
+            (
+                endpoint,
+                self.ai_settings.model.trim().to_string(),
+                self.ai_settings.api_key.clone(),
+                false,
+            )
         };
-        let model = self.ai_settings.model.trim();
         if model.is_empty() {
             self.ai_backend = None;
             self.set_chat_status(cx, "请先到设置页填写模型名称");
             return;
         }
         self.ai_backend = Some(OpenAiBackend::new(BackendConfig::OpenAI {
-            api_key: self.ai_settings.api_key.clone(),
-            model: model.to_string(),
+            api_key,
+            model: model.clone(),
             base_url: Some(endpoint.clone()),
             reasoning_effort: None,
         }));
         self.set_chat_status(
             cx,
-            &format!("已就绪 · {} · {}", self.ai_settings.model.trim(), endpoint),
+            &format!(
+                "{}已就绪 · {} · {}",
+                if is_local {
+                    "本地模型"
+                } else {
+                    "远程模型"
+                },
+                model,
+                endpoint
+            ),
         );
     }
 
@@ -3206,6 +3485,40 @@ impl MatchEvent for App {
                 "请求超过 60 秒仍未完成，请检查网络或接口设置".to_string(),
             );
         }
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        if self.local_ai_session.is_some() && self.local_ai_poll_timer.is_timer(event).is_some() {
+            let exit = LOCAL_AI_MANAGER
+                .lock()
+                .map_err(|_| "本地 AI 进程状态锁已损坏".to_string())
+                .and_then(|mut manager| manager.poll_exit());
+            match exit {
+                Ok(Some(message)) => {
+                    self.local_ai_session = None;
+                    cx.stop_timer(self.local_ai_poll_timer);
+                    self.local_ai_poll_timer = Timer::default();
+                    self.set_local_ai_running(cx, false);
+                    self.ui
+                        .label(cx, ids!(local_ai_status))
+                        .set_text(cx, &format!("{message}，聊天已恢复远程 API"));
+                    self.configure_ai_backend(cx);
+                }
+                Ok(None) => {}
+                Err(error) => self
+                    .ui
+                    .label(cx, ids!(local_ai_status))
+                    .set_text(cx, &error),
+            }
+        }
+    }
+
+    fn handle_shutdown(&mut self, _cx: &mut Cx) {
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        {
+            LOCAL_AI_CANCEL.store(true, Ordering::Relaxed);
+            if let Ok(mut manager) = LOCAL_AI_MANAGER.lock() {
+                let _ = manager.stop();
+            }
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -3243,6 +3556,7 @@ impl MatchEvent for App {
                         spawn_load_shelf();
                         spawn_load_ai_state();
                         spawn_load_skills();
+                        spawn_load_local_ai_settings();
                     }
                     DbAction::Failed(e) => {
                         let status = format!("数据库失败:\n{}", e);
@@ -3314,6 +3628,82 @@ impl MatchEvent for App {
                         self.ui
                             .label(cx, ids!(skills_status))
                             .set_text(cx, &format!("技能操作失败：{}", error));
+                    }
+                }
+                self.ui.redraw(cx);
+                continue;
+            }
+            if let Some(local_ai) = action.downcast_ref::<LocalAiAction>() {
+                match local_ai {
+                    LocalAiAction::Loaded(settings) => {
+                        self.local_ai_settings = settings.clone();
+                        self.apply_local_ai_settings_to_ui(cx, settings);
+                        self.ui
+                            .widget(cx, ids!(local_ai_section))
+                            .set_visible(cx, readwise_core::local_ai::LOCAL_AI_SUPPORTED);
+                        if settings.auto_start
+                            && readwise_core::local_ai::LOCAL_AI_SUPPORTED
+                            && !settings.model_path.trim().is_empty()
+                        {
+                            self.ui
+                                .label(cx, ids!(local_ai_status))
+                                .set_text(cx, "正在自动加载本地模型…");
+                            self.set_local_ai_running(cx, true);
+                            spawn_start_local_ai(settings.clone());
+                        }
+                    }
+                    LocalAiAction::Saved(settings) => {
+                        self.local_ai_settings = settings.clone();
+                        self.apply_local_ai_settings_to_ui(cx, settings);
+                        self.ui
+                            .label(cx, ids!(local_ai_status))
+                            .set_text(cx, "本地 AI 设置已保存 ✓");
+                    }
+                    #[cfg(any(
+                        target_os = "macos",
+                        target_os = "windows",
+                        target_os = "linux"
+                    ))]
+                    LocalAiAction::Started { settings, session } => {
+                        self.local_ai_settings = settings.clone();
+                        self.local_ai_session = Some(session.clone());
+                        self.apply_local_ai_settings_to_ui(cx, settings);
+                        self.set_local_ai_running(cx, true);
+                        if self.local_ai_poll_timer.0 != 0 {
+                            cx.stop_timer(self.local_ai_poll_timer);
+                        }
+                        self.local_ai_poll_timer = cx.start_interval(2.0);
+                        self.ui.label(cx, ids!(local_ai_status)).set_text(
+                            cx,
+                            &format!(
+                                "本地模型运行中 · PID {} · 端口 {} · 聊天已切换到本地服务",
+                                session.pid, session.port
+                            ),
+                        );
+                        self.configure_ai_backend(cx);
+                    }
+                    LocalAiAction::Stopped => {
+                        if self.local_ai_poll_timer.0 != 0 {
+                            cx.stop_timer(self.local_ai_poll_timer);
+                            self.local_ai_poll_timer = Timer::default();
+                        }
+                        self.local_ai_session = None;
+                        self.set_local_ai_running(cx, false);
+                        self.ui
+                            .label(cx, ids!(local_ai_status))
+                            .set_text(cx, "本地服务已停止，聊天已恢复远程 API");
+                        self.configure_ai_backend(cx);
+                    }
+                    LocalAiAction::StartFailed(error) => {
+                        self.set_local_ai_running(cx, self.local_ai_session.is_some());
+                        self.ui
+                            .label(cx, ids!(local_ai_status))
+                            .set_text(cx, &format!("本地模型启动失败：{error}"));
+                    }
+                    LocalAiAction::Error(error) => {
+                        self.ui
+                            .label(cx, ids!(local_ai_status))
+                            .set_text(cx, &format!("本地 AI 操作失败：{error}"));
                     }
                 }
                 self.ui.redraw(cx);
@@ -3854,6 +4244,47 @@ impl MatchEvent for App {
             || self.ui.button(cx, ids!(reader_chat_clear)).clicked(actions)
         {
             self.clear_chat(cx);
+        }
+        if self.ui.button(cx, ids!(local_ai_save)).clicked(actions) {
+            match self.local_ai_settings_from_ui(cx) {
+                Ok(settings) => {
+                    self.ui
+                        .label(cx, ids!(local_ai_status))
+                        .set_text(cx, "正在保存本地 AI 设置…");
+                    spawn_save_local_ai_settings(settings);
+                }
+                Err(error) => self
+                    .ui
+                    .label(cx, ids!(local_ai_status))
+                    .set_text(cx, &error),
+            }
+        }
+        if self.ui.button(cx, ids!(local_ai_start)).clicked(actions) {
+            match self.local_ai_settings_from_ui(cx) {
+                Ok(settings) => match settings.validate() {
+                    Ok(()) => {
+                        self.ui
+                            .label(cx, ids!(local_ai_status))
+                            .set_text(cx, "正在加载 GGUF 模型，首次启动可能需要几分钟…");
+                        self.set_local_ai_running(cx, true);
+                        spawn_start_local_ai(settings);
+                    }
+                    Err(error) => self
+                        .ui
+                        .label(cx, ids!(local_ai_status))
+                        .set_text(cx, &error),
+                },
+                Err(error) => self
+                    .ui
+                    .label(cx, ids!(local_ai_status))
+                    .set_text(cx, &error),
+            }
+        }
+        if self.ui.button(cx, ids!(local_ai_stop)).clicked(actions) {
+            self.ui
+                .label(cx, ids!(local_ai_status))
+                .set_text(cx, "正在停止本地服务…");
+            spawn_stop_local_ai();
         }
         if self.ui.button(cx, ids!(ai_save)).clicked(actions) {
             let endpoint_input = self.ui.text_input(cx, ids!(ai_endpoint)).text();

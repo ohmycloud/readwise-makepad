@@ -2,6 +2,14 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-27 — M5 第三刀：桌面 llama.cpp 本地推理
+
+- 桌面设置页新增可选本地 AI：配置 `llama-server` 可执行文件、GGUF 模型、端口、上下文、线程数、GPU 层数与自动启动；配置复用 `app_settings` 持久化。应用不擅自下载大体积二进制或模型，由用户明确选择本机文件。
+- 新增 `LocalAiManager` 统一持有子进程：仅监听 `127.0.0.1`，启动时检查模型与端口，读取 stdout/stderr 判断就绪并轮询 `/health`，保留最近日志用于错误反馈；支持 180 秒超时、加载中取消、停止、异常退出检测和应用关闭清理。
+- 本地服务就绪后，现有 OpenAI-compatible 流式聊天自动切到 `http://127.0.0.1:<port>/v1/chat/completions` 与固定模型别名；停止或异常退出后恢复用户原有远程 API 设置，不分叉聊天和 side-chat 的请求链路。
+- 子进程管理只在 macOS/Windows/Linux 编译；移动端保留同一份配置类型但隐藏本地服务 UI，并明确只走远程 API。`aarch64-apple-ios` 交叉编译已通过。
+- 验证：`cargo check --workspace --offline` 通过；提升沙箱网络权限后 `cargo test --workspace --offline` 27/27 通过，其中假 `llama-server` 覆盖了启动、就绪、轮询与停止生命周期；桌面 App 启动无 Splash/DSL 错误。当前机器未安装 `llama-server` 且没有 GGUF，真实模型加载与推理仍保留为 M5 验收项。
+
 ## 2026-08-27 — M5 第二刀：AI skills / Prompt 模板管理
 
 - 新增完整 skills 数据层与同步 `Db` 门面：列表、创建、编辑、启停、删除，统一校验空名称/空内容与重名；系统技能允许编辑内容和启停，但名称固定且不可删除，避免重启时因改名又补入一份默认模板。

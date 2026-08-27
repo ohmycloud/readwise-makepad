@@ -152,6 +152,85 @@ impl Db {
         })
     }
 
+    pub fn load_local_ai_settings(&self) -> Result<crate::local_ai::LocalAiSettings, String> {
+        self.rt.block_on(async {
+            use sqlx::Row;
+
+            let rows =
+                sqlx::query("SELECT key, value FROM app_settings WHERE key LIKE 'local_ai.%'")
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(|e| format!("读取本地 AI 设置失败: {e}"))?;
+            let mut settings = crate::local_ai::LocalAiSettings::default();
+            for row in rows {
+                let key: String = row.get("key");
+                let value: String = row.get("value");
+                match key.as_str() {
+                    "local_ai.binary_path" => settings.binary_path = value,
+                    "local_ai.model_path" => settings.model_path = value,
+                    "local_ai.port" => {
+                        settings.port = value.parse().unwrap_or(settings.port);
+                    }
+                    "local_ai.context_size" => {
+                        settings.context_size = value.parse().unwrap_or(settings.context_size);
+                    }
+                    "local_ai.threads" => {
+                        settings.threads = value.parse().unwrap_or(settings.threads);
+                    }
+                    "local_ai.gpu_layers" => {
+                        settings.gpu_layers = value.parse().unwrap_or(settings.gpu_layers);
+                    }
+                    "local_ai.auto_start" => settings.auto_start = value == "1",
+                    _ => {}
+                }
+            }
+            Ok(settings)
+        })
+    }
+
+    pub fn save_local_ai_settings(
+        &self,
+        settings: &crate::local_ai::LocalAiSettings,
+    ) -> Result<(), String> {
+        self.rt.block_on(async {
+            let now = chrono::Utc::now().timestamp_millis();
+            let port = settings.port.to_string();
+            let context_size = settings.context_size.to_string();
+            let threads = settings.threads.to_string();
+            let gpu_layers = settings.gpu_layers.to_string();
+            let auto_start = if settings.auto_start { "1" } else { "0" };
+            let values = [
+                ("local_ai.binary_path", settings.binary_path.as_str()),
+                ("local_ai.model_path", settings.model_path.as_str()),
+                ("local_ai.port", port.as_str()),
+                ("local_ai.context_size", context_size.as_str()),
+                ("local_ai.threads", threads.as_str()),
+                ("local_ai.gpu_layers", gpu_layers.as_str()),
+                ("local_ai.auto_start", auto_start),
+            ];
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| format!("开启本地 AI 设置事务失败: {e}"))?;
+            for (key, value) in values {
+                sqlx::query(
+                    "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) \
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                )
+                .bind(key)
+                .bind(value)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("保存本地 AI 设置失败: {e}"))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|e| format!("提交本地 AI 设置失败: {e}"))
+        })
+    }
+
     pub fn latest_thread(&self, book_id: Option<&str>) -> Result<Option<Thread>, String> {
         self.rt
             .block_on(threads::latest_thread(&self.pool, book_id))
