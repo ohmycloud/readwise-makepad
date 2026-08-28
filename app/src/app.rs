@@ -17,6 +17,20 @@ type VocabEntry = readwise_core::vocab::models::VocabBookEntry;
 app_main!(App);
 
 const PARA_COUNT: usize = 200;
+const COMPACT_LAYOUT_BREAKPOINT: f64 = 720.0;
+
+fn uses_compact_layout(size: DVec2) -> bool {
+    size.x > 0.0 && size.y > 0.0 && size.x < COMPACT_LAYOUT_BREAKPOINT
+}
+
+fn should_keep_started_reading_session(
+    invalidated: bool,
+    app_in_foreground: bool,
+    on_reader_page: bool,
+    is_current_book: bool,
+) -> bool {
+    !invalidated && app_in_foreground && on_reader_page && is_current_book
+}
 
 static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> =
     LazyLock::new(|| RwLock::new(sample_chapter::build_paragraphs(PARA_COUNT)));
@@ -619,6 +633,35 @@ mod ai_response_tests {
 }
 
 #[cfg(test)]
+mod responsive_layout_tests {
+    use super::*;
+
+    #[test]
+    fn compact_layout_uses_phone_width_and_ignores_unknown_geometry() {
+        assert!(uses_compact_layout(dvec2(390.0, 844.0)));
+        assert!(uses_compact_layout(dvec2(719.0, 900.0)));
+        assert!(!uses_compact_layout(dvec2(720.0, 900.0)));
+        assert!(!uses_compact_layout(dvec2(1080.0, 720.0)));
+        assert!(!uses_compact_layout(dvec2(0.0, 0.0)));
+    }
+
+    #[test]
+    fn invalidated_or_background_session_is_finished_instead_of_kept() {
+        assert!(should_keep_started_reading_session(false, true, true, true));
+        assert!(!should_keep_started_reading_session(true, true, true, true));
+        assert!(!should_keep_started_reading_session(
+            false, false, true, true
+        ));
+        assert!(!should_keep_started_reading_session(
+            false, true, false, true
+        ));
+        assert!(!should_keep_started_reading_session(
+            false, true, true, false
+        ));
+    }
+}
+
+#[cfg(test)]
 mod list_projection_tests {
     use super::*;
 
@@ -979,6 +1022,8 @@ fn speak_text(text: String) {
             .status();
         #[cfg(target_os = "linux")]
         let result = std::process::Command::new("spd-say").arg(&text).status();
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        let _ = &text;
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         let result: Result<std::process::ExitStatus, std::io::Error> = Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -1753,9 +1798,17 @@ script_mod! {
                             draw_text.text_style.font_size: 8.5
                         }
                     }
-                    pages := PageFlip{
+                    main_column := View{
                         width: Fill height: Fill
-                        active_page: @page_reader
+                        flow: Down
+                        mobile_safe_top := SolidView{
+                            visible: false
+                            width: Fill height: 0
+                            draw_bg.color: #x1f1f1f
+                        }
+                        pages := PageFlip{
+                            width: Fill height: Fill
+                            active_page: @page_reader
 
                         page_library := View{
                             width: Fill height: Fill
@@ -1951,14 +2004,14 @@ script_mod! {
                                     align: Align{x: 0.5 y: 1.0}
                                     padding: Inset{left: 18 right: 18 bottom: 18}
                                     selection_popup := RoundedView{
-                                        width: Fit height: Fit
+                                        width: 520 height: Fit
                                         new_batch: true
                                         padding: Inset{left: 12 right: 12 top: 9 bottom: 9}
                                         flow: Down spacing: 5
                                         draw_bg.color: #x303030
                                         draw_bg.border_radius: 10.0
-                                        selection_actions := View{
-                                            width: Fit height: Fit
+                                        selection_actions := ScrollXView{
+                                            width: Fill height: 38
                                             flow: Right spacing: 6
                                             align: Align{y: 0.5}
                                             copy_sel_btn := ButtonFlat{text: "复制"}
@@ -2388,7 +2441,7 @@ script_mod! {
                             }
                         }
 
-                        page_settings := ScrollYView{
+                            page_settings := ScrollYView{
                             width: Fill height: Fill
                             flow: Down padding: 24 spacing: 12
                             Label{ text: "设置" draw_text.text_style.font_size: 18 }
@@ -2593,6 +2646,26 @@ script_mod! {
                                     draw_text.color: #x8f8f8f
                                     draw_text.text_style.font_size: 9
                                 }
+                            }
+                            }
+                        }
+                        mobile_nav := SolidView{
+                            visible: false
+                            width: Fill height: Fit
+                            new_batch: true
+                            flow: Down
+                            padding: Inset{left: 4 right: 4 top: 5 bottom: 5}
+                            draw_bg.color: #x1f1f1f
+                            mobile_nav_scroll := ScrollXView{
+                                width: Fill height: 44
+                                flow: Right spacing: 4
+                                mobile_nav_library := ButtonFlat{width: 58 text: "书库"}
+                                mobile_nav_reader := ButtonFlat{width: 58 text: "阅读"}
+                                mobile_nav_chat := ButtonFlat{width: 66 text: "AI 对话"}
+                                mobile_nav_vocab := ButtonFlat{width: 66 text: "生词本"}
+                                mobile_nav_statistics := ButtonFlat{width: 58 text: "统计"}
+                                mobile_nav_skills := ButtonFlat{width: 66 text: "AI 技能"}
+                                mobile_nav_settings := ButtonFlat{width: 58 text: "设置"}
                             }
                         }
                     }
@@ -3359,6 +3432,8 @@ pub struct App {
     #[rust]
     reading_session_pending: bool,
     #[rust]
+    reading_session_invalidated: bool,
+    #[rust]
     reading_checkpoint_timer: Timer,
     #[rust]
     statistics_after_pending_session: bool,
@@ -3373,6 +3448,14 @@ pub struct App {
     #[rust]
     reader_ai_open: bool,
     #[rust]
+    compact_layout: bool,
+    #[rust]
+    responsive_layout_initialized: bool,
+    #[rust]
+    safe_area_insets: SafeAreaInsets,
+    #[rust]
+    app_in_foreground: bool,
+    #[rust]
     note_quote_text: String,
     /// 释义卡片当前展示的 (word, lemma, gloss)。
     #[rust]
@@ -3380,6 +3463,83 @@ pub struct App {
 }
 
 impl App {
+    fn sync_reader_panel_layout(&self, cx: &mut Cx) {
+        let panel_open = self.toc_open || self.note_open || self.reader_ai_open;
+        self.ui
+            .widget(cx, ids!(chapter_list))
+            .set_visible(cx, !self.compact_layout || !panel_open);
+        self.ui
+            .widget(cx, ids!(toc_panel))
+            .set_visible(cx, self.toc_open);
+        self.ui
+            .widget(cx, ids!(note_panel))
+            .set_visible(cx, self.note_open);
+        self.ui
+            .widget(cx, ids!(reader_ai_panel))
+            .set_visible(cx, self.reader_ai_open);
+
+        let mut toc_panel = self.ui.widget(cx, ids!(toc_panel));
+        let mut note_panel = self.ui.widget(cx, ids!(note_panel));
+        let mut reader_ai_panel = self.ui.widget(cx, ids!(reader_ai_panel));
+        let mut selection_popup = self.ui.widget(cx, ids!(selection_popup));
+        if self.compact_layout {
+            let fill = Size::fill();
+            script_apply_eval!(cx, toc_panel, {width: #(fill)});
+            script_apply_eval!(cx, note_panel, {width: #(fill)});
+            script_apply_eval!(cx, reader_ai_panel, {width: #(fill)});
+            script_apply_eval!(cx, selection_popup, {width: #(fill)});
+        } else {
+            script_apply_eval!(cx, toc_panel, {width: 260});
+            script_apply_eval!(cx, note_panel, {width: 320});
+            script_apply_eval!(cx, reader_ai_panel, {width: 360});
+            script_apply_eval!(cx, selection_popup, {width: 520});
+        }
+    }
+
+    fn update_responsive_layout(
+        &mut self,
+        cx: &mut Cx,
+        size: DVec2,
+        safe_area_insets: SafeAreaInsets,
+    ) {
+        if size.x <= 0.0 || size.y <= 0.0 {
+            return;
+        }
+        let compact = uses_compact_layout(size);
+        let layout_changed = !self.responsive_layout_initialized || compact != self.compact_layout;
+        let safe_area_changed = safe_area_insets != self.safe_area_insets;
+        if !layout_changed && !safe_area_changed {
+            return;
+        }
+
+        self.responsive_layout_initialized = true;
+        self.compact_layout = compact;
+        self.safe_area_insets = safe_area_insets;
+        self.ui.widget(cx, ids!(sidebar)).set_visible(cx, !compact);
+        self.ui
+            .widget(cx, ids!(mobile_nav))
+            .set_visible(cx, compact);
+        self.ui
+            .widget(cx, ids!(mobile_safe_top))
+            .set_visible(cx, compact && safe_area_insets.top > 0.0);
+        self.ui.widget(cx, ids!(title)).set_visible(cx, !compact);
+        self.ui.widget(cx, ids!(status)).set_visible(cx, !compact);
+
+        let safe_top = safe_area_insets.top;
+        let mobile_nav_padding = Inset {
+            left: 4.0,
+            right: 4.0,
+            top: 5.0,
+            bottom: safe_area_insets.bottom + 5.0,
+        };
+        let mut mobile_safe_top = self.ui.widget(cx, ids!(mobile_safe_top));
+        let mut mobile_nav = self.ui.widget(cx, ids!(mobile_nav));
+        script_apply_eval!(cx, mobile_safe_top, {height: #(safe_top)});
+        script_apply_eval!(cx, mobile_nav, {padding: #(mobile_nav_padding)});
+        self.sync_reader_panel_layout(cx);
+        self.ui.redraw(cx);
+    }
+
     fn format_reading_duration(seconds: i64) -> String {
         if seconds > 0 && seconds < 60 {
             return "< 1 分钟".to_string();
@@ -3399,7 +3559,10 @@ impl App {
     }
 
     fn start_reading_timer(&mut self, cx: &mut Cx) {
-        if !self.on_reader_page || self.reading_session_id.is_some() || self.reading_session_pending
+        if !self.app_in_foreground
+            || !self.on_reader_page
+            || self.reading_session_id.is_some()
+            || self.reading_session_pending
         {
             return;
         }
@@ -3410,12 +3573,16 @@ impl App {
             .map(|book| book.id.clone());
         let Some(book_id) = book_id else { return };
         self.reading_session_pending = true;
+        self.reading_session_invalidated = false;
         self.ui.label(cx, ids!(status)).set_text(cx, "阅读计时中…");
         spawn_start_reading_session(book_id);
     }
 
     fn stop_reading_timer(&mut self, cx: &mut Cx, load_statistics: bool) {
         let was_pending = self.reading_session_pending;
+        if was_pending {
+            self.reading_session_invalidated = true;
+        }
         cx.stop_timer(self.reading_checkpoint_timer);
         self.reading_checkpoint_timer = Timer::default();
         if let Some(id) = self.reading_session_id.take() {
@@ -4010,11 +4177,9 @@ impl App {
         self.reader_ai_open = visible;
         if visible {
             self.toc_open = false;
-            self.ui.widget(cx, ids!(toc_panel)).set_visible(cx, false);
+            self.note_open = false;
         }
-        self.ui
-            .widget(cx, ids!(reader_ai_panel))
-            .set_visible(cx, visible);
+        self.sync_reader_panel_layout(cx);
         self.ui.redraw(cx);
     }
 
@@ -4547,7 +4712,9 @@ impl App {
         }
         self.note_quote_text = quote;
         self.note_open = true;
-        self.ui.widget(cx, ids!(note_panel)).set_visible(cx, true);
+        self.toc_open = false;
+        self.reader_ai_open = false;
+        self.sync_reader_panel_layout(cx);
         self.ui
             .widget(cx, ids!(note_composer))
             .set_visible(cx, true);
@@ -4690,6 +4857,30 @@ impl App {
 }
 
 impl MatchEvent for App {
+    fn handle_startup(&mut self, _cx: &mut Cx) {
+        self.app_in_foreground = true;
+    }
+
+    fn handle_foreground(&mut self, cx: &mut Cx) {
+        self.app_in_foreground = true;
+        self.start_reading_timer(cx);
+    }
+
+    fn handle_resume(&mut self, cx: &mut Cx) {
+        self.app_in_foreground = true;
+        self.start_reading_timer(cx);
+    }
+
+    fn handle_background(&mut self, cx: &mut Cx) {
+        self.app_in_foreground = false;
+        self.stop_reading_timer(cx, false);
+    }
+
+    fn handle_pause(&mut self, cx: &mut Cx) {
+        self.app_in_foreground = false;
+        self.stop_reading_timer(cx, false);
+    }
+
     fn handle_timer(&mut self, cx: &mut Cx, event: &TimerEvent) {
         if self.reading_checkpoint_timer.is_timer(event).is_some() {
             if let Some(id) = self.reading_session_id.clone() {
@@ -4785,12 +4976,18 @@ impl MatchEvent for App {
                 match session_action {
                     ReadingSessionAction::Started { id, book_id } => {
                         self.reading_session_pending = false;
+                        let invalidated = std::mem::take(&mut self.reading_session_invalidated);
                         let is_current_book = CURRENT_BOOK
                             .read()
                             .unwrap()
                             .as_ref()
                             .is_some_and(|book| book.id == *book_id);
-                        if self.on_reader_page && is_current_book {
+                        if should_keep_started_reading_session(
+                            invalidated,
+                            self.app_in_foreground,
+                            self.on_reader_page,
+                            is_current_book,
+                        ) {
                             self.statistics_after_pending_session = false;
                             self.reading_session_id = Some(id.clone());
                             self.reading_checkpoint_timer = cx.start_interval(30.0);
@@ -4801,13 +4998,14 @@ impl MatchEvent for App {
                             let load_statistics = self.statistics_after_pending_session;
                             self.statistics_after_pending_session = false;
                             spawn_finish_reading_session(id.clone(), load_statistics);
-                            if self.on_reader_page {
+                            if self.app_in_foreground && self.on_reader_page && is_current_book {
                                 self.start_reading_timer(cx);
                             }
                         }
                     }
                     ReadingSessionAction::Error(error) => {
                         self.reading_session_pending = false;
+                        self.reading_session_invalidated = false;
                         if self.statistics_after_pending_session {
                             self.statistics_after_pending_session = false;
                             spawn_load_statistics();
@@ -5360,33 +5558,46 @@ impl MatchEvent for App {
                 spawn_remove_vocab(entry.lemma.clone());
             }
         }
-        if self.ui.button(cx, ids!(nav_library)).clicked(actions) {
+        if self.ui.button(cx, ids!(nav_library)).clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(mobile_nav_library))
+                .clicked(actions)
+        {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
             pages.set_active_page(cx, id!(page_library));
             self.on_reader_page = false;
         }
-        if self.ui.button(cx, ids!(nav_reader)).clicked(actions) {
+        if self.ui.button(cx, ids!(nav_reader)).clicked(actions)
+            || self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions)
+        {
             pages.set_active_page(cx, id!(page_reader));
             self.on_reader_page = true;
             self.start_reading_timer(cx);
         }
-        if self.ui.button(cx, ids!(nav_chat)).clicked(actions) {
+        if self.ui.button(cx, ids!(nav_chat)).clicked(actions)
+            || self.ui.button(cx, ids!(mobile_nav_chat)).clicked(actions)
+        {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
             pages.set_active_page(cx, id!(page_chat));
             self.on_reader_page = false;
         }
-        if self.ui.button(cx, ids!(nav_skills)).clicked(actions) {
+        if self.ui.button(cx, ids!(nav_skills)).clicked(actions)
+            || self.ui.button(cx, ids!(mobile_nav_skills)).clicked(actions)
+        {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
             pages.set_active_page(cx, id!(page_skills));
             self.on_reader_page = false;
         }
-        if self.ui.button(cx, ids!(nav_vocab)).clicked(actions) {
+        if self.ui.button(cx, ids!(nav_vocab)).clicked(actions)
+            || self.ui.button(cx, ids!(mobile_nav_vocab)).clicked(actions)
+        {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
@@ -5394,7 +5605,12 @@ impl MatchEvent for App {
             self.on_reader_page = false;
             spawn_load_vocab();
         }
-        if self.ui.button(cx, ids!(nav_statistics)).clicked(actions) {
+        if self.ui.button(cx, ids!(nav_statistics)).clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(mobile_nav_statistics))
+                .clicked(actions)
+        {
             pages.set_active_page(cx, id!(page_statistics));
             if self.on_reader_page {
                 self.stop_reading_timer(cx, true);
@@ -5406,7 +5622,12 @@ impl MatchEvent for App {
                 .label(cx, ids!(statistics_status))
                 .set_text(cx, "正在更新统计数据…");
         }
-        if self.ui.button(cx, ids!(nav_settings)).clicked(actions) {
+        if self.ui.button(cx, ids!(nav_settings)).clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(mobile_nav_settings))
+                .clicked(actions)
+        {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
@@ -5622,8 +5843,8 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(note_close_btn)).clicked(actions) {
             self.note_open = false;
-            self.ui.widget(cx, ids!(note_panel)).set_visible(cx, false);
             self.close_note_composer(cx);
+            self.sync_reader_panel_layout(cx);
         }
         if self.ui.button(cx, ids!(close_card_btn)).clicked(actions) {
             self.card = None;
@@ -5645,27 +5866,24 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(toc_btn)).clicked(actions) {
             self.toc_open = !self.toc_open;
-            self.ui
-                .widget(cx, ids!(toc_panel))
-                .set_visible(cx, self.toc_open);
+            if self.toc_open {
+                self.note_open = false;
+                self.reader_ai_open = false;
+            }
+            self.sync_reader_panel_layout(cx);
             self.ui.redraw(cx);
         }
         if self.ui.button(cx, ids!(notes_btn)).clicked(actions) {
             self.note_open = !self.note_open;
             if self.note_open {
-                self.set_reader_ai_visible(cx, false);
+                self.toc_open = false;
+                self.reader_ai_open = false;
             }
-            self.ui
-                .widget(cx, ids!(note_panel))
-                .set_visible(cx, self.note_open);
+            self.sync_reader_panel_layout(cx);
             self.ui.redraw(cx);
         }
         if self.ui.button(cx, ids!(reader_ai_btn)).clicked(actions) {
             let visible = !self.reader_ai_open;
-            if visible {
-                self.note_open = false;
-                self.ui.widget(cx, ids!(note_panel)).set_visible(cx, false);
-            }
             self.set_reader_ai_visible(cx, visible);
         }
         if self.ui.button(cx, ids!(reader_ai_close)).clicked(actions) {
@@ -5680,7 +5898,7 @@ impl MatchEvent for App {
                 if CURRENT_BOOK.read().unwrap().is_some() {
                     self.set_chapter(cx, item_id);
                     self.toc_open = false;
-                    self.ui.widget(cx, ids!(toc_panel)).set_visible(cx, false);
+                    self.sync_reader_panel_layout(cx);
                     self.ui.redraw(cx);
                 }
             }
@@ -5929,7 +6147,19 @@ impl AppMain for App {
             }
         }
         match event {
-            Event::Startup => spawn_db_init(),
+            Event::Startup => {
+                self.update_responsive_layout(
+                    cx,
+                    cx.display_context.screen_size,
+                    cx.display_context.safe_area_insets,
+                );
+                spawn_db_init();
+            }
+            Event::WindowGeomChange(event) => self.update_responsive_layout(
+                cx,
+                event.new_geom.inner_size,
+                event.new_geom.safe_area_insets,
+            ),
             Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
             // 滚轮/触控板滚动后刷新章内百分比
             Event::Scroll(_) => {
