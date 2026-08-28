@@ -33,9 +33,36 @@ static LOCAL_AI_CANCEL: AtomicBool = AtomicBool::new(false);
 /// 书架数据（UI 侧只读渲染，后台线程写）。
 static SHELF: LazyLock<RwLock<Vec<ShelfItem>>> = LazyLock::new(|| RwLock::new(Vec::new()));
 
+/// PortalList 数据投影。revision 变化时列表切换等价模板，确保 Makepad 不会把
+/// 相同 item id 的旧卡片继续留在新的数据集合里。
+struct ListProjection<T> {
+    revision: usize,
+    entries: Vec<T>,
+}
+
+impl<T> Default for ListProjection<T> {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<T> ListProjection<T> {
+    fn replace(&mut self, entries: Vec<T>) {
+        self.revision = self.revision.wrapping_add(1).max(1);
+        self.entries = entries;
+    }
+
+    fn entry_for_item_id(&self, item_id: usize) -> Option<&T> {
+        self.entries.get(item_id)
+    }
+}
+
 /// 当前书的笔记（后台线程刷新，NoteList 只读渲染）。
-static NOTES: LazyLock<RwLock<Vec<readwise_core::notes::models::Note>>> =
-    LazyLock::new(|| RwLock::new(Vec::new()));
+static NOTES: LazyLock<RwLock<ListProjection<readwise_core::notes::models::Note>>> =
+    LazyLock::new(|| RwLock::new(ListProjection::default()));
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChatRole {
@@ -59,29 +86,12 @@ struct ChatData {
 static CHAT_DATA: LazyLock<RwLock<ChatData>> = LazyLock::new(|| RwLock::new(ChatData::default()));
 
 /// AI 技能 / Prompt 模板（后台刷新，SkillList 与发送请求只读）。
-static SKILLS: LazyLock<RwLock<Vec<readwise_core::skills::models::Skill>>> =
-    LazyLock::new(|| RwLock::new(Vec::new()));
+static SKILLS: LazyLock<RwLock<ListProjection<readwise_core::skills::models::Skill>>> =
+    LazyLock::new(|| RwLock::new(ListProjection::default()));
 
-/// 生词本当前筛选结果。revision 用于让 VocabList 在投影变化时替换旧词卡模板。
-#[derive(Default)]
-struct VocabProjection {
-    revision: usize,
-    entries: Vec<VocabEntry>,
-}
-
-impl VocabProjection {
-    fn replace(&mut self, entries: Vec<VocabEntry>) {
-        self.revision = self.revision.wrapping_add(1).max(1);
-        self.entries = entries;
-    }
-
-    fn entry_for_item_id(&self, item_id: usize) -> Option<&VocabEntry> {
-        self.entries.get(item_id)
-    }
-}
-
-static VOCAB_VISIBLE: LazyLock<RwLock<VocabProjection>> =
-    LazyLock::new(|| RwLock::new(VocabProjection::default()));
+/// 生词本当前筛选结果。与笔记、技能共享同一种有版本的列表投影。
+static VOCAB_VISIBLE: LazyLock<RwLock<ListProjection<VocabEntry>>> =
+    LazyLock::new(|| RwLock::new(ListProjection::default()));
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum VocabFilter {
@@ -333,6 +343,7 @@ fn active_system_prompt() -> String {
     let prompts = SKILLS
         .read()
         .unwrap()
+        .entries
         .iter()
         .filter(|skill| skill.is_system && skill.is_active)
         .map(|skill| skill.content.trim())
@@ -608,6 +619,46 @@ mod ai_response_tests {
 }
 
 #[cfg(test)]
+mod list_projection_tests {
+    use super::*;
+
+    #[test]
+    fn empty_projection_has_no_renderable_item() {
+        let projection = ListProjection::<&str>::default();
+
+        assert!(projection.entries.is_empty());
+        assert_eq!(projection.entry_for_item_id(0), None);
+    }
+
+    #[test]
+    fn replacing_and_shrinking_invalidates_stale_item_ids() {
+        let mut projection = ListProjection::default();
+        projection.replace(vec!["first", "second", "third"]);
+        let first_revision = projection.revision;
+
+        projection.replace(vec!["replacement"]);
+
+        assert!(projection.revision > first_revision);
+        assert_eq!(projection.entry_for_item_id(0), Some(&"replacement"));
+        assert_eq!(projection.entry_for_item_id(1), None);
+        assert_eq!(projection.entry_for_item_id(2), None);
+    }
+
+    #[test]
+    fn replacing_with_empty_never_creates_a_placeholder_entry() {
+        let mut projection = ListProjection::default();
+        projection.replace(vec!["note"]);
+        let populated_revision = projection.revision;
+
+        projection.replace(Vec::new());
+
+        assert!(projection.revision > populated_revision);
+        assert!(projection.entries.is_empty());
+        assert_eq!(projection.entry_for_item_id(0), None);
+    }
+}
+
+#[cfg(test)]
 mod vocab_filter_tests {
     use super::*;
 
@@ -642,7 +693,7 @@ mod vocab_filter_tests {
 
     #[test]
     fn each_filter_projection_advances_revision_and_replaces_entries() {
-        let mut projection = VocabProjection::default();
+        let mut projection = ListProjection::default();
         projection.replace(vec![
             entry("learning"),
             entry("learning"),
@@ -942,7 +993,6 @@ fn speak_text(text: String) {
 /// 后台加载整本书章节 + 恢复进度。
 fn spawn_open_book(item: ShelfItem) {
     *CURRENT_ITEM.write().unwrap() = Some(item.clone());
-    NOTES.write().unwrap().clear();
     std::thread::spawn(move || {
         let infos = match readwise_core::books::epub_meta::load_chapters(std::path::Path::new(
             &item.file_path,
@@ -1429,6 +1479,32 @@ script_mod! {
         }
     }
 
+    let NoteCardTemplate = RoundedView{
+        width: Fill height: Fit
+        new_batch: true
+        padding: 10
+        flow: Down spacing: 6
+        draw_bg.color: #x292929
+        draw_bg.border_radius: 7.0
+        note_title := Label{
+            width: Fill
+            text: ""
+            draw_text.text_style.font_size: 11
+        }
+        note_preview := Label{
+            width: Fill
+            text: ""
+            draw_text.color: #xaaaaaa
+            draw_text.text_style.font_size: 9
+        }
+        note_actions := View{
+            width: Fill height: Fit
+            flow: Right
+            align: Align{x: 1.0 y: 0.5}
+            note_delete_btn := ButtonFlatter{ text: "删除" }
+        }
+    }
+
     mod.widgets.NoteListBase = #(NoteList::register_widget(vm))
     mod.widgets.NoteList = set_type_default() do mod.widgets.NoteListBase{
         width: Fill height: Fill
@@ -1436,31 +1512,47 @@ script_mod! {
             width: Fill height: Fill
             spacing: 8
             scroll_bar: ScrollBar{}
-            NoteCard := RoundedView{
+            NoteCard := NoteCardTemplate{}
+            NoteCardAlternate := NoteCardTemplate{}
+        }
+    }
+
+    let SkillCardTemplate = RoundedView{
+        width: Fill height: Fit
+        flow: Down spacing: 7 padding: 10
+        new_batch: true
+        draw_bg.color: #x292929
+        draw_bg.border_radius: 8.0
+        skill_top := View{
+            width: Fill height: Fit
+            flow: Right spacing: 8
+            align: Align{y: 0.5}
+            skill_name := Label{
                 width: Fill height: Fit
-                new_batch: true
-                padding: 10
-                flow: Down spacing: 6
-                draw_bg.color: #x292929
-                draw_bg.border_radius: 7.0
-                note_title := Label{
-                    width: Fill
-                    text: ""
-                    draw_text.text_style.font_size: 11
-                }
-                note_preview := Label{
-                    width: Fill
-                    text: ""
-                    draw_text.color: #xaaaaaa
-                    draw_text.text_style.font_size: 9
-                }
-                note_actions := View{
-                    width: Fill height: Fit
-                    flow: Right
-                    align: Align{x: 1.0 y: 0.5}
-                    note_delete_btn := ButtonFlatter{ text: "删除" }
-                }
+                text: ""
+                draw_text.text_style.font_size: 11
             }
+            skill_kind := Label{
+                width: Fit height: Fit
+                text: ""
+                draw_text.color: #x7fb2a6
+                draw_text.text_style.font_size: 8.5
+            }
+        }
+        skill_preview := Label{
+            width: Fill height: Fit
+            text: ""
+            draw_text.color: #xaaaaaa
+            draw_text.text_style.font_size: 9
+        }
+        skill_actions := View{
+            width: Fill height: Fit
+            flow: Right spacing: 4
+            align: Align{y: 0.5}
+            skill_active := CheckBox{text: "启用"}
+            skill_use := ButtonFlatter{text: "下次提问使用"}
+            skill_edit := ButtonFlatter{text: "编辑"}
+            skill_delete := ButtonFlatter{text: "删除"}
         }
     }
 
@@ -1511,44 +1603,8 @@ script_mod! {
             spacing: 8
             padding: Inset{right: 8 bottom: 8}
             scroll_bar: ScrollBar{}
-            SkillCard := RoundedView{
-                width: Fill height: Fit
-                flow: Down spacing: 7 padding: 10
-                new_batch: true
-                draw_bg.color: #x292929
-                draw_bg.border_radius: 8.0
-                skill_top := View{
-                    width: Fill height: Fit
-                    flow: Right spacing: 8
-                    align: Align{y: 0.5}
-                    skill_name := Label{
-                        width: Fill height: Fit
-                        text: ""
-                        draw_text.text_style.font_size: 11
-                    }
-                    skill_kind := Label{
-                        width: Fit height: Fit
-                        text: ""
-                        draw_text.color: #x7fb2a6
-                        draw_text.text_style.font_size: 8.5
-                    }
-                }
-                skill_preview := Label{
-                    width: Fill height: Fit
-                    text: ""
-                    draw_text.color: #xaaaaaa
-                    draw_text.text_style.font_size: 9
-                }
-                skill_actions := View{
-                    width: Fill height: Fit
-                    flow: Right spacing: 4
-                    align: Align{y: 0.5}
-                    skill_active := CheckBox{text: "启用"}
-                    skill_use := ButtonFlatter{text: "下次提问使用"}
-                    skill_edit := ButtonFlatter{text: "编辑"}
-                    skill_delete := ButtonFlatter{text: "删除"}
-                }
-            }
+            SkillCard := SkillCardTemplate{}
+            SkillCardAlternate := SkillCardTemplate{}
         }
     }
 
@@ -1716,7 +1772,26 @@ script_mod! {
                                     draw_text.text_style.font_size: 9
                                 }
                             }
-                            book_shelf := mod.widgets.BookShelf{}
+                            library_body := View{
+                                width: Fill height: Fill
+                                flow: Overlay
+                                library_empty := View{
+                                    visible: true
+                                    width: Fill height: Fill
+                                    flow: Down spacing: 8
+                                    align: Center
+                                    Label{
+                                        text: "书架为空"
+                                        draw_text.text_style.font_size: 14
+                                    }
+                                    Label{
+                                        text: "拖入 EPUB 文件，或放进 ReadWise/import 目录"
+                                        draw_text.color: #x8a8a8a
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                }
+                                book_shelf := mod.widgets.BookShelf{visible: false}
+                            }
                         }
 
                         page_reader := View{
@@ -1808,7 +1883,22 @@ script_mod! {
                                         draw_text.color: #x8a8a8a
                                         draw_text.text_style.font_size: 9
                                     }
-                                    note_list := mod.widgets.NoteList{}
+                                    note_empty := View{
+                                        visible: true
+                                        width: Fill height: 110
+                                        flow: Down spacing: 7
+                                        align: Center
+                                        Label{
+                                            text: "还没有笔记"
+                                            draw_text.text_style.font_size: 12
+                                        }
+                                        Label{
+                                            text: "选中文本，点击「笔记」创建第一条。"
+                                            draw_text.color: #x8a8a8a
+                                            draw_text.text_style.font_size: 8.5
+                                        }
+                                    }
+                                    note_list := mod.widgets.NoteList{visible: false}
                                     }
                                     reader_ai_panel := SolidView{
                                     visible: false
@@ -2876,13 +2966,13 @@ impl Widget for TocList {
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                list.set_item_range(cx, 0, titles.len().max(1));
+                list.set_item_range(cx, 0, titles.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let item = list.item(cx, item_id, id!(TocItem));
-                    let text = match titles.get(item_id) {
-                        Some(t) => format!("{}. {}", item_id + 1, t),
-                        None => "（未打开书）".to_string(),
+                    let Some(title) = titles.get(item_id) else {
+                        continue;
                     };
+                    let item = list.item(cx, item_id, id!(TocItem));
+                    let text = format!("{}. {}", item_id + 1, title);
                     let mut item_mut = item.clone();
                     item.button(cx, ids!(toc_item_btn)).set_text(cx, &text);
                     if item_id == current {
@@ -2910,6 +3000,10 @@ impl Widget for TocList {
 struct NoteList {
     #[deref]
     view: View,
+    #[rust]
+    projection_revision: usize,
+    #[rust]
+    alternate_template: bool,
 }
 
 fn preview_text(text: &str, max_chars: usize) -> String {
@@ -2925,23 +3019,28 @@ fn preview_text(text: &str, max_chars: usize) -> String {
 
 impl Widget for NoteList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let notes = NOTES.read().unwrap();
+        let projection = NOTES.read().unwrap();
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                list.set_item_range(cx, 0, notes.len().max(1));
+                list.set_item_range(cx, 0, projection.entries.len());
+                if self.projection_revision != projection.revision {
+                    list.set_first_id_and_scroll(0, 0.0);
+                    self.projection_revision = projection.revision;
+                    self.alternate_template = !self.alternate_template;
+                }
+                let template = if self.alternate_template {
+                    id!(NoteCardAlternate)
+                } else {
+                    id!(NoteCard)
+                };
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let item = list.item(cx, item_id, id!(NoteCard));
-                    if let Some(note) = notes.get(item_id) {
-                        item.label(cx, ids!(note_title)).set_text(cx, &note.title);
-                        item.label(cx, ids!(note_preview))
-                            .set_text(cx, &preview_text(&note.content, 120));
-                        item.widget(cx, ids!(note_actions)).set_visible(cx, true);
-                    } else {
-                        item.label(cx, ids!(note_title)).set_text(cx, "还没有笔记");
-                        item.label(cx, ids!(note_preview))
-                            .set_text(cx, "选中文本，点击「添加笔记」创建第一条。");
-                        item.widget(cx, ids!(note_actions)).set_visible(cx, false);
-                    }
+                    let Some(note) = projection.entry_for_item_id(item_id) else {
+                        continue;
+                    };
+                    let item = list.item(cx, item_id, template);
+                    item.label(cx, ids!(note_title)).set_text(cx, &note.title);
+                    item.label(cx, ids!(note_preview))
+                        .set_text(cx, &preview_text(&note.content, 120));
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -3004,45 +3103,53 @@ impl Widget for ChatList {
 struct SkillList {
     #[deref]
     view: View,
+    #[rust]
+    projection_revision: usize,
+    #[rust]
+    alternate_template: bool,
 }
 
 impl Widget for SkillList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let skills = SKILLS.read().unwrap();
+        let projection = SKILLS.read().unwrap();
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                list.set_item_range(cx, 0, skills.len().max(1));
+                list.set_item_range(cx, 0, projection.entries.len());
+                if self.projection_revision != projection.revision {
+                    list.set_first_id_and_scroll(0, 0.0);
+                    self.projection_revision = projection.revision;
+                    self.alternate_template = !self.alternate_template;
+                }
+                let template = if self.alternate_template {
+                    id!(SkillCardAlternate)
+                } else {
+                    id!(SkillCard)
+                };
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let item = list.item(cx, item_id, id!(SkillCard));
-                    if let Some(skill) = skills.get(item_id) {
-                        item.label(cx, ids!(skill_name)).set_text(cx, &skill.name);
-                        item.label(cx, ids!(skill_kind)).set_text(
-                            cx,
-                            if skill.is_system {
-                                "系统"
-                            } else {
-                                "自定义"
-                            },
-                        );
-                        item.label(cx, ids!(skill_preview))
-                            .set_text(cx, &preview_text(&skill.content, 100));
-                        item.check_box(cx, ids!(skill_active)).set_active(
-                            cx,
-                            skill.is_active,
-                            Animate::No,
-                        );
-                        item.widget(cx, ids!(skill_actions)).set_visible(cx, true);
-                        item.widget(cx, ids!(skill_use))
-                            .set_visible(cx, !skill.is_system && skill.is_active);
-                        item.widget(cx, ids!(skill_delete))
-                            .set_visible(cx, !skill.is_system);
-                    } else {
-                        item.label(cx, ids!(skill_name)).set_text(cx, "还没有技能");
-                        item.label(cx, ids!(skill_kind)).set_text(cx, "");
-                        item.label(cx, ids!(skill_preview))
-                            .set_text(cx, "点击「新建模板」创建第一个 Prompt 模板。");
-                        item.widget(cx, ids!(skill_actions)).set_visible(cx, false);
-                    }
+                    let Some(skill) = projection.entry_for_item_id(item_id) else {
+                        continue;
+                    };
+                    let item = list.item(cx, item_id, template);
+                    item.label(cx, ids!(skill_name)).set_text(cx, &skill.name);
+                    item.label(cx, ids!(skill_kind)).set_text(
+                        cx,
+                        if skill.is_system {
+                            "系统"
+                        } else {
+                            "自定义"
+                        },
+                    );
+                    item.label(cx, ids!(skill_preview))
+                        .set_text(cx, &preview_text(&skill.content, 100));
+                    item.check_box(cx, ids!(skill_active)).set_active(
+                        cx,
+                        skill.is_active,
+                        Animate::No,
+                    );
+                    item.widget(cx, ids!(skill_use))
+                        .set_visible(cx, !skill.is_system && skill.is_active);
+                    item.widget(cx, ids!(skill_delete))
+                        .set_visible(cx, !skill.is_system);
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -3160,51 +3267,38 @@ impl Widget for BookShelf {
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                if shelf.is_empty() {
-                    list.set_item_range(cx, 0, 1);
-                    while let Some(item_id) = list.next_visible_item(cx) {
-                        let item = list.item(cx, item_id, id!(Card));
-                        item.label(cx, ids!(cover_letter)).set_text(cx, "书");
-                        item.label(cx, ids!(card_title)).set_text(cx, "书架为空");
-                        item.label(cx, ids!(card_author))
-                            .set_text(cx, "拖入 EPUB 文件，或放进 ReadWise/import 目录");
-                        item.label(cx, ids!(card_status)).set_text(cx, "");
-                        item.draw_all_unscoped(cx);
-                    }
-                } else {
-                    list.set_item_range(cx, 0, shelf.len());
-                    while let Some(item_id) = list.next_visible_item(cx) {
-                        let Some(book) = shelf.get(item_id) else {
-                            continue;
-                        };
-                        let letter = book
-                            .title
-                            .chars()
-                            .next()
-                            .map(|c| c.to_string())
-                            .unwrap_or_default();
-                        let item = list.item(cx, item_id, id!(Card));
-                        item.label(cx, ids!(cover_letter)).set_text(cx, &letter);
-                        item.label(cx, ids!(card_title)).set_text(cx, &book.title);
-                        item.label(cx, ids!(card_author)).set_text(cx, &book.author);
-                        item.label(cx, ids!(card_status))
-                            .set_text(cx, &book.status_line);
-                        if self.loaded_covers.get(&item_id) != Some(&book.cover_path) {
-                            let img = item.image(cx, ids!(cover_img));
-                            match &book.cover_path {
-                                Some(path) => {
-                                    let p = std::path::Path::new(path);
-                                    if let Err(e) = img.load_image_file_by_path(cx, p) {
-                                        println!("封面加载失败 {}: {:?}", path, e);
-                                        img.set_texture(cx, None);
-                                    }
+                list.set_item_range(cx, 0, shelf.len());
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let Some(book) = shelf.get(item_id) else {
+                        continue;
+                    };
+                    let letter = book
+                        .title
+                        .chars()
+                        .next()
+                        .map(|c| c.to_string())
+                        .unwrap_or_default();
+                    let item = list.item(cx, item_id, id!(Card));
+                    item.label(cx, ids!(cover_letter)).set_text(cx, &letter);
+                    item.label(cx, ids!(card_title)).set_text(cx, &book.title);
+                    item.label(cx, ids!(card_author)).set_text(cx, &book.author);
+                    item.label(cx, ids!(card_status))
+                        .set_text(cx, &book.status_line);
+                    if self.loaded_covers.get(&item_id) != Some(&book.cover_path) {
+                        let img = item.image(cx, ids!(cover_img));
+                        match &book.cover_path {
+                            Some(path) => {
+                                let p = std::path::Path::new(path);
+                                if let Err(e) = img.load_image_file_by_path(cx, p) {
+                                    println!("封面加载失败 {}: {:?}", path, e);
+                                    img.set_texture(cx, None);
                                 }
-                                None => img.set_texture(cx, None),
                             }
-                            self.loaded_covers.insert(item_id, book.cover_path.clone());
+                            None => img.set_texture(cx, None),
                         }
-                        item.draw_all_unscoped(cx);
+                        self.loaded_covers.insert(item_id, book.cover_path.clone());
                     }
+                    item.draw_all_unscoped(cx);
                 }
             }
         }
@@ -3824,6 +3918,7 @@ impl App {
             SKILLS
                 .read()
                 .unwrap()
+                .entries
                 .iter()
                 .find(|skill| &skill.id == id && skill.is_active && !skill.is_system)
                 .map(|skill| skill.name.clone())
@@ -4035,6 +4130,7 @@ impl App {
             SKILLS
                 .read()
                 .unwrap()
+                .entries
                 .iter()
                 .find(|skill| &skill.id == id && skill.is_active && !skill.is_system)
                 .cloned()
@@ -4430,6 +4526,20 @@ impl App {
         };
     }
 
+    fn replace_notes(&self, cx: &mut Cx, notes: Vec<readwise_core::notes::models::Note>) {
+        let is_empty = notes.is_empty();
+        NOTES.write().unwrap().replace(notes);
+        self.ui
+            .widget(cx, ids!(note_empty))
+            .set_visible(cx, is_empty);
+        let note_list = self.ui.widget(cx, ids!(note_list));
+        note_list.set_visible(cx, !is_empty);
+        note_list
+            .portal_list(cx, ids!(list))
+            .set_first_id_and_scroll(0, 0.0);
+        note_list.redraw(cx);
+    }
+
     fn open_note_composer(&mut self, cx: &mut Cx) {
         let quote = SELECTED_TEXT.read().unwrap().trim().to_string();
         if quote.is_empty() {
@@ -4726,7 +4836,7 @@ impl MatchEvent for App {
                 match skill_action {
                     SkillAction::Loaded(skills) => {
                         let count = skills.len();
-                        *SKILLS.write().unwrap() = skills.clone();
+                        SKILLS.write().unwrap().replace(skills.clone());
                         self.ui.label(cx, ids!(skills_status)).set_text(
                             cx,
                             &format!(
@@ -4736,7 +4846,7 @@ impl MatchEvent for App {
                         );
                     }
                     SkillAction::Saved(skills) => {
-                        *SKILLS.write().unwrap() = skills.clone();
+                        SKILLS.write().unwrap().replace(skills.clone());
                         let pending_still_available =
                             self.pending_skill_id.as_ref().is_some_and(|id| {
                                 skills.iter().any(|skill| {
@@ -4753,7 +4863,7 @@ impl MatchEvent for App {
                             .set_text(cx, "技能已保存 ✓");
                     }
                     SkillAction::Toggled(skills) => {
-                        *SKILLS.write().unwrap() = skills.clone();
+                        SKILLS.write().unwrap().replace(skills.clone());
                         let pending_still_available =
                             self.pending_skill_id.as_ref().is_some_and(|id| {
                                 skills.iter().any(|skill| {
@@ -4769,7 +4879,7 @@ impl MatchEvent for App {
                             .set_text(cx, "技能状态已更新 ✓");
                     }
                     SkillAction::Deleted { skills, id } => {
-                        *SKILLS.write().unwrap() = skills.clone();
+                        SKILLS.write().unwrap().replace(skills.clone());
                         if self.editing_skill_id.as_deref() == Some(id.as_str()) {
                             self.clear_skill_editor(cx);
                         }
@@ -5064,7 +5174,7 @@ impl MatchEvent for App {
                             continue;
                         }
                         let count = notes.len();
-                        *NOTES.write().unwrap() = notes.clone();
+                        self.replace_notes(cx, notes.clone());
                         let text = message
                             .clone()
                             .unwrap_or_else(|| format!("共 {} 条笔记", count));
@@ -5116,6 +5226,13 @@ impl MatchEvent for App {
             if let Some(shelf) = action.downcast_ref::<ShelfAction>() {
                 match shelf {
                     ShelfAction::Loaded { items, imported } => {
+                        let is_empty = *items == 0;
+                        self.ui
+                            .widget(cx, ids!(library_empty))
+                            .set_visible(cx, is_empty);
+                        self.ui
+                            .widget(cx, ids!(book_shelf))
+                            .set_visible(cx, !is_empty);
                         let hint = if *imported > 0 {
                             format!("共 {} 本（导入目录新增 {} 本）", items, imported)
                         } else {
@@ -5169,6 +5286,7 @@ impl MatchEvent for App {
             if item.button(cx, ids!(read_btn)).clicked(actions) {
                 let book = SHELF.read().unwrap().get(item_id).cloned();
                 if let Some(book) = book {
+                    self.replace_notes(cx, Vec::new());
                     self.ui
                         .label(cx, ids!(title))
                         .set_text(cx, &format!("《{}》加载中…", book.title));
@@ -5183,7 +5301,7 @@ impl MatchEvent for App {
             .widget(cx, ids!(skill_list))
             .portal_list(cx, ids!(list));
         for (item_id, item) in skill_list.items_with_actions(actions) {
-            let skill = SKILLS.read().unwrap().get(item_id).cloned();
+            let skill = SKILLS.read().unwrap().entry_for_item_id(item_id).cloned();
             let Some(skill) = skill else { continue };
             if let Some(is_active) = item.check_box(cx, ids!(skill_active)).changed(actions) {
                 self.ui
@@ -5573,7 +5691,11 @@ impl MatchEvent for App {
             .portal_list(cx, ids!(list));
         for (item_id, item) in note_list.items_with_actions(actions) {
             if item.button(cx, ids!(note_delete_btn)).clicked(actions) {
-                let note_id = NOTES.read().unwrap().get(item_id).map(|n| n.id.clone());
+                let note_id = NOTES
+                    .read()
+                    .unwrap()
+                    .entry_for_item_id(item_id)
+                    .map(|note| note.id.clone());
                 let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
                 if let (Some(book_id), Some(note_id)) = (book_id, note_id) {
                     self.ui.label(cx, ids!(note_hint)).set_text(cx, "删除中…");
