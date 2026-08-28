@@ -6,12 +6,13 @@ use makepad_ai::{
 use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState};
 use makepad_widgets::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 type AiSettings = readwise_core::ai::AiSettings;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
+type ReaderSettings = readwise_core::settings::ReaderSettings;
 type StatisticsSnapshot = readwise_core::statistics::models::StatisticsSnapshot;
 type VocabEntry = readwise_core::vocab::models::VocabBookEntry;
 
@@ -26,6 +27,44 @@ const READER_SWIPE_VERTICAL_CANCEL: f64 = 28.0;
 
 fn uses_compact_layout(size: DVec2) -> bool {
     size.x > 0.0 && size.y > 0.0 && size.x < COMPACT_LAYOUT_BREAKPOINT
+}
+
+fn should_show_mobile_nav(compact_layout: bool, virtual_keyboard_open: bool) -> bool {
+    compact_layout && !virtual_keyboard_open
+}
+
+fn word_range_at(text: &str, char_index: usize) -> Option<(usize, usize)> {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+    let index = char_index.min(chars.len() - 1);
+    let selected = chars[index];
+    if selected.is_whitespace() {
+        return None;
+    }
+    let is_cjk = |ch: char| {
+        matches!(
+            ch as u32,
+            0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
+        )
+    };
+    if is_cjk(selected) {
+        return Some((index, index + 1));
+    }
+    let is_word_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '\'' | '’' | '-');
+    if !is_word_char(selected) {
+        return Some((index, index + 1));
+    }
+    let mut start = index;
+    while start > 0 && is_word_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < chars.len() && is_word_char(chars[end]) {
+        end += 1;
+    }
+    Some((start, end))
 }
 
 fn should_keep_started_reading_session(
@@ -715,6 +754,22 @@ mod responsive_layout_tests {
     }
 
     #[test]
+    fn mobile_navigation_stays_hidden_while_the_virtual_keyboard_is_open() {
+        assert!(should_show_mobile_nav(true, false));
+        assert!(!should_show_mobile_nav(true, true));
+        assert!(!should_show_mobile_nav(false, false));
+        assert!(!should_show_mobile_nav(false, true));
+    }
+
+    #[test]
+    fn long_press_selects_a_word_or_one_cjk_character() {
+        assert_eq!(word_range_at("read wise", 2), Some((0, 4)));
+        assert_eq!(word_range_at("can't stop", 3), Some((0, 5)));
+        assert_eq!(word_range_at("阅读", 1), Some((1, 2)));
+        assert_eq!(word_range_at("read wise", 4), None);
+    }
+
+    #[test]
     fn invalidated_or_background_session_is_finished_instead_of_kept() {
         assert!(should_keep_started_reading_session(false, true, true, true));
         assert!(!should_keep_started_reading_session(true, true, true, true));
@@ -924,6 +979,9 @@ static SELECTION_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(0)
 
 /// 生词注音总开关（关闭 = 原样显示文章）。
 static GLOSS_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(true));
+
+static READER_SETTINGS_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
+static READER_SETTINGS_SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 const READER_FONT_DEFAULT: f32 = 11.0;
 const READER_FONT_MIN: f32 = 8.0;
@@ -1381,6 +1439,7 @@ enum DbAction {
     Ready {
         vocab_count: usize,
         known_count: usize,
+        reader_settings: ReaderSettings,
     },
     Failed(String),
 }
@@ -1393,9 +1452,11 @@ fn spawn_db_init(platform_data_dir: Option<std::path::PathBuf>) {
             Ok(db) => {
                 let entries = db.vocab_book_list().unwrap_or_default();
                 let known = db.get_known_words().unwrap_or_default();
+                let reader_settings = db.load_reader_settings().unwrap_or_default();
                 let action = DbAction::Ready {
                     vocab_count: entries.len(),
                     known_count: known.len(),
+                    reader_settings,
                 };
                 let _ = DB.set(db);
                 Cx::post_action(action);
@@ -1429,6 +1490,63 @@ enum LocalAiAction {
     Stopped,
     StartFailed(String),
     Error(String),
+}
+
+#[derive(Debug)]
+enum ReaderSettingsAction {
+    Saved,
+    Error(String),
+}
+
+fn current_reader_settings() -> ReaderSettings {
+    use crate::ruby_word::*;
+
+    ReaderSettings {
+        font_size: *READER_FONT_SIZE.read().unwrap(),
+        gloss_enabled: *GLOSS_ENABLED.read().unwrap(),
+        gloss_font_size: *GLOSS_FONT_SIZE.read().unwrap(),
+        gloss_color_slot: GLOSS_PRESETS
+            .iter()
+            .position(|(_, color)| *color == *GLOSS_COLOR.read().unwrap())
+            .unwrap_or(0),
+        gloss_background_slot: BG_PRESETS
+            .iter()
+            .position(|(_, color)| *color == *GLOSS_BG.read().unwrap())
+            .unwrap_or(0),
+        word_color_slot: WORD_COLOR_PRESETS
+            .iter()
+            .position(|(_, color)| *color == *WORD_COLOR.read().unwrap())
+            .unwrap_or(0),
+        word_background_slot: BG_PRESETS
+            .iter()
+            .position(|(_, color)| *color == *WORD_BG.read().unwrap())
+            .unwrap_or(0),
+        selection_color_slot: *SELECTION_SLOT.read().unwrap(),
+        highlight_color_slot: *crate::mark_span::HL_SLOT.read().unwrap(),
+    }
+}
+
+fn spawn_save_reader_settings(settings: ReaderSettings) {
+    let version = READER_SETTINGS_SAVE_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        let Ok(_guard) = READER_SETTINGS_SAVE_LOCK.lock() else {
+            Cx::post_action(ReaderSettingsAction::Error(
+                "阅读设置保存队列已损坏".to_string(),
+            ));
+            return;
+        };
+        if version != READER_SETTINGS_SAVE_VERSION.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(db) = DB.get() else { return };
+        match db.save_reader_settings(&settings) {
+            Ok(()) if version == READER_SETTINGS_SAVE_VERSION.load(Ordering::Relaxed) => {
+                Cx::post_action(ReaderSettingsAction::Saved);
+            }
+            Ok(()) => {}
+            Err(error) => Cx::post_action(ReaderSettingsAction::Error(error)),
+        }
+    });
 }
 
 fn spawn_load_local_ai_settings() {
@@ -2668,7 +2786,7 @@ script_mod! {
                             }
                             settings_hint := Label{
                                 width: Fill
-                                text: "字体、注音颜色、深浅主题等 M8 补齐。"
+                                text: "阅读设置更改后自动保存在本机；深浅主题将在后续补齐。"
                                 draw_text.color: #x9a9a9a
                                 draw_text.text_style.font_size: 9
                             }
@@ -2890,9 +3008,31 @@ struct ChapterList {
     selecting: bool,
     #[rust]
     last_abs: Option<DVec2>,
+    #[rust]
+    touch_selection_uid: Option<u64>,
+    #[rust]
+    compact_layout: bool,
 }
 
 impl ChapterList {
+    fn set_compact_layout(&mut self, cx: &mut Cx, compact_layout: bool) {
+        if self.compact_layout == compact_layout {
+            return;
+        }
+        self.compact_layout = compact_layout;
+        let list = self.view.portal_list(cx, ids!(list));
+        if let Some(mut inner) = list.borrow_mut() {
+            inner.selectable = !compact_layout;
+            inner.clear_selection(cx);
+        }
+        self.selecting = false;
+        self.touch_selection_uid = None;
+        *SEL_RANGE.write().unwrap() = None;
+        SELECTED_TEXT.write().unwrap().clear();
+        Cx::post_action(SelAction::Hide);
+        self.view.redraw(cx);
+    }
+
     /// 命中可见块的 (块id, 字符下标)。点位在视口外或块间隙时吸附到
     /// 最近边界，与 PortalList 原生选择规则保持一致。
     fn hit_block_char(&self, cx: &Cx, abs: DVec2) -> Option<(usize, usize)> {
@@ -3011,6 +3151,28 @@ impl ChapterList {
         self.apply_visible_selection(cx);
     }
 
+    fn finish_selection(&mut self) {
+        self.selecting = false;
+        self.touch_selection_uid = None;
+        let range = *SEL_RANGE.read().unwrap();
+        let non_empty = range.map(|(a, b)| a != b).unwrap_or(false);
+        if let Some(range) = range.filter(|(a, b)| a != b) {
+            *SELECTED_TEXT.write().unwrap() =
+                readwise_core::vocab::annotate::rendered_text_for_range(
+                    &PARAGRAPHS.read().unwrap(),
+                    range,
+                );
+        }
+        if std::env::var("SEL_DEBUG").is_ok() {
+            eprintln!("[SEL] up: range={:?} show={}", range, non_empty);
+        }
+        Cx::post_action(if non_empty {
+            SelAction::Show
+        } else {
+            SelAction::Hide
+        });
+    }
+
     fn track_selection(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::MouseDown(e) => {
@@ -3058,24 +3220,53 @@ impl ChapterList {
             }
             Event::Scroll(_) if self.selecting => self.extend_after_scroll(cx),
             Event::MouseUp(_) if self.selecting => {
-                self.selecting = false;
-                let range = *SEL_RANGE.read().unwrap();
-                let non_empty = range.map(|(a, b)| a != b).unwrap_or(false);
-                if let Some(range) = range.filter(|(a, b)| a != b) {
-                    *SELECTED_TEXT.write().unwrap() =
-                        readwise_core::vocab::annotate::rendered_text_for_range(
-                            &PARAGRAPHS.read().unwrap(),
-                            range,
-                        );
+                self.finish_selection();
+            }
+            Event::LongPress(event) if self.compact_layout => {
+                let list = self.view.portal_list(cx, ids!(list));
+                if !list.area().rect(cx).contains(event.abs) {
+                    return;
                 }
-                if std::env::var("SEL_DEBUG").is_ok() {
-                    eprintln!("[SEL] up: range={:?} show={}", range, non_empty);
+                let Some((block_id, char_index)) = self.hit_block_char(cx, event.abs) else {
+                    return;
+                };
+                let Some((start, end)) =
+                    PARAGRAPHS
+                        .read()
+                        .unwrap()
+                        .get(block_id)
+                        .and_then(|paragraph| {
+                            let text = readwise_core::vocab::annotate::rendered_text(paragraph);
+                            word_range_at(&text, char_index)
+                        })
+                else {
+                    return;
+                };
+                self.sel_anchor = Some((block_id, start));
+                self.selecting = true;
+                self.touch_selection_uid = Some(event.uid);
+                self.last_abs = Some(event.abs);
+                *SEL_RANGE.write().unwrap() = Some(((block_id, start), (block_id, end)));
+                SELECTED_TEXT.write().unwrap().clear();
+                Cx::post_action(SelAction::Hide);
+                self.apply_visible_selection(cx);
+            }
+            Event::TouchUpdate(event) if self.touch_selection_uid.is_some() => {
+                let uid = self.touch_selection_uid.unwrap();
+                let Some(touch) = event.touches.iter().find(|touch| touch.uid == uid) else {
+                    return;
+                };
+                match touch.state {
+                    TouchState::Move => {
+                        self.last_abs = Some(touch.abs);
+                        if let Some(cursor) = self.hit_block_char(cx, touch.abs) {
+                            self.set_cursor(cursor);
+                            self.apply_visible_selection(cx);
+                        }
+                    }
+                    TouchState::Stop => self.finish_selection(),
+                    TouchState::Start | TouchState::Stable => {}
                 }
-                Cx::post_action(if non_empty {
-                    SelAction::Show
-                } else {
-                    SelAction::Hide
-                });
             }
             _ => {}
         }
@@ -3101,6 +3292,9 @@ impl Widget for ChapterList {
                     let item = list.item(cx, item_id, template);
                     let mut html = item.widget(cx, ids!(para_html));
                     html.set_text(cx, para);
+                    if let Some(mut inner) = html.borrow_mut::<Html>() {
+                        inner.text_flow.selectable = !self.compact_layout;
+                    }
                     if let Some(fs) = *READER_FONT_SIZE.read().unwrap() {
                         script_apply_eval!(cx, html, {
                             font_size: #(fs)
@@ -3142,6 +3336,18 @@ impl Widget for ChapterList {
                 Event::MouseDown(_) | Event::MouseMove(_) | Event::MouseUp(_)
             )
         {
+            return;
+        }
+        if self.touch_selection_uid.is_some() && matches!(event, Event::TouchUpdate(_)) {
+            let released = matches!(event, Event::TouchUpdate(event) if event.touches.iter().any(|touch| {
+                Some(touch.uid) == self.touch_selection_uid && touch.state == TouchState::Stop
+            }));
+            self.track_selection(cx, event);
+            // Let PortalList observe the final release so its pre-long-press drag
+            // state cannot leak into the next gesture. Selection moves stay local.
+            if released {
+                self.view.handle_event(cx, event, scope);
+            }
             return;
         }
         self.view.handle_event(cx, event, scope);
@@ -3579,6 +3785,8 @@ pub struct App {
     #[rust]
     responsive_layout_initialized: bool,
     #[rust]
+    virtual_keyboard_open: bool,
+    #[rust]
     safe_area_insets: SafeAreaInsets,
     #[rust]
     app_in_foreground: bool,
@@ -3611,6 +3819,7 @@ impl App {
                         .area()
                         .clipped_rect(cx);
                     let can_begin = self.compact_layout
+                        && !self.virtual_keyboard_open
                         && self.on_reader_page
                         && CURRENT_BOOK.read().unwrap().is_some()
                         && !self.toc_open
@@ -3632,8 +3841,41 @@ impl App {
         }
     }
 
+    fn sync_mobile_chrome(&self, cx: &mut Cx) {
+        self.ui.widget(cx, ids!(mobile_nav)).set_visible(
+            cx,
+            should_show_mobile_nav(self.compact_layout, self.virtual_keyboard_open),
+        );
+    }
+
+    fn handle_virtual_keyboard(&mut self, cx: &mut Cx, event: &VirtualKeyboardEvent) {
+        let open = match event {
+            VirtualKeyboardEvent::WillShow { .. } | VirtualKeyboardEvent::DidShow { .. } => true,
+            // iOS emits WillHide before DidHide. Keep the bottom navigation hidden
+            // throughout that animation; Android currently emits DidHide only.
+            VirtualKeyboardEvent::WillHide { .. } => return,
+            VirtualKeyboardEvent::DidHide { .. } => false,
+        };
+        if self.virtual_keyboard_open == open {
+            return;
+        }
+        self.virtual_keyboard_open = open;
+        if open {
+            self.reader_swipe.cancel();
+        }
+        self.sync_mobile_chrome(cx);
+        self.ui.redraw(cx);
+    }
+
     fn sync_reader_panel_layout(&self, cx: &mut Cx) {
         let panel_open = self.toc_open || self.note_open || self.reader_ai_open;
+        if let Some(mut chapter_list) = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow_mut::<ChapterList>()
+        {
+            chapter_list.set_compact_layout(cx, self.compact_layout);
+        }
         self.ui
             .widget(cx, ids!(chapter_list))
             .set_visible(cx, !self.compact_layout || !panel_open);
@@ -3685,9 +3927,7 @@ impl App {
         self.compact_layout = compact;
         self.safe_area_insets = safe_area_insets;
         self.ui.widget(cx, ids!(sidebar)).set_visible(cx, !compact);
-        self.ui
-            .widget(cx, ids!(mobile_nav))
-            .set_visible(cx, compact);
+        self.sync_mobile_chrome(cx);
         self.ui
             .widget(cx, ids!(mobile_safe_top))
             .set_visible(cx, compact && safe_area_insets.top > 0.0);
@@ -4745,6 +4985,7 @@ impl App {
             .label(cx, ids!(font_size_label))
             .set_text(cx, &format!("{:.0}", new_size));
         self.ui.redraw(cx);
+        self.persist_reader_settings(cx);
     }
 
     /// 把一个色板格子的底色刷成预设色（apply 片段只认字面量，逐色枚举）。
@@ -4831,6 +5072,57 @@ impl App {
             let slot = if i == hl { hl_slot[i] } else { 0 };
             self.paint_swatch(cx, cell, slot);
         }
+    }
+
+    fn apply_reader_settings(&mut self, cx: &mut Cx, settings: ReaderSettings) {
+        use crate::ruby_word::*;
+
+        let settings = settings.normalized();
+        *READER_FONT_SIZE.write().unwrap() = settings.font_size;
+        *GLOSS_ENABLED.write().unwrap() = settings.gloss_enabled;
+        *GLOSS_FONT_SIZE.write().unwrap() = settings.gloss_font_size;
+        *GLOSS_COLOR.write().unwrap() = GLOSS_PRESETS[settings.gloss_color_slot].1;
+        *GLOSS_BG.write().unwrap() = BG_PRESETS[settings.gloss_background_slot].1;
+        *WORD_COLOR.write().unwrap() = WORD_COLOR_PRESETS[settings.word_color_slot].1;
+        *WORD_BG.write().unwrap() = BG_PRESETS[settings.word_background_slot].1;
+        *SELECTION_SLOT.write().unwrap() = settings.selection_color_slot;
+        *crate::mark_span::HL_SLOT.write().unwrap() = settings.highlight_color_slot;
+
+        self.ui.label(cx, ids!(font_size_label)).set_text(
+            cx,
+            &settings
+                .font_size
+                .map(|value| format!("{value:.0}"))
+                .unwrap_or_else(|| "默认".to_string()),
+        );
+        self.ui
+            .label(cx, ids!(gloss_size_label))
+            .set_text(cx, &format!("{:.1}", settings.gloss_font_size));
+        self.ui.check_box(cx, ids!(gloss_enable)).set_active(
+            cx,
+            settings.gloss_enabled,
+            Animate::No,
+        );
+        self.set_gloss_rows_visible(cx, settings.gloss_enabled);
+        self.refresh_swatches(cx);
+
+        if !settings.gloss_enabled {
+            if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+                for chapter in &mut book.chapters {
+                    if chapter.contains("<ruby") {
+                        *chapter = readwise_core::vocab::annotate::remove_all_ruby(chapter);
+                    }
+                }
+            }
+        }
+        self.refresh_current_chapter(cx);
+    }
+
+    fn persist_reader_settings(&mut self, cx: &mut Cx) {
+        self.ui
+            .label(cx, ids!(settings_hint))
+            .set_text(cx, "正在保存阅读设置…");
+        spawn_save_reader_settings(current_reader_settings());
     }
 
     /// 用当前章内容重建 PortalList 块（保滚动位置：块数不变时 first_id 不动）。
@@ -4957,6 +5249,7 @@ impl App {
             self.refresh_current_chapter(cx);
         }
         self.ui.redraw(cx);
+        self.persist_reader_settings(cx);
     }
 
     /// 四行色板的点击分发。
@@ -5008,6 +5301,7 @@ impl App {
         if changed {
             self.refresh_swatches(cx);
             self.ui.redraw(cx);
+            self.persist_reader_settings(cx);
         }
     }
 
@@ -5022,6 +5316,7 @@ impl App {
             .label(cx, ids!(gloss_size_label))
             .set_text(cx, &format!("{:.1}", new_size));
         self.ui.redraw(cx);
+        self.persist_reader_settings(cx);
     }
 }
 
@@ -5134,6 +5429,7 @@ impl MatchEvent for App {
                     DbAction::Ready {
                         vocab_count,
                         known_count,
+                        reader_settings,
                     } => {
                         let status = format!(
                             "数据库就绪\n生词本 {} · 已认识 {}",
@@ -5144,14 +5440,10 @@ impl MatchEvent for App {
                         self.ui
                             .label(cx, ids!(vocab_summary))
                             .set_text(cx, &summary);
-                        self.refresh_swatches(cx);
-                        let gloss_on = *GLOSS_ENABLED.read().unwrap();
-                        self.ui.check_box(cx, ids!(gloss_enable)).set_active(
-                            cx,
-                            gloss_on,
-                            Animate::No,
-                        );
-                        self.set_gloss_rows_visible(cx, gloss_on);
+                        self.apply_reader_settings(cx, reader_settings.clone());
+                        self.ui
+                            .label(cx, ids!(settings_hint))
+                            .set_text(cx, "阅读设置已从本机恢复，更改后会自动保存。");
                         spawn_load_shelf();
                         spawn_load_ai_state();
                         spawn_load_skills();
@@ -5161,6 +5453,21 @@ impl MatchEvent for App {
                     DbAction::Failed(e) => {
                         let status = format!("数据库失败:\n{}", e);
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
+                    }
+                }
+                continue;
+            }
+            if let Some(settings_action) = action.downcast_ref::<ReaderSettingsAction>() {
+                match settings_action {
+                    ReaderSettingsAction::Saved => {
+                        self.ui
+                            .label(cx, ids!(settings_hint))
+                            .set_text(cx, "阅读设置已自动保存在本机。");
+                    }
+                    ReaderSettingsAction::Error(error) => {
+                        self.ui
+                            .label(cx, ids!(settings_hint))
+                            .set_text(cx, &format!("阅读设置保存失败：{error}"));
                     }
                 }
                 continue;
@@ -6390,6 +6697,7 @@ impl AppMain for App {
                 event.new_geom.inner_size,
                 event.new_geom.safe_area_insets,
             ),
+            Event::VirtualKeyboard(event) => self.handle_virtual_keyboard(cx, event),
             Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
             // 滚轮/触控板滚动后刷新章内百分比
             Event::Scroll(_) => {
@@ -6427,6 +6735,7 @@ impl AppMain for App {
             let selection_is_clear =
                 SEL_RANGE.read().unwrap().is_none() && SELECTED_TEXT.read().unwrap().is_empty();
             if self.compact_layout
+                && !self.virtual_keyboard_open
                 && self.on_reader_page
                 && !self.toc_open
                 && !self.note_open

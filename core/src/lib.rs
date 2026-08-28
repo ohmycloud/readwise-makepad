@@ -4,6 +4,7 @@ pub mod db;
 pub mod local_ai;
 pub mod notes;
 pub mod paths;
+pub mod settings;
 pub mod skills;
 pub mod statistics;
 pub mod threads;

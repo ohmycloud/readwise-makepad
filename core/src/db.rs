@@ -180,6 +180,118 @@ impl Db {
         })
     }
 
+    pub fn load_reader_settings(&self) -> Result<crate::settings::ReaderSettings, String> {
+        self.rt.block_on(async {
+            use sqlx::Row;
+
+            let rows = sqlx::query("SELECT key, value FROM app_settings WHERE key LIKE 'reader.%'")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| format!("读取阅读设置失败: {e}"))?;
+            let mut settings = crate::settings::ReaderSettings::default();
+            for row in rows {
+                let key: String = row.get("key");
+                let value: String = row.get("value");
+                match key.as_str() {
+                    "reader.font_size" => settings.font_size = value.parse().ok(),
+                    "reader.gloss_enabled" => settings.gloss_enabled = value == "1",
+                    "reader.gloss_font_size" => {
+                        settings.gloss_font_size =
+                            value.parse().unwrap_or(settings.gloss_font_size);
+                    }
+                    "reader.gloss_color_slot" => {
+                        settings.gloss_color_slot =
+                            value.parse().unwrap_or(settings.gloss_color_slot);
+                    }
+                    "reader.gloss_background_slot" => {
+                        settings.gloss_background_slot =
+                            value.parse().unwrap_or(settings.gloss_background_slot);
+                    }
+                    "reader.word_color_slot" => {
+                        settings.word_color_slot =
+                            value.parse().unwrap_or(settings.word_color_slot);
+                    }
+                    "reader.word_background_slot" => {
+                        settings.word_background_slot =
+                            value.parse().unwrap_or(settings.word_background_slot);
+                    }
+                    "reader.selection_color_slot" => {
+                        settings.selection_color_slot =
+                            value.parse().unwrap_or(settings.selection_color_slot);
+                    }
+                    "reader.highlight_color_slot" => {
+                        settings.highlight_color_slot =
+                            value.parse().unwrap_or(settings.highlight_color_slot);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(settings.normalized())
+        })
+    }
+
+    pub fn save_reader_settings(
+        &self,
+        settings: &crate::settings::ReaderSettings,
+    ) -> Result<(), String> {
+        self.rt.block_on(async {
+            let settings = settings.clone().normalized();
+            let now = chrono::Utc::now().timestamp_millis();
+            let font_size = settings.font_size.map(|value| value.to_string()).unwrap_or_default();
+            let gloss_enabled = if settings.gloss_enabled { "1" } else { "0" };
+            let gloss_font_size = settings.gloss_font_size.to_string();
+            let gloss_color_slot = settings.gloss_color_slot.to_string();
+            let gloss_background_slot = settings.gloss_background_slot.to_string();
+            let word_color_slot = settings.word_color_slot.to_string();
+            let word_background_slot = settings.word_background_slot.to_string();
+            let selection_color_slot = settings.selection_color_slot.to_string();
+            let highlight_color_slot = settings.highlight_color_slot.to_string();
+            let values = [
+                ("reader.font_size", font_size.as_str()),
+                ("reader.gloss_enabled", gloss_enabled),
+                ("reader.gloss_font_size", gloss_font_size.as_str()),
+                ("reader.gloss_color_slot", gloss_color_slot.as_str()),
+                (
+                    "reader.gloss_background_slot",
+                    gloss_background_slot.as_str(),
+                ),
+                ("reader.word_color_slot", word_color_slot.as_str()),
+                (
+                    "reader.word_background_slot",
+                    word_background_slot.as_str(),
+                ),
+                (
+                    "reader.selection_color_slot",
+                    selection_color_slot.as_str(),
+                ),
+                (
+                    "reader.highlight_color_slot",
+                    highlight_color_slot.as_str(),
+                ),
+            ];
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| format!("开启阅读设置事务失败: {e}"))?;
+            for (key, value) in values {
+                sqlx::query(
+                    "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) \
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                )
+                .bind(key)
+                .bind(value)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("保存阅读设置失败: {e}"))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|e| format!("提交阅读设置失败: {e}"))
+        })
+    }
+
     pub fn load_local_ai_settings(&self) -> Result<crate::local_ai::LocalAiSettings, String> {
         self.rt.block_on(async {
             use sqlx::Row;
