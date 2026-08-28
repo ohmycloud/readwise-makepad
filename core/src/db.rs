@@ -392,6 +392,12 @@ impl Db {
             .block_on(vocab::vocab_book_review(&self.pool, lemma))
     }
 
+    pub fn vocab_book_review_with_status(&self, lemma: &str, status: &str) -> Result<(), String> {
+        self.rt.block_on(vocab::vocab_book_review_with_status(
+            &self.pool, lemma, status,
+        ))
+    }
+
     /// 注音上下文：全局释义 +（可选）本书语境释义覆盖，以及已认识词集合。
     pub fn gloss_context(
         &self,

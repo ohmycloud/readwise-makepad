@@ -87,7 +87,7 @@
 
 ## M6 词汇与统计
 
-- [ ] 生词本（vocab/wordbook）：列表、复习、状态管理
+- [x] 生词本（vocab/wordbook）：虚拟化列表、搜索/状态筛选、发音/移除、队列复习与状态管理
 - [ ] 统计页（statistics）：阅读时长、词汇量图表（Makepad shader/vector 绘制）
 
 验收：与现有版本功能对齐。

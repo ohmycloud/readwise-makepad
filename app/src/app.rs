@@ -11,6 +11,7 @@ use std::sync::{LazyLock, OnceLock, RwLock};
 type AiSettings = readwise_core::ai::AiSettings;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
+type VocabEntry = readwise_core::vocab::models::VocabBookEntry;
 
 app_main!(App);
 
@@ -23,11 +24,8 @@ static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> =
 static DB: OnceLock<readwise_core::Db> = OnceLock::new();
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-static LOCAL_AI_MANAGER: LazyLock<
-    std::sync::Mutex<readwise_core::local_ai::LocalAiManager>,
-> = LazyLock::new(|| {
-    std::sync::Mutex::new(readwise_core::local_ai::LocalAiManager::default())
-});
+static LOCAL_AI_MANAGER: LazyLock<std::sync::Mutex<readwise_core::local_ai::LocalAiManager>> =
+    LazyLock::new(|| std::sync::Mutex::new(readwise_core::local_ai::LocalAiManager::default()));
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 static LOCAL_AI_CANCEL: AtomicBool = AtomicBool::new(false);
 
@@ -62,6 +60,147 @@ static CHAT_DATA: LazyLock<RwLock<ChatData>> = LazyLock::new(|| RwLock::new(Chat
 /// AI 技能 / Prompt 模板（后台刷新，SkillList 与发送请求只读）。
 static SKILLS: LazyLock<RwLock<Vec<readwise_core::skills::models::Skill>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
+
+/// 生词本当前筛选结果。revision 用于让 VocabList 在投影变化时替换旧词卡模板。
+#[derive(Default)]
+struct VocabProjection {
+    revision: usize,
+    entries: Vec<VocabEntry>,
+}
+
+impl VocabProjection {
+    fn replace(&mut self, entries: Vec<VocabEntry>) {
+        self.revision = self.revision.wrapping_add(1).max(1);
+        self.entries = entries;
+    }
+
+    fn entry_for_item_id(&self, item_id: usize) -> Option<&VocabEntry> {
+        self.entries.get(item_id)
+    }
+}
+
+static VOCAB_VISIBLE: LazyLock<RwLock<VocabProjection>> =
+    LazyLock::new(|| RwLock::new(VocabProjection::default()));
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum VocabFilter {
+    #[default]
+    All,
+    Learning,
+    Mastered,
+}
+
+impl VocabFilter {
+    fn from_index(index: usize) -> Self {
+        match index {
+            1 => Self::Learning,
+            2 => Self::Mastered,
+            _ => Self::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "全部",
+            Self::Learning => "学习中",
+            Self::Mastered => "已掌握",
+        }
+    }
+
+    fn accepts(self, entry: &VocabEntry) -> bool {
+        match self {
+            Self::All => true,
+            Self::Learning => entry.status == "learning",
+            Self::Mastered => entry.status == "mastered",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum VocabAction {
+    Loaded(Vec<VocabEntry>),
+    Updated {
+        entries: Vec<VocabEntry>,
+        message: String,
+        reviewed_lemma: Option<String>,
+    },
+    Removed {
+        entries: Vec<VocabEntry>,
+        message: String,
+    },
+    Error(String),
+}
+
+fn spawn_load_vocab() {
+    std::thread::spawn(|| {
+        let Some(db) = DB.get() else { return };
+        match db.vocab_book_list() {
+            Ok(entries) => Cx::post_action(VocabAction::Loaded(entries)),
+            Err(error) => Cx::post_action(VocabAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_set_vocab_status(lemma: String, status: &'static str) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(error) = db.vocab_book_set_status(&lemma, status) {
+            Cx::post_action(VocabAction::Error(error));
+            return;
+        }
+        match db.vocab_book_list() {
+            Ok(entries) => Cx::post_action(VocabAction::Updated {
+                entries,
+                message: if status == "mastered" {
+                    format!("{lemma} 已标为掌握")
+                } else {
+                    format!("{lemma} 已回到学习中")
+                },
+                reviewed_lemma: None,
+            }),
+            Err(error) => Cx::post_action(VocabAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_review_vocab(lemma: String, status: &'static str) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(error) = db.vocab_book_review_with_status(&lemma, status) {
+            Cx::post_action(VocabAction::Error(error));
+            return;
+        }
+        match db.vocab_book_list() {
+            Ok(entries) => Cx::post_action(VocabAction::Updated {
+                entries,
+                message: if status == "mastered" {
+                    format!("{lemma}：这次认识 ✓")
+                } else {
+                    format!("{lemma}：继续学习")
+                },
+                reviewed_lemma: Some(lemma),
+            }),
+            Err(error) => Cx::post_action(VocabAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_remove_vocab(lemma: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(error) = db.vocab_book_remove(&lemma) {
+            Cx::post_action(VocabAction::Error(error));
+            return;
+        }
+        match db.vocab_book_list() {
+            Ok(entries) => Cx::post_action(VocabAction::Removed {
+                entries,
+                message: format!("已从生词本移除 {lemma}"),
+            }),
+            Err(error) => Cx::post_action(VocabAction::Error(error)),
+        }
+    });
+}
 
 #[derive(Debug)]
 enum SkillAction {
@@ -409,6 +548,62 @@ mod ai_response_tests {
     }
 }
 
+#[cfg(test)]
+mod vocab_filter_tests {
+    use super::*;
+
+    fn entry(status: &str) -> VocabEntry {
+        VocabEntry {
+            lemma: "example".to_string(),
+            word: "example".to_string(),
+            gloss: None,
+            level: None,
+            context_sentence: None,
+            book_id: None,
+            status: status.to_string(),
+            review_count: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn radio_index_selects_the_matching_vocab_status() {
+        let learning = entry("learning");
+        let mastered = entry("mastered");
+
+        assert_eq!(VocabFilter::from_index(0), VocabFilter::All);
+        assert_eq!(VocabFilter::from_index(1), VocabFilter::Learning);
+        assert_eq!(VocabFilter::from_index(2), VocabFilter::Mastered);
+        assert!(VocabFilter::Learning.accepts(&learning));
+        assert!(!VocabFilter::Learning.accepts(&mastered));
+        assert!(VocabFilter::Mastered.accepts(&mastered));
+        assert!(!VocabFilter::Mastered.accepts(&learning));
+    }
+
+    #[test]
+    fn each_filter_projection_advances_revision_and_replaces_entries() {
+        let mut projection = VocabProjection::default();
+        projection.replace(vec![
+            entry("learning"),
+            entry("learning"),
+            entry("learning"),
+        ]);
+        let learning_revision = projection.revision;
+        assert_eq!(projection.entries.len(), 3);
+
+        projection.replace(vec![entry("mastered"), entry("mastered")]);
+        assert!(projection.revision > learning_revision);
+        assert_eq!(projection.entries.len(), 2);
+        assert_eq!(
+            projection
+                .entry_for_item_id(0)
+                .map(|entry| entry.status.as_str()),
+            Some("mastered")
+        );
+    }
+}
+
 #[derive(Clone)]
 struct ShelfItem {
     id: String,
@@ -436,10 +631,19 @@ fn spawn_add_vocab(lemma: String, word: String, gloss: String, book_id: Option<S
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
         let level = readwise_core::vocab::lemma::word_level(&word);
+        let gloss = if gloss.trim().is_empty() {
+            db.get_word_glosses(std::slice::from_ref(&lemma))
+                .ok()
+                .and_then(|items| items.into_iter().next())
+                .map(|item| item.gloss)
+                .filter(|value| !value.trim().is_empty())
+        } else {
+            Some(gloss)
+        };
         let input = readwise_core::vocab::models::VocabBookAddInput {
             lemma,
             word,
-            gloss: Some(gloss),
+            gloss,
             level: Some(level),
             context_sentence: None,
             book_id,
@@ -913,7 +1117,6 @@ enum DbAction {
     Ready {
         vocab_count: usize,
         known_count: usize,
-        vocab_preview: String,
     },
     Failed(String),
 }
@@ -923,24 +1126,9 @@ fn spawn_db_init() {
         Ok(db) => {
             let entries = db.vocab_book_list().unwrap_or_default();
             let known = db.get_known_words().unwrap_or_default();
-            let vocab_preview = entries
-                .iter()
-                .take(50)
-                .map(|e| {
-                    format!(
-                        "{}  —  {}   [{} · 复习{}次]",
-                        e.word,
-                        e.gloss.as_deref().unwrap_or("(无释义)"),
-                        e.status,
-                        e.review_count
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
             let action = DbAction::Ready {
                 vocab_count: entries.len(),
                 known_count: known.len(),
-                vocab_preview,
             };
             let _ = DB.set(db);
             Cx::post_action(action);
@@ -1305,6 +1493,70 @@ script_mod! {
         }
     }
 
+    let VocabCardTemplate = RoundedView{
+        width: Fill height: Fit
+        flow: Down spacing: 7 padding: 12
+        new_batch: true
+        draw_bg.color: #x292929
+        draw_bg.border_radius: 8.0
+        vocab_card_top := View{
+            width: Fill height: Fit
+            flow: Right spacing: 10
+            align: Align{y: 0.5}
+            vocab_word := Label{
+                width: Fill height: Fit
+                text: ""
+                draw_text.text_style.font_size: 15
+            }
+            vocab_status := Label{
+                width: Fit height: Fit
+                text: ""
+                draw_text.color: #x7fb2a6
+                draw_text.text_style.font_size: 9
+            }
+        }
+        vocab_gloss := Label{
+            width: Fill height: Fit
+            text: ""
+            draw_text.color: #xc9c9c9
+            draw_text.text_style.font_size: 11
+        }
+        vocab_context := Label{
+            width: Fill height: Fit
+            text: ""
+            draw_text.color: #x9a9a9a
+            draw_text.text_style.font_size: 9
+        }
+        vocab_card_bottom := View{
+            width: Fill height: Fit
+            flow: Right spacing: 6
+            align: Align{y: 0.5}
+            vocab_meta := Label{
+                width: Fill height: Fit
+                text: ""
+                draw_text.color: #x7f7f7f
+                draw_text.text_style.font_size: 8.5
+            }
+            vocab_speak := ButtonFlatter{text: "发音"}
+            vocab_review := ButtonFlatter{text: "复习"}
+            vocab_toggle := ButtonFlatter{text: "标为掌握"}
+            vocab_remove := ButtonFlatter{text: "移除"}
+        }
+    }
+
+    mod.widgets.VocabListBase = #(VocabList::register_widget(vm))
+    mod.widgets.VocabList = set_type_default() do mod.widgets.VocabListBase{
+        width: Fill height: Fill
+        list := PortalList{
+            width: Fill height: Fill
+            spacing: 8
+            padding: Inset{right: 8 bottom: 16}
+            scroll_bar: ScrollBar{}
+            VocabCard := VocabCardTemplate{}
+            VocabCardAlternate := VocabCardTemplate{}
+        }
+    }
+
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
@@ -1612,12 +1864,118 @@ script_mod! {
                         page_vocab := View{
                             width: Fill height: Fill
                             flow: Down padding: 24 spacing: 12
-                            vocab_title := Label{ text: "生词本" draw_text.text_style.font_size: 18 }
-                            vocab_summary := Label{ width: Fill text: "等待数据库…" }
-                            vocab_scroll := ScrollYView{
-                                width: Fill height: Fill
-                                vocab_list := Label{ width: Fill text: "" }
+                            vocab_header := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 12
+                                align: Align{y: 0.5}
+                                vocab_title := Label{
+                                    width: Fill height: Fit
+                                    text: "生词本"
+                                    draw_text.text_style.font_size: 18
+                                }
+                                vocab_start_review := Button{text: "开始复习"}
                             }
+                            vocab_summary := Label{
+                                width: Fill height: Fit
+                                text: "等待数据库…"
+                                draw_text.color: #x9a9a9a
+                                draw_text.text_style.font_size: 9
+                            }
+                            vocab_toolbar := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 8
+                                align: Align{y: 0.5}
+                                vocab_search := TextInput{
+                                    width: Fill height: 38
+                                    empty_text: "搜索单词、原形或释义"
+                                }
+                                vocab_filter_all := RadioButtonTabFlat{text: "全部"}
+                                vocab_filter_learning := RadioButtonTabFlat{text: "学习中"}
+                                vocab_filter_mastered := RadioButtonTabFlat{text: "已掌握"}
+                            }
+                            vocab_filter_hint := Label{
+                                width: Fill height: Fit
+                                text: "当前筛选：全部"
+                                draw_text.color: #x7fb2a6
+                                draw_text.text_style.font_size: 8.5
+                            }
+                            vocab_review_panel := RoundedView{
+                                visible: false
+                                width: Fill height: Fit
+                                flow: Down spacing: 9 padding: 14
+                                new_batch: true
+                                draw_bg.color: #x24433e
+                                draw_bg.border_radius: 10.0
+                                vocab_review_top := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 10
+                                    align: Align{y: 0.5}
+                                    vocab_review_progress := Label{
+                                        width: Fill height: Fit
+                                        text: ""
+                                        draw_text.color: #x7fb2a6
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    vocab_review_close := ButtonFlatter{text: "结束复习"}
+                                }
+                                vocab_review_word := Label{
+                                    width: Fill height: Fit
+                                    text: ""
+                                    draw_text.text_style.font_size: 22
+                                }
+                                vocab_review_context := Label{
+                                    width: Fill height: Fit
+                                    text: ""
+                                    draw_text.color: #xaaaaaa
+                                    draw_text.text_style.font_size: 10
+                                }
+                                vocab_review_gloss := Label{
+                                    visible: false
+                                    width: Fill height: Fit
+                                    text: ""
+                                    draw_text.color: #xc9c9c9
+                                    draw_text.text_style.font_size: 13
+                                }
+                                vocab_review_actions := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8
+                                    align: Align{y: 0.5}
+                                    vocab_review_speak := ButtonFlatter{text: "发音"}
+                                    vocab_review_reveal := ButtonFlat{text: "显示释义"}
+                                    vocab_review_again := ButtonFlat{
+                                        visible: false
+                                        text: "继续学习"
+                                    }
+                                    vocab_review_known := Button{
+                                        visible: false
+                                        text: "认识了"
+                                    }
+                                }
+                            }
+                            vocab_status_hint := Label{
+                                width: Fill height: Fit
+                                text: ""
+                                draw_text.color: #x8f8f8f
+                                draw_text.text_style.font_size: 9
+                            }
+                            vocab_empty := View{
+                                width: Fill height: 120
+                                visible: true
+                                flow: Down spacing: 7
+                                align: Center
+                                vocab_empty_title := Label{
+                                    width: Fit height: Fit
+                                    text: "生词本为空"
+                                    draw_text.text_style.font_size: 13
+                                }
+                                vocab_empty_hint := Label{
+                                    width: Fit height: Fit
+                                    text: "去阅读页选择一个英文单词加入生词本。"
+                                    draw_text.color: #x8f8f8f
+                                    draw_text.text_style.font_size: 9
+                                }
+                            }
+                            vocab_list := mod.widgets.VocabList{visible: false}
                         }
 
                         page_chat := View{
@@ -2441,6 +2799,96 @@ impl Widget for SkillList {
 }
 
 #[derive(Script, ScriptHook, Widget)]
+struct VocabList {
+    #[deref]
+    view: View,
+    #[rust]
+    projection_revision: usize,
+    #[rust]
+    alternate_template: bool,
+}
+
+impl Widget for VocabList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let projection = VOCAB_VISIBLE.read().unwrap();
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, projection.entries.len());
+                if self.projection_revision != projection.revision {
+                    list.set_first_id_and_scroll(0, 0.0);
+                    self.projection_revision = projection.revision;
+                    self.alternate_template = !self.alternate_template;
+                }
+                let template = if self.alternate_template {
+                    id!(VocabCardAlternate)
+                } else {
+                    id!(VocabCard)
+                };
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let Some(entry) = projection.entry_for_item_id(item_id) else {
+                        continue;
+                    };
+                    let item = list.item(cx, item_id, template);
+                    let heading = if entry.word.eq_ignore_ascii_case(&entry.lemma) {
+                        entry.word.clone()
+                    } else {
+                        format!("{} · {}", entry.word, entry.lemma)
+                    };
+                    item.label(cx, ids!(vocab_word)).set_text(cx, &heading);
+                    item.label(cx, ids!(vocab_status)).set_text(
+                        cx,
+                        if entry.status == "mastered" {
+                            "已掌握"
+                        } else {
+                            "学习中"
+                        },
+                    );
+                    item.label(cx, ids!(vocab_gloss)).set_text(
+                        cx,
+                        entry
+                            .gloss
+                            .as_deref()
+                            .filter(|gloss| !gloss.trim().is_empty())
+                            .unwrap_or("暂无释义"),
+                    );
+                    let context = entry
+                        .context_sentence
+                        .as_deref()
+                        .filter(|context| !context.trim().is_empty());
+                    item.widget(cx, ids!(vocab_context))
+                        .set_visible(cx, context.is_some());
+                    item.label(cx, ids!(vocab_context))
+                        .set_text(cx, context.unwrap_or(""));
+                    let level = entry
+                        .level
+                        .filter(|level| *level > 0)
+                        .map(|level| format!("L{level}"))
+                        .unwrap_or_else(|| "词表外".to_string());
+                    item.label(cx, ids!(vocab_meta))
+                        .set_text(cx, &format!("{level} · 已复习 {} 次", entry.review_count));
+                    item.button(cx, ids!(vocab_toggle)).set_text(
+                        cx,
+                        if entry.status == "mastered" {
+                            "继续学习"
+                        } else {
+                            "标为掌握"
+                        },
+                    );
+                    item.widget(cx, ids!(vocab_card_bottom))
+                        .set_visible(cx, true);
+                    item.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
 struct BookShelf {
     #[deref]
     view: View,
@@ -2544,6 +2992,18 @@ pub struct App {
     #[rust]
     pending_skill_id: Option<String>,
     #[rust]
+    vocab_entries: Vec<VocabEntry>,
+    #[rust]
+    vocab_filter: VocabFilter,
+    #[rust]
+    vocab_search: String,
+    #[rust]
+    vocab_review_queue: Vec<String>,
+    #[rust]
+    vocab_review_index: usize,
+    #[rust]
+    vocab_review_pending: bool,
+    #[rust]
     chapter_idx: usize,
     #[rust]
     on_reader_page: bool,
@@ -2577,9 +3037,240 @@ impl App {
             ids!(local_ai_gpu_layers),
             ids!(skill_name_input),
             ids!(skill_content_input),
+            ids!(vocab_search),
         ]
         .into_iter()
         .any(|path| self.ui.text_input(cx, path).key_focus(cx))
+    }
+
+    fn refresh_vocab_projection(&self, cx: &mut Cx) {
+        let query = self.vocab_search.trim().to_lowercase();
+        let visible = self
+            .vocab_entries
+            .iter()
+            .filter(|entry| self.vocab_filter.accepts(entry))
+            .filter(|entry| {
+                query.is_empty()
+                    || entry.word.to_lowercase().contains(&query)
+                    || entry.lemma.to_lowercase().contains(&query)
+                    || entry
+                        .gloss
+                        .as_deref()
+                        .is_some_and(|gloss| gloss.to_lowercase().contains(&query))
+                    || entry
+                        .context_sentence
+                        .as_deref()
+                        .is_some_and(|context| context.to_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let total = self.vocab_entries.len();
+        let learning = self
+            .vocab_entries
+            .iter()
+            .filter(|entry| entry.status == "learning")
+            .count();
+        let mastered = total.saturating_sub(learning);
+        let visible_count = visible.len();
+        VOCAB_VISIBLE.write().unwrap().replace(visible);
+        self.ui.label(cx, ids!(vocab_summary)).set_text(
+            cx,
+            &format!(
+                "共 {total} 词 · 学习中 {learning} · 已掌握 {mastered} · 当前显示 {visible_count}"
+            ),
+        );
+        self.ui
+            .label(cx, ids!(vocab_filter_hint))
+            .set_text(cx, &format!("当前筛选：{}", self.vocab_filter.label()));
+        for (button, filter) in [
+            (
+                self.ui.radio_button(cx, ids!(vocab_filter_all)),
+                VocabFilter::All,
+            ),
+            (
+                self.ui.radio_button(cx, ids!(vocab_filter_learning)),
+                VocabFilter::Learning,
+            ),
+            (
+                self.ui.radio_button(cx, ids!(vocab_filter_mastered)),
+                VocabFilter::Mastered,
+            ),
+        ] {
+            button.set_active(cx, self.vocab_filter == filter, Animate::No);
+        }
+        self.ui
+            .widget(cx, ids!(vocab_start_review))
+            .set_visible(cx, learning > 0);
+        let has_visible_entries = visible_count > 0;
+        let empty_title = if total == 0 {
+            "生词本为空".to_string()
+        } else if !query.is_empty() {
+            format!("没有找到“{}”", self.vocab_search.trim())
+        } else {
+            format!("“{}”中还没有单词", self.vocab_filter.label())
+        };
+        let empty_hint = if total == 0 {
+            "去阅读页选择一个英文单词加入生词本。".to_string()
+        } else {
+            format!("生词本中仍有 {total} 个单词，请调整搜索或筛选条件。")
+        };
+        self.ui
+            .label(cx, ids!(vocab_empty_title))
+            .set_text(cx, &empty_title);
+        self.ui
+            .label(cx, ids!(vocab_empty_hint))
+            .set_text(cx, &empty_hint);
+        self.ui
+            .widget(cx, ids!(vocab_empty))
+            .set_visible(cx, !has_visible_entries);
+        let vocab_widget = self.ui.widget(cx, ids!(vocab_list));
+        vocab_widget.set_visible(cx, has_visible_entries);
+        let list = vocab_widget.portal_list(cx, ids!(list));
+        list.redraw(cx);
+        vocab_widget.redraw(cx);
+        self.ui.widget(cx, ids!(page_vocab)).redraw(cx);
+    }
+
+    fn replace_vocab_entries(&mut self, cx: &mut Cx, entries: Vec<VocabEntry>) {
+        self.vocab_entries = entries;
+        self.refresh_vocab_projection(cx);
+    }
+
+    fn set_vocab_filter(&mut self, cx: &mut Cx, filter: VocabFilter) {
+        self.vocab_filter = filter;
+        self.refresh_vocab_projection(cx);
+    }
+
+    fn current_review_entry(&self) -> Option<VocabEntry> {
+        let lemma = self.vocab_review_queue.get(self.vocab_review_index)?;
+        self.vocab_entries
+            .iter()
+            .find(|entry| &entry.lemma == lemma)
+            .cloned()
+    }
+
+    fn start_vocab_review(&mut self, cx: &mut Cx, queue: Vec<String>) {
+        if self.vocab_review_pending {
+            self.ui
+                .label(cx, ids!(vocab_status_hint))
+                .set_text(cx, "请等待当前复习结果保存完成");
+            return;
+        }
+        if queue.is_empty() {
+            self.ui
+                .label(cx, ids!(vocab_status_hint))
+                .set_text(cx, "当前没有需要复习的生词");
+            return;
+        }
+        self.vocab_review_queue = queue;
+        self.vocab_review_index = 0;
+        self.vocab_review_pending = false;
+        self.show_vocab_review_card(cx);
+    }
+
+    fn show_vocab_review_card(&mut self, cx: &mut Cx) {
+        let Some(entry) = self.current_review_entry() else {
+            self.finish_vocab_review(cx, "本轮复习完成 ✓");
+            return;
+        };
+        let progress = format!(
+            "复习 {}/{} · 此前复习 {} 次",
+            self.vocab_review_index + 1,
+            self.vocab_review_queue.len(),
+            entry.review_count
+        );
+        self.ui
+            .label(cx, ids!(vocab_review_progress))
+            .set_text(cx, &progress);
+        self.ui
+            .label(cx, ids!(vocab_review_word))
+            .set_text(cx, &entry.word);
+        self.ui.label(cx, ids!(vocab_review_context)).set_text(
+            cx,
+            entry
+                .context_sentence
+                .as_deref()
+                .unwrap_or("先回忆含义，再显示释义。"),
+        );
+        self.ui.label(cx, ids!(vocab_review_gloss)).set_text(
+            cx,
+            entry
+                .gloss
+                .as_deref()
+                .filter(|gloss| !gloss.trim().is_empty())
+                .unwrap_or("暂无释义"),
+        );
+        self.ui
+            .widget(cx, ids!(vocab_review_panel))
+            .set_visible(cx, true);
+        self.ui
+            .widget(cx, ids!(vocab_review_gloss))
+            .set_visible(cx, false);
+        self.ui
+            .widget(cx, ids!(vocab_review_reveal))
+            .set_visible(cx, true);
+        self.ui
+            .widget(cx, ids!(vocab_review_again))
+            .set_visible(cx, false);
+        self.ui
+            .widget(cx, ids!(vocab_review_known))
+            .set_visible(cx, false);
+        self.ui.redraw(cx);
+    }
+
+    fn reveal_vocab_review(&self, cx: &mut Cx) {
+        self.ui
+            .widget(cx, ids!(vocab_review_gloss))
+            .set_visible(cx, true);
+        self.ui
+            .widget(cx, ids!(vocab_review_reveal))
+            .set_visible(cx, false);
+        self.ui
+            .widget(cx, ids!(vocab_review_again))
+            .set_visible(cx, true);
+        self.ui
+            .widget(cx, ids!(vocab_review_known))
+            .set_visible(cx, true);
+        self.ui.redraw(cx);
+    }
+
+    fn submit_vocab_review(&mut self, cx: &mut Cx, status: &'static str) {
+        if self.vocab_review_pending {
+            return;
+        }
+        let Some(entry) = self.current_review_entry() else {
+            return;
+        };
+        self.vocab_review_pending = true;
+        self.ui
+            .widget(cx, ids!(vocab_review_again))
+            .set_visible(cx, false);
+        self.ui
+            .widget(cx, ids!(vocab_review_known))
+            .set_visible(cx, false);
+        self.ui
+            .label(cx, ids!(vocab_status_hint))
+            .set_text(cx, "正在记录复习结果…");
+        spawn_review_vocab(entry.lemma, status);
+    }
+
+    fn advance_vocab_review(&mut self, cx: &mut Cx) {
+        self.vocab_review_pending = false;
+        self.vocab_review_index += 1;
+        self.show_vocab_review_card(cx);
+    }
+
+    fn finish_vocab_review(&mut self, cx: &mut Cx, message: &str) {
+        self.vocab_review_queue.clear();
+        self.vocab_review_index = 0;
+        self.vocab_review_pending = false;
+        self.ui
+            .widget(cx, ids!(vocab_review_panel))
+            .set_visible(cx, false);
+        self.ui
+            .label(cx, ids!(vocab_status_hint))
+            .set_text(cx, message);
+        self.ui.redraw(cx);
     }
 
     fn apply_local_ai_settings_to_ui(
@@ -3528,23 +4219,16 @@ impl MatchEvent for App {
                     DbAction::Ready {
                         vocab_count,
                         known_count,
-                        vocab_preview,
                     } => {
                         let status = format!(
                             "数据库就绪\n生词本 {} · 已认识 {}",
                             vocab_count, known_count
                         );
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
-                        let summary = format!("共 {} 词（预览前 50 条）", vocab_count);
+                        let summary = format!("共 {} 词，正在加载列表…", vocab_count);
                         self.ui
                             .label(cx, ids!(vocab_summary))
                             .set_text(cx, &summary);
-                        let list = if vocab_preview.is_empty() {
-                            "生词本为空——去阅读页点注音词收藏（M4 打通）。".to_string()
-                        } else {
-                            vocab_preview.clone()
-                        };
-                        self.ui.label(cx, ids!(vocab_list)).set_text(cx, &list);
                         self.refresh_swatches(cx);
                         let gloss_on = *GLOSS_ENABLED.read().unwrap();
                         self.ui.check_box(cx, ids!(gloss_enable)).set_active(
@@ -3557,6 +4241,7 @@ impl MatchEvent for App {
                         spawn_load_ai_state();
                         spawn_load_skills();
                         spawn_load_local_ai_settings();
+                        spawn_load_vocab();
                     }
                     DbAction::Failed(e) => {
                         let status = format!("数据库失败:\n{}", e);
@@ -3633,6 +4318,76 @@ impl MatchEvent for App {
                 self.ui.redraw(cx);
                 continue;
             }
+            if let Some(vocab) = action.downcast_ref::<VocabAction>() {
+                match vocab {
+                    VocabAction::Loaded(entries) => {
+                        self.replace_vocab_entries(cx, entries.clone());
+                        self.ui
+                            .label(cx, ids!(vocab_status_hint))
+                            .set_text(cx, "生词本已加载");
+                    }
+                    VocabAction::Updated {
+                        entries,
+                        message,
+                        reviewed_lemma,
+                    } => {
+                        self.replace_vocab_entries(cx, entries.clone());
+                        self.ui
+                            .label(cx, ids!(vocab_status_hint))
+                            .set_text(cx, message);
+                        let is_current_review = reviewed_lemma.as_ref().is_some_and(|lemma| {
+                            self.vocab_review_queue
+                                .get(self.vocab_review_index)
+                                .is_some_and(|current| current == lemma)
+                        });
+                        if is_current_review {
+                            self.advance_vocab_review(cx);
+                        }
+                    }
+                    VocabAction::Removed { entries, message } => {
+                        let was_reviewing = !self.vocab_review_queue.is_empty();
+                        let current_lemma = self
+                            .vocab_review_queue
+                            .get(self.vocab_review_index)
+                            .cloned();
+                        self.replace_vocab_entries(cx, entries.clone());
+                        self.vocab_review_queue.retain(|lemma| {
+                            self.vocab_entries.iter().any(|entry| &entry.lemma == lemma)
+                        });
+                        if let Some(current_lemma) = current_lemma {
+                            self.vocab_review_index = self
+                                .vocab_review_queue
+                                .iter()
+                                .position(|lemma| lemma == &current_lemma)
+                                .unwrap_or_else(|| {
+                                    self.vocab_review_index
+                                        .min(self.vocab_review_queue.len().saturating_sub(1))
+                                });
+                        }
+                        if was_reviewing {
+                            if self.vocab_review_queue.is_empty() {
+                                self.finish_vocab_review(cx, "本轮复习已结束");
+                            } else {
+                                self.show_vocab_review_card(cx);
+                            }
+                        }
+                        self.ui
+                            .label(cx, ids!(vocab_status_hint))
+                            .set_text(cx, message);
+                    }
+                    VocabAction::Error(error) => {
+                        self.vocab_review_pending = false;
+                        if !self.vocab_review_queue.is_empty() {
+                            self.show_vocab_review_card(cx);
+                        }
+                        self.ui
+                            .label(cx, ids!(vocab_status_hint))
+                            .set_text(cx, &format!("生词本操作失败：{error}"));
+                    }
+                }
+                self.ui.redraw(cx);
+                continue;
+            }
             if let Some(local_ai) = action.downcast_ref::<LocalAiAction>() {
                 match local_ai {
                     LocalAiAction::Loaded(settings) => {
@@ -3659,11 +4414,7 @@ impl MatchEvent for App {
                             .label(cx, ids!(local_ai_status))
                             .set_text(cx, "本地 AI 设置已保存 ✓");
                     }
-                    #[cfg(any(
-                        target_os = "macos",
-                        target_os = "windows",
-                        target_os = "linux"
-                    ))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     LocalAiAction::Started { settings, session } => {
                         self.local_ai_settings = settings.clone();
                         self.local_ai_session = Some(session.clone());
@@ -3781,6 +4532,9 @@ impl MatchEvent for App {
                         };
                         self.ui.label(cx, ids!(card_hint)).set_text(cx, hint);
                         self.ui.label(cx, ids!(sel_hint)).set_text(cx, hint);
+                        if *added {
+                            spawn_load_vocab();
+                        }
                     }
                     CardAction::MarkedKnown => {
                         self.card = None;
@@ -3977,6 +4731,44 @@ impl MatchEvent for App {
                 spawn_delete_skill(skill.id.clone());
             }
         }
+        let vocab_list = self
+            .ui
+            .widget(cx, ids!(vocab_list))
+            .portal_list(cx, ids!(list));
+        for (item_id, item) in vocab_list.items_with_actions(actions) {
+            let entry = VOCAB_VISIBLE
+                .read()
+                .unwrap()
+                .entry_for_item_id(item_id)
+                .cloned();
+            let Some(entry) = entry else { continue };
+            if item.button(cx, ids!(vocab_speak)).clicked(actions) {
+                speak_text(entry.word.clone());
+                self.ui
+                    .label(cx, ids!(vocab_status_hint))
+                    .set_text(cx, &format!("正在朗读 {}…", entry.word));
+            }
+            if item.button(cx, ids!(vocab_review)).clicked(actions) {
+                self.start_vocab_review(cx, vec![entry.lemma.clone()]);
+            }
+            if item.button(cx, ids!(vocab_toggle)).clicked(actions) {
+                let status = if entry.status == "mastered" {
+                    "learning"
+                } else {
+                    "mastered"
+                };
+                self.ui
+                    .label(cx, ids!(vocab_status_hint))
+                    .set_text(cx, "正在更新学习状态…");
+                spawn_set_vocab_status(entry.lemma.clone(), status);
+            }
+            if item.button(cx, ids!(vocab_remove)).clicked(actions) {
+                self.ui
+                    .label(cx, ids!(vocab_status_hint))
+                    .set_text(cx, "正在移除生词…");
+                spawn_remove_vocab(entry.lemma.clone());
+            }
+        }
         if self.ui.button(cx, ids!(nav_library)).clicked(actions) {
             pages.set_active_page(cx, id!(page_library));
             self.on_reader_page = false;
@@ -3996,6 +4788,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(nav_vocab)).clicked(actions) {
             pages.set_active_page(cx, id!(page_vocab));
             self.on_reader_page = false;
+            spawn_load_vocab();
         }
         if self.ui.button(cx, ids!(nav_settings)).clicked(actions) {
             pages.set_active_page(cx, id!(page_settings));
@@ -4028,6 +4821,74 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(chat_skill_clear)).clicked(actions) {
             self.pending_skill_id = None;
             self.refresh_pending_skill_indicator(cx);
+        }
+        if let Some(search) = self.ui.text_input(cx, ids!(vocab_search)).changed(actions) {
+            self.vocab_search = search;
+            self.refresh_vocab_projection(cx);
+        }
+        if let Some(index) = self
+            .ui
+            .radio_button_set(
+                cx,
+                ids_array!(
+                    vocab_filter_all,
+                    vocab_filter_learning,
+                    vocab_filter_mastered
+                ),
+            )
+            .selected(cx, actions)
+        {
+            self.set_vocab_filter(cx, VocabFilter::from_index(index));
+        }
+        if self
+            .ui
+            .button(cx, ids!(vocab_start_review))
+            .clicked(actions)
+        {
+            let queue = self
+                .vocab_entries
+                .iter()
+                .filter(|entry| entry.status == "learning")
+                .map(|entry| entry.lemma.clone())
+                .collect();
+            self.start_vocab_review(cx, queue);
+        }
+        if self
+            .ui
+            .button(cx, ids!(vocab_review_reveal))
+            .clicked(actions)
+        {
+            self.reveal_vocab_review(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(vocab_review_again))
+            .clicked(actions)
+        {
+            self.submit_vocab_review(cx, "learning");
+        }
+        if self
+            .ui
+            .button(cx, ids!(vocab_review_known))
+            .clicked(actions)
+        {
+            self.submit_vocab_review(cx, "mastered");
+        }
+        if self
+            .ui
+            .button(cx, ids!(vocab_review_speak))
+            .clicked(actions)
+        {
+            if let Some(entry) = self.current_review_entry() {
+                speak_text(entry.word);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(vocab_review_close))
+            .clicked(actions)
+        {
+            self.finish_vocab_review(cx, "已结束本轮复习");
         }
         if self.ui.button(cx, ids!(font_inc)).clicked(actions) {
             self.adjust_font(cx, 1.0);

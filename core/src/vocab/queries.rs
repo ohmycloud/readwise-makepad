@@ -19,13 +19,15 @@ pub async fn save_book_words(
         .map_err(|e| format!("清理旧生词失败: {}", e))?;
 
     for word in words {
-        sqlx::query("INSERT OR REPLACE INTO book_words (book_id, lemma, context_sentence) VALUES (?, ?, ?)")
-            .bind(book_id)
-            .bind(&word.lemma)
-            .bind(&word.context_sentence)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("保存生词失败: {}", e))?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO book_words (book_id, lemma, context_sentence) VALUES (?, ?, ?)",
+        )
+        .bind(book_id)
+        .bind(&word.lemma)
+        .bind(&word.context_sentence)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("保存生词失败: {}", e))?;
     }
 
     tx.commit()
@@ -211,12 +213,23 @@ pub async fn vocab_book_list(pool: &SqlitePool) -> Result<Vec<VocabBookEntry>, S
 }
 
 pub async fn vocab_book_remove(pool: &SqlitePool, lemma: &str) -> Result<(), String> {
-    sqlx::query("DELETE FROM vocab_book WHERE lemma = ?")
+    let result = sqlx::query("DELETE FROM vocab_book WHERE lemma = ?")
         .bind(lemma)
         .execute(pool)
         .await
         .map_err(|e| format!("移除生词失败: {}", e))?;
+    if result.rows_affected() == 0 {
+        return Err("生词不存在，可能已被移除".to_string());
+    }
     Ok(())
+}
+
+fn validate_vocab_status(status: &str) -> Result<(), String> {
+    if status == "learning" || status == "mastered" {
+        Ok(())
+    } else {
+        Err(format!("无效状态: {}", status))
+    }
 }
 
 pub async fn vocab_book_set_status(
@@ -224,27 +237,134 @@ pub async fn vocab_book_set_status(
     lemma: &str,
     status: &str,
 ) -> Result<(), String> {
-    if status != "learning" && status != "mastered" {
-        return Err(format!("无效状态: {}", status));
-    }
+    validate_vocab_status(status)?;
     let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE vocab_book SET status = ?, updated_at = ? WHERE lemma = ?")
+    let result = sqlx::query("UPDATE vocab_book SET status = ?, updated_at = ? WHERE lemma = ?")
         .bind(status)
         .bind(now)
         .bind(lemma)
         .execute(pool)
         .await
         .map_err(|e| format!("更新生词状态失败: {}", e))?;
+    if result.rows_affected() == 0 {
+        return Err("生词不存在，可能已被移除".to_string());
+    }
     Ok(())
 }
 
 pub async fn vocab_book_review(pool: &SqlitePool, lemma: &str) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE vocab_book SET review_count = review_count + 1, updated_at = ? WHERE lemma = ?")
-        .bind(now)
-        .bind(lemma)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("记录复习失败: {}", e))?;
+    let result = sqlx::query(
+        "UPDATE vocab_book SET review_count = review_count + 1, updated_at = ? WHERE lemma = ?",
+    )
+    .bind(now)
+    .bind(lemma)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("记录复习失败: {}", e))?;
+    if result.rows_affected() == 0 {
+        return Err("生词不存在，可能已被移除".to_string());
+    }
     Ok(())
+}
+
+/// 原子记录一次复习结果，同时更新学习状态。
+pub async fn vocab_book_review_with_status(
+    pool: &SqlitePool,
+    lemma: &str,
+    status: &str,
+) -> Result<(), String> {
+    validate_vocab_status(status)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let result = sqlx::query(
+        "UPDATE vocab_book \
+         SET status = ?, review_count = review_count + 1, updated_at = ? \
+         WHERE lemma = ?",
+    )
+    .bind(status)
+    .bind(now)
+    .bind(lemma)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("记录复习结果失败: {}", e))?;
+    if result.rows_affected() == 0 {
+        return Err("生词不存在，可能已被移除".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool() -> (tokio::runtime::Runtime, SqlitePool) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pool = runtime
+            .block_on(SqlitePool::connect("sqlite::memory:"))
+            .unwrap();
+        runtime
+            .block_on(
+                sqlx::query(
+                    "CREATE TABLE vocab_book (\
+                        lemma TEXT PRIMARY KEY NOT NULL, word TEXT NOT NULL, gloss TEXT, \
+                        level INTEGER, context_sentence TEXT, book_id TEXT, \
+                        status TEXT NOT NULL DEFAULT 'learning', review_count INTEGER NOT NULL DEFAULT 0, \
+                        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\
+                    )",
+                )
+                .execute(&pool),
+            )
+            .unwrap();
+        (runtime, pool)
+    }
+
+    #[test]
+    fn vocab_review_updates_count_and_status_atomically() {
+        let (runtime, pool) = pool();
+        runtime.block_on(async {
+            let input = VocabBookAddInput {
+                lemma: "learn".to_string(),
+                word: "learning".to_string(),
+                gloss: Some("学习".to_string()),
+                level: Some(1),
+                context_sentence: Some("Keep learning.".to_string()),
+                book_id: Some("book-1".to_string()),
+            };
+            assert!(vocab_book_add(&pool, &input).await.unwrap());
+            assert!(!vocab_book_add(&pool, &input).await.unwrap());
+
+            vocab_book_review_with_status(&pool, "learn", "mastered")
+                .await
+                .unwrap();
+            let entries = vocab_book_list(&pool).await.unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].status, "mastered");
+            assert_eq!(entries[0].review_count, 1);
+
+            vocab_book_review_with_status(&pool, "learn", "learning")
+                .await
+                .unwrap();
+            let entries = vocab_book_list(&pool).await.unwrap();
+            assert_eq!(entries[0].status, "learning");
+            assert_eq!(entries[0].review_count, 2);
+        });
+    }
+
+    #[test]
+    fn vocab_mutations_validate_status_and_missing_rows() {
+        let (runtime, pool) = pool();
+        runtime.block_on(async {
+            assert!(vocab_book_set_status(&pool, "missing", "invalid")
+                .await
+                .is_err());
+            assert!(vocab_book_set_status(&pool, "missing", "learning")
+                .await
+                .is_err());
+            assert!(vocab_book_review(&pool, "missing").await.is_err());
+            assert!(vocab_book_remove(&pool, "missing").await.is_err());
+        });
+    }
 }
