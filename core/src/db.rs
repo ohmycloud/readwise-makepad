@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::books::{self, models::*};
 use crate::notes::{self, models::Note};
 use crate::skills::{self, models::Skill};
+use crate::statistics::{self, models::StatisticsSnapshot};
 use crate::threads::{self, models::*};
 use crate::vocab::{self, models::*};
 
@@ -93,6 +94,28 @@ impl Db {
     ) -> Result<std::collections::HashMap<usize, Vec<books::Highlight>>, String> {
         self.rt
             .block_on(books::get_highlights_by_chapter(&self.pool, book_id))
+    }
+
+    // —— 阅读统计 ——
+
+    pub fn start_reading_session(&self, book_id: &str) -> Result<String, String> {
+        self.rt
+            .block_on(statistics::start_reading_session(&self.pool, book_id))
+    }
+
+    pub fn checkpoint_reading_session(&self, id: &str) -> Result<(), String> {
+        self.rt
+            .block_on(statistics::checkpoint_reading_session(&self.pool, id))
+    }
+
+    pub fn finish_reading_session(&self, id: &str) -> Result<(), String> {
+        self.rt
+            .block_on(statistics::finish_reading_session(&self.pool, id))
+    }
+
+    pub fn statistics_snapshot(&self) -> Result<StatisticsSnapshot, String> {
+        self.rt
+            .block_on(statistics::statistics_snapshot(&self.pool))
     }
 
     // —— AI 设置与对话 ——
@@ -464,6 +487,7 @@ pub async fn initialize(data_dir: &Path) -> Result<SqlitePool, String> {
         .map_err(|e| format!("初始化 schema 失败: {}", e))?;
 
     ensure_book_note_columns(&pool).await?;
+    statistics::recover_open_reading_sessions(&pool).await?;
     initialize_starter_glosses(&pool).await?;
 
     initialize_default_skills(&pool).await?;

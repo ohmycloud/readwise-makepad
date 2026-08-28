@@ -11,6 +11,7 @@ use std::sync::{LazyLock, OnceLock, RwLock};
 type AiSettings = readwise_core::ai::AiSettings;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
+type StatisticsSnapshot = readwise_core::statistics::models::StatisticsSnapshot;
 type VocabEntry = readwise_core::vocab::models::VocabBookEntry;
 
 app_main!(App);
@@ -129,6 +130,64 @@ enum VocabAction {
         message: String,
     },
     Error(String),
+}
+
+#[derive(Debug)]
+enum StatisticsAction {
+    Loaded(StatisticsSnapshot),
+    Error(String),
+}
+
+#[derive(Debug)]
+enum ReadingSessionAction {
+    Started { id: String, book_id: String },
+    Error(String),
+}
+
+fn spawn_load_statistics() {
+    std::thread::spawn(|| {
+        let Some(db) = DB.get() else { return };
+        match db.statistics_snapshot() {
+            Ok(snapshot) => Cx::post_action(StatisticsAction::Loaded(snapshot)),
+            Err(error) => Cx::post_action(StatisticsAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_start_reading_session(book_id: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        match db.start_reading_session(&book_id) {
+            Ok(id) => Cx::post_action(ReadingSessionAction::Started { id, book_id }),
+            Err(error) => Cx::post_action(ReadingSessionAction::Error(error)),
+        }
+    });
+}
+
+fn spawn_checkpoint_reading_session(id: String) {
+    std::thread::spawn(move || {
+        if let Some(db) = DB.get() {
+            if let Err(error) = db.checkpoint_reading_session(&id) {
+                ::log::error!("{error}");
+            }
+        }
+    });
+}
+
+fn spawn_finish_reading_session(id: String, load_statistics: bool) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(error) = db.finish_reading_session(&id) {
+            Cx::post_action(ReadingSessionAction::Error(error));
+            return;
+        }
+        if load_statistics {
+            match db.statistics_snapshot() {
+                Ok(snapshot) => Cx::post_action(StatisticsAction::Loaded(snapshot)),
+                Err(error) => Cx::post_action(StatisticsAction::Error(error)),
+            }
+        }
+    });
 }
 
 fn spawn_load_vocab() {
@@ -1557,6 +1616,14 @@ script_mod! {
         }
     }
 
+    mod.widgets.StatsBarsBase = #(StatsBars::register_widget(vm))
+    mod.widgets.StatsBars = set_type_default() do mod.widgets.StatsBarsBase{
+        width: Fill height: 190
+        draw_bg.color: #x202322
+        draw_grid.color: #x373b39
+        draw_bar.color: #x62b6ff
+    }
+
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
@@ -1621,6 +1688,7 @@ script_mod! {
                         nav_chat := ButtonFlat{ width: Fill text: "AI 对话" }
                         nav_skills := ButtonFlat{ width: Fill text: "AI 技能" }
                         nav_vocab := ButtonFlat{ width: Fill text: "生词本" }
+                        nav_statistics := ButtonFlat{ width: Fill text: "统计" }
                         nav_settings := ButtonFlat{ width: Fill text: "设置" }
                         sidebar_fill := View{ width: Fill height: Fill }
                         db_status := Label{
@@ -1978,6 +2046,119 @@ script_mod! {
                             vocab_list := mod.widgets.VocabList{visible: false}
                         }
 
+                        page_statistics := ScrollYView{
+                            width: Fill height: Fill
+                            flow: Down padding: 24 spacing: 14
+                            statistics_header := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 10
+                                align: Align{y: 0.5}
+                                Label{
+                                    width: Fill height: Fit
+                                    text: "阅读统计"
+                                    draw_text.text_style.font_size: 18
+                                }
+                                statistics_refresh := ButtonFlat{text: "刷新"}
+                            }
+                            statistics_status := Label{
+                                width: Fill height: Fit
+                                text: "正在读取统计数据…"
+                                draw_text.color: #x8f8f8f
+                                draw_text.text_style.font_size: 9
+                            }
+                            statistics_summary := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 10
+                                stat_today_card := RoundedView{
+                                    width: Fill height: 88
+                                    new_batch: true
+                                    flow: Down spacing: 5 padding: 12
+                                    draw_bg.color: #x252a28
+                                    draw_bg.border_radius: 9.0
+                                    Label{text: "今日阅读" draw_text.color: #x9a9a9a draw_text.text_style.font_size: 9}
+                                    stat_today := Label{text: "0 分钟" draw_text.text_style.font_size: 18}
+                                }
+                                stat_total_card := RoundedView{
+                                    width: Fill height: 88
+                                    new_batch: true
+                                    flow: Down spacing: 5 padding: 12
+                                    draw_bg.color: #x252a28
+                                    draw_bg.border_radius: 9.0
+                                    Label{text: "累计阅读" draw_text.color: #x9a9a9a draw_text.text_style.font_size: 9}
+                                    stat_total := Label{text: "0 分钟" draw_text.text_style.font_size: 18}
+                                }
+                                stat_days_card := RoundedView{
+                                    width: Fill height: 88
+                                    new_batch: true
+                                    flow: Down spacing: 5 padding: 12
+                                    draw_bg.color: #x252a28
+                                    draw_bg.border_radius: 9.0
+                                    Label{text: "阅读天数" draw_text.color: #x9a9a9a draw_text.text_style.font_size: 9}
+                                    stat_days := Label{text: "0 天" draw_text.text_style.font_size: 18}
+                                }
+                                stat_books_card := RoundedView{
+                                    width: Fill height: 88
+                                    new_batch: true
+                                    flow: Down spacing: 5 padding: 12
+                                    draw_bg.color: #x252a28
+                                    draw_bg.border_radius: 9.0
+                                    Label{text: "读完书籍" draw_text.color: #x9a9a9a draw_text.text_style.font_size: 9}
+                                    stat_books := Label{text: "0 / 0" draw_text.text_style.font_size: 18}
+                                }
+                            }
+                            reading_chart_card := RoundedView{
+                                width: Fill height: Fit
+                                new_batch: true
+                                flow: Down spacing: 10 padding: 14
+                                draw_bg.color: #x252525
+                                draw_bg.border_radius: 10.0
+                                Label{text: "最近 7 天阅读时长" draw_text.text_style.font_size: 13}
+                                reading_chart_hint := Label{
+                                    width: Fill height: Fit
+                                    text: "每天 0 分钟"
+                                    draw_text.color: #x8f8f8f
+                                    draw_text.text_style.font_size: 9
+                                }
+                                reading_chart := mod.widgets.StatsBars{}
+                                reading_chart_labels := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 4
+                                    stat_day_0 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    stat_day_1 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    stat_day_2 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    stat_day_3 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    stat_day_4 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    stat_day_5 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    stat_day_6 := Label{width: Fill text: "今天" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                }
+                            }
+                            vocab_chart_card := RoundedView{
+                                width: Fill height: Fit
+                                new_batch: true
+                                flow: Down spacing: 10 padding: 14
+                                draw_bg.color: #x252525
+                                draw_bg.border_radius: 10.0
+                                Label{text: "词汇学习" draw_text.text_style.font_size: 13}
+                                vocab_chart_hint := Label{
+                                    width: Fill height: Fit
+                                    text: "生词 0 · 累计复习 0 次"
+                                    draw_text.color: #x8f8f8f
+                                    draw_text.text_style.font_size: 9
+                                }
+                                vocab_chart := mod.widgets.StatsBars{
+                                    height: 150
+                                    draw_bar.color: #x7fb2a6
+                                }
+                                vocab_chart_labels := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 4
+                                    Label{width: Fill text: "学习中" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    Label{width: Fill text: "已掌握" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    Label{width: Fill text: "累计复习" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                }
+                            }
+                        }
+
                         page_chat := View{
                             width: Fill height: Fill
                             flow: Down
@@ -2328,6 +2509,82 @@ script_mod! {
                 }
             }
         }
+    }
+}
+
+/// 轻量 GPU 柱状图。矩形由 Makepad 的 DrawColor shader 批量绘制，
+/// 数据和坐标仍在 Rust 侧保持可测试、可更新。
+#[derive(Script, ScriptHook, Widget)]
+struct StatsBars {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawColor,
+    #[live]
+    draw_grid: DrawColor,
+    #[live]
+    draw_bar: DrawColor,
+    #[rust]
+    values: Vec<f64>,
+}
+
+impl StatsBars {
+    fn set_values(&mut self, cx: &mut Cx, values: Vec<f64>) {
+        self.values = values;
+        self.draw_bg.redraw(cx);
+    }
+}
+
+impl Widget for StatsBars {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle(walk);
+        self.draw_bg.draw_abs(cx, rect);
+        let padding = 12.0;
+        let plot = Rect {
+            pos: rect.pos + dvec2(padding, padding),
+            size: rect.size - dvec2(padding * 2.0, padding * 2.0),
+        };
+        if plot.size.x <= 1.0 || plot.size.y <= 1.0 {
+            return DrawStep::done();
+        }
+        for fraction in [0.25, 0.5, 0.75, 1.0] {
+            self.draw_grid.draw_abs(
+                cx,
+                Rect {
+                    pos: plot.pos + dvec2(0.0, plot.size.y * (1.0 - fraction)),
+                    size: dvec2(plot.size.x, 1.0),
+                },
+            );
+        }
+        if self.values.is_empty() {
+            return DrawStep::done();
+        }
+        let maximum = self.values.iter().copied().fold(0.0_f64, f64::max).max(1.0);
+        let slot = plot.size.x / self.values.len() as f64;
+        let bar_width = (slot * 0.56).max(3.0);
+        for (index, value) in self.values.iter().enumerate() {
+            let height =
+                (plot.size.y * (*value / maximum)).max(if *value > 0.0 { 2.0 } else { 0.0 });
+            self.draw_bar.draw_abs(
+                cx,
+                Rect {
+                    pos: plot.pos
+                        + dvec2(
+                            slot * index as f64 + (slot - bar_width) * 0.5,
+                            plot.size.y - height,
+                        ),
+                    size: dvec2(bar_width, height),
+                },
+            );
+        }
+        DrawStep::done()
     }
 }
 
@@ -3004,6 +3261,14 @@ pub struct App {
     #[rust]
     vocab_review_pending: bool,
     #[rust]
+    reading_session_id: Option<String>,
+    #[rust]
+    reading_session_pending: bool,
+    #[rust]
+    reading_checkpoint_timer: Timer,
+    #[rust]
+    statistics_after_pending_session: bool,
+    #[rust]
     chapter_idx: usize,
     #[rust]
     on_reader_page: bool,
@@ -3021,6 +3286,152 @@ pub struct App {
 }
 
 impl App {
+    fn format_reading_duration(seconds: i64) -> String {
+        if seconds > 0 && seconds < 60 {
+            return "< 1 分钟".to_string();
+        }
+        let minutes = seconds.max(0) / 60;
+        if minutes < 60 {
+            format!("{minutes} 分钟")
+        } else {
+            let hours = minutes / 60;
+            let remainder = minutes % 60;
+            if remainder == 0 {
+                format!("{hours} 小时")
+            } else {
+                format!("{hours} 小时 {remainder} 分")
+            }
+        }
+    }
+
+    fn start_reading_timer(&mut self, cx: &mut Cx) {
+        if !self.on_reader_page || self.reading_session_id.is_some() || self.reading_session_pending
+        {
+            return;
+        }
+        let book_id = CURRENT_BOOK
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|book| book.id.clone());
+        let Some(book_id) = book_id else { return };
+        self.reading_session_pending = true;
+        self.ui.label(cx, ids!(status)).set_text(cx, "阅读计时中…");
+        spawn_start_reading_session(book_id);
+    }
+
+    fn stop_reading_timer(&mut self, cx: &mut Cx, load_statistics: bool) {
+        let was_pending = self.reading_session_pending;
+        cx.stop_timer(self.reading_checkpoint_timer);
+        self.reading_checkpoint_timer = Timer::default();
+        if let Some(id) = self.reading_session_id.take() {
+            spawn_finish_reading_session(id, load_statistics);
+        } else if load_statistics {
+            if was_pending {
+                self.statistics_after_pending_session = true;
+            } else {
+                spawn_load_statistics();
+            }
+        }
+    }
+
+    fn apply_statistics(&self, cx: &mut Cx, snapshot: &StatisticsSnapshot) {
+        self.ui.label(cx, ids!(stat_today)).set_text(
+            cx,
+            &Self::format_reading_duration(snapshot.today_reading_seconds),
+        );
+        self.ui.label(cx, ids!(stat_total)).set_text(
+            cx,
+            &Self::format_reading_duration(snapshot.total_reading_seconds),
+        );
+        self.ui
+            .label(cx, ids!(stat_days))
+            .set_text(cx, &format!("{} 天", snapshot.active_days));
+        self.ui.label(cx, ids!(stat_books)).set_text(
+            cx,
+            &format!("{} / {}", snapshot.completed_books, snapshot.total_books),
+        );
+
+        let reading_values = snapshot
+            .daily_reading
+            .iter()
+            .map(|day| day.duration_seconds as f64 / 60.0)
+            .collect::<Vec<_>>();
+        if let Some(mut chart) = self
+            .ui
+            .widget(cx, ids!(reading_chart))
+            .borrow_mut::<StatsBars>()
+        {
+            chart.set_values(cx, reading_values);
+        }
+        let daily_peak = snapshot
+            .daily_reading
+            .iter()
+            .map(|day| day.duration_seconds)
+            .max()
+            .unwrap_or(0);
+        self.ui.label(cx, ids!(reading_chart_hint)).set_text(
+            cx,
+            &format!(
+                "7 天合计 {} · 单日最高 {}",
+                Self::format_reading_duration(
+                    snapshot
+                        .daily_reading
+                        .iter()
+                        .map(|day| day.duration_seconds)
+                        .sum()
+                ),
+                Self::format_reading_duration(daily_peak)
+            ),
+        );
+        for (index, day) in snapshot.daily_reading.iter().enumerate() {
+            let label = if index + 1 == snapshot.daily_reading.len() {
+                "今天".to_string()
+            } else {
+                day.date.get(5..).unwrap_or(&day.date).replace('-', "/")
+            };
+            let id = match index {
+                0 => ids!(stat_day_0),
+                1 => ids!(stat_day_1),
+                2 => ids!(stat_day_2),
+                3 => ids!(stat_day_3),
+                4 => ids!(stat_day_4),
+                5 => ids!(stat_day_5),
+                _ => ids!(stat_day_6),
+            };
+            self.ui.label(cx, id).set_text(cx, &label);
+        }
+
+        if let Some(mut chart) = self
+            .ui
+            .widget(cx, ids!(vocab_chart))
+            .borrow_mut::<StatsBars>()
+        {
+            chart.set_values(
+                cx,
+                vec![
+                    snapshot.vocab_learning as f64,
+                    snapshot.vocab_mastered as f64,
+                    snapshot.total_reviews as f64,
+                ],
+            );
+        }
+        self.ui.label(cx, ids!(vocab_chart_hint)).set_text(
+            cx,
+            &format!(
+                "生词 {} · 学习中 {} · 已掌握 {} · 累计复习 {} 次",
+                snapshot.vocab_total,
+                snapshot.vocab_learning,
+                snapshot.vocab_mastered,
+                snapshot.total_reviews
+            ),
+        );
+        self.ui
+            .label(cx, ids!(statistics_status))
+            .set_text(cx, "统计已更新 · 阅读页停留时间每 30 秒自动保存");
+        self.ui.widget(cx, ids!(page_statistics)).redraw(cx);
+    }
+
     fn text_input_has_focus(&self, cx: &Cx) -> bool {
         [
             ids!(note_extra),
@@ -4170,6 +4581,11 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_timer(&mut self, cx: &mut Cx, event: &TimerEvent) {
+        if self.reading_checkpoint_timer.is_timer(event).is_some() {
+            if let Some(id) = self.reading_session_id.clone() {
+                spawn_checkpoint_reading_session(id);
+            }
+        }
         if self.ai_request.is_some() && self.ai_timeout.is_timer(event).is_some() {
             self.fail_chat(
                 cx,
@@ -4203,6 +4619,11 @@ impl MatchEvent for App {
     }
 
     fn handle_shutdown(&mut self, _cx: &mut Cx) {
+        if let Some(id) = self.reading_session_id.take() {
+            if let Some(db) = DB.get() {
+                let _ = db.finish_reading_session(&id);
+            }
+        }
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             LOCAL_AI_CANCEL.store(true, Ordering::Relaxed);
@@ -4247,6 +4668,57 @@ impl MatchEvent for App {
                         let status = format!("数据库失败:\n{}", e);
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
                     }
+                }
+                continue;
+            }
+            if let Some(session_action) = action.downcast_ref::<ReadingSessionAction>() {
+                match session_action {
+                    ReadingSessionAction::Started { id, book_id } => {
+                        self.reading_session_pending = false;
+                        let is_current_book = CURRENT_BOOK
+                            .read()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|book| book.id == *book_id);
+                        if self.on_reader_page && is_current_book {
+                            self.statistics_after_pending_session = false;
+                            self.reading_session_id = Some(id.clone());
+                            self.reading_checkpoint_timer = cx.start_interval(30.0);
+                            self.ui
+                                .label(cx, ids!(status))
+                                .set_text(cx, "阅读时长已开始记录");
+                        } else {
+                            let load_statistics = self.statistics_after_pending_session;
+                            self.statistics_after_pending_session = false;
+                            spawn_finish_reading_session(id.clone(), load_statistics);
+                            if self.on_reader_page {
+                                self.start_reading_timer(cx);
+                            }
+                        }
+                    }
+                    ReadingSessionAction::Error(error) => {
+                        self.reading_session_pending = false;
+                        if self.statistics_after_pending_session {
+                            self.statistics_after_pending_session = false;
+                            spawn_load_statistics();
+                        }
+                        ::log::error!("{error}");
+                        if self.on_reader_page {
+                            self.ui
+                                .label(cx, ids!(status))
+                                .set_text(cx, &format!("阅读计时失败：{error}"));
+                        }
+                    }
+                }
+                continue;
+            }
+            if let Some(statistics_action) = action.downcast_ref::<StatisticsAction>() {
+                match statistics_action {
+                    StatisticsAction::Loaded(snapshot) => self.apply_statistics(cx, snapshot),
+                    StatisticsAction::Error(error) => self
+                        .ui
+                        .label(cx, ids!(statistics_status))
+                        .set_text(cx, &format!("统计加载失败：{error}")),
                 }
                 continue;
             }
@@ -4631,6 +5103,7 @@ impl MatchEvent for App {
                         {
                             spawn_load_notes(book_id);
                         }
+                        self.start_reading_timer(cx);
                     }
                     ReaderAction::OpenError(e) => {
                         self.ui
@@ -4770,29 +5243,67 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(nav_library)).clicked(actions) {
+            if self.on_reader_page {
+                self.stop_reading_timer(cx, false);
+            }
             pages.set_active_page(cx, id!(page_library));
             self.on_reader_page = false;
         }
         if self.ui.button(cx, ids!(nav_reader)).clicked(actions) {
             pages.set_active_page(cx, id!(page_reader));
             self.on_reader_page = true;
+            self.start_reading_timer(cx);
         }
         if self.ui.button(cx, ids!(nav_chat)).clicked(actions) {
+            if self.on_reader_page {
+                self.stop_reading_timer(cx, false);
+            }
             pages.set_active_page(cx, id!(page_chat));
             self.on_reader_page = false;
         }
         if self.ui.button(cx, ids!(nav_skills)).clicked(actions) {
+            if self.on_reader_page {
+                self.stop_reading_timer(cx, false);
+            }
             pages.set_active_page(cx, id!(page_skills));
             self.on_reader_page = false;
         }
         if self.ui.button(cx, ids!(nav_vocab)).clicked(actions) {
+            if self.on_reader_page {
+                self.stop_reading_timer(cx, false);
+            }
             pages.set_active_page(cx, id!(page_vocab));
             self.on_reader_page = false;
             spawn_load_vocab();
         }
+        if self.ui.button(cx, ids!(nav_statistics)).clicked(actions) {
+            pages.set_active_page(cx, id!(page_statistics));
+            if self.on_reader_page {
+                self.stop_reading_timer(cx, true);
+            } else {
+                spawn_load_statistics();
+            }
+            self.on_reader_page = false;
+            self.ui
+                .label(cx, ids!(statistics_status))
+                .set_text(cx, "正在更新统计数据…");
+        }
         if self.ui.button(cx, ids!(nav_settings)).clicked(actions) {
+            if self.on_reader_page {
+                self.stop_reading_timer(cx, false);
+            }
             pages.set_active_page(cx, id!(page_settings));
             self.on_reader_page = false;
+        }
+        if self
+            .ui
+            .button(cx, ids!(statistics_refresh))
+            .clicked(actions)
+        {
+            self.ui
+                .label(cx, ids!(statistics_status))
+                .set_text(cx, "正在更新统计数据…");
+            spawn_load_statistics();
         }
         if self.ui.button(cx, ids!(skill_new)).clicked(actions)
             || self.ui.button(cx, ids!(skill_cancel)).clicked(actions)

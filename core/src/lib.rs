@@ -5,6 +5,7 @@ pub mod local_ai;
 pub mod notes;
 pub mod paths;
 pub mod skills;
+pub mod statistics;
 pub mod threads;
 pub mod vocab;
 
