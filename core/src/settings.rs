@@ -1,4 +1,27 @@
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppLanguage {
+    #[default]
+    Chinese,
+    English,
+}
+
+impl AppLanguage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chinese => "zh-CN",
+            Self::English => "en",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "en" | "en-US" | "en-GB" => Self::English,
+            _ => Self::Chinese,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderTheme {
     #[default]
     Dark,
@@ -88,6 +111,7 @@ impl ReaderSpacing {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReaderSettings {
+    pub language: AppLanguage,
     pub theme: ReaderTheme,
     pub font: ReaderFont,
     pub spacing: ReaderSpacing,
@@ -105,6 +129,7 @@ pub struct ReaderSettings {
 impl Default for ReaderSettings {
     fn default() -> Self {
         Self {
+            language: AppLanguage::Chinese,
             theme: ReaderTheme::Dark,
             font: ReaderFont::Standard,
             spacing: ReaderSpacing::Default,
@@ -171,6 +196,14 @@ mod tests {
         assert_eq!(ReaderTheme::Light.as_str(), "light");
         assert_eq!(ReaderTheme::from_str("light"), ReaderTheme::Light);
         assert_eq!(ReaderTheme::from_str("unknown"), ReaderTheme::Dark);
+    }
+
+    #[test]
+    fn app_language_uses_stable_storage_values() {
+        assert_eq!(AppLanguage::Chinese.as_str(), "zh-CN");
+        assert_eq!(AppLanguage::English.as_str(), "en");
+        assert_eq!(AppLanguage::from_str("en-US"), AppLanguage::English);
+        assert_eq!(AppLanguage::from_str("unknown"), AppLanguage::Chinese);
     }
 
     #[test]

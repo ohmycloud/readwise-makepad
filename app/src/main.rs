@@ -1,5 +1,6 @@
 mod app;
 mod chapter_image;
+mod i18n;
 mod mark_span;
 #[cfg(target_os = "ios")]
 mod mobile_import;

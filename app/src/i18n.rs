@@ -1,0 +1,305 @@
+use readwise_core::settings::AppLanguage;
+
+/// UI 文案的唯一入口。键保持稳定，便于逐页补齐而不把语言判断散落到 widget 中。
+pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
+    let english = language == AppLanguage::English;
+    match key {
+        "library" => choose(english, "书库", "Library"),
+        "reader" => choose(english, "阅读", "Reader"),
+        "chat" => choose(english, "AI 对话", "AI Chat"),
+        "skills" => choose(english, "AI 技能", "AI Skills"),
+        "vocabulary" => choose(english, "生词本", "Vocabulary"),
+        "statistics" => choose(english, "统计", "Statistics"),
+        "settings" => choose(english, "设置", "Settings"),
+        "import_epub" => choose(english, "导入 EPUB", "Import EPUB"),
+        "library_hint" => choose(
+            english,
+            "把 EPUB 拖进窗口，或放入导入目录后重启。",
+            "Drop an EPUB here, or place it in the import folder and restart.",
+        ),
+        "library_empty" => choose(english, "书架为空", "Your library is empty"),
+        "library_empty_hint" => choose(
+            english,
+            "拖入 EPUB 文件，或放进 ReadWise/import 目录",
+            "Drop an EPUB file here, or place it in ReadWise/import",
+        ),
+        "delete" => choose(english, "删除", "Delete"),
+        "close" => choose(english, "关闭", "Close"),
+        "cancel" => choose(english, "取消", "Cancel"),
+        "save" => choose(english, "保存", "Save"),
+        "send" => choose(english, "发送", "Send"),
+        "stop" => choose(english, "停止", "Stop"),
+        "new_chat" => choose(english, "新对话", "New Chat"),
+        "copy" => choose(english, "复制", "Copy"),
+        "note" => choose(english, "笔记", "Note"),
+        "quote" => choose(english, "引用", "Quote"),
+        "no_notes" => choose(english, "还没有笔记", "No notes yet"),
+        "no_notes_hint" => choose(
+            english,
+            "选中文本，点击「笔记」创建第一条。",
+            "Select text and choose Note to create the first one.",
+        ),
+        "note_select_hint" => choose(english, "选中文本后可添加笔记", "Select text to add a note"),
+        "note_placeholder" => choose(
+            english,
+            "补充内容（可选，回车保存）",
+            "Add details (optional, press Enter to save)",
+        ),
+        "word" => choose(english, "生词", "Word"),
+        "translate" => choose(english, "翻译", "Translate"),
+        "ask_ai" => choose(english, "问 AI", "Ask AI"),
+        "speak" => choose(english, "发音", "Speak"),
+        "highlight" => choose(english, "高亮", "Highlight"),
+        "contents" => choose(english, "目录", "Contents"),
+        "reader_ai" => choose(english, "阅读 AI", "Reader AI"),
+        "reader_chat_placeholder" => choose(
+            english,
+            "继续追问，按回车发送",
+            "Ask a follow-up and press Enter",
+        ),
+        "reader_ai_hint" => choose(
+            english,
+            "选择文字后点“问 AI”，或在下方直接提问",
+            "Select text and choose Ask AI, or type a question below",
+        ),
+        "add_vocabulary" => choose(english, "加入生词本", "Add to Vocabulary"),
+        "mark_known" => choose(english, "标为已认识", "Mark as Known"),
+        "start_review" => choose(english, "开始复习", "Start Review"),
+        "vocab_search_placeholder" => choose(
+            english,
+            "搜索单词、原形或释义",
+            "Search word, lemma, or definition",
+        ),
+        "end_review" => choose(english, "结束复习", "End Review"),
+        "show_definition" => choose(english, "显示释义", "Show Definition"),
+        "keep_learning" => choose(english, "继续学习", "Keep Learning"),
+        "known" => choose(english, "认识了", "Got It"),
+        "all" => choose(english, "全部", "All"),
+        "learning" => choose(english, "学习中", "Learning"),
+        "mastered" => choose(english, "已掌握", "Mastered"),
+        "refresh" => choose(english, "刷新", "Refresh"),
+        "reading_statistics" => choose(english, "阅读统计", "Reading Statistics"),
+        "today_reading" => choose(english, "今日阅读", "Today"),
+        "total_reading" => choose(english, "累计阅读", "Total Reading"),
+        "reading_days" => choose(english, "阅读天数", "Reading Days"),
+        "finished_books" => choose(english, "读完书籍", "Finished Books"),
+        "last_7_days" => choose(english, "最近 7 天阅读时长", "Reading — Last 7 Days"),
+        "vocabulary_learning" => choose(english, "词汇学习", "Vocabulary Learning"),
+        "total_reviews" => choose(english, "累计复习", "Total Reviews"),
+        "new_skill" => choose(english, "新建模板", "New Template"),
+        "new_skill_title" => choose(english, "新建技能", "New Skill"),
+        "skill_editor_hint" => choose(
+            english,
+            "自定义技能可用于下一次 AI 提问；启用的系统技能会自动作为全局系统提示词。",
+            "Custom skills can be used for the next AI request; enabled system skills are always added to the system prompt.",
+        ),
+        "system_skill_hint" => choose(
+            english,
+            "系统技能启用后自动作为所有 AI 对话的系统提示词；系统技能不可删除。",
+            "Enabled system skills are added to every AI conversation and cannot be deleted.",
+        ),
+        "custom_skill_hint" => choose(
+            english,
+            "保存后可从左侧点击「下次提问使用」，模板只应用一次。",
+            "After saving, choose Use Next on the left; the template applies to one request.",
+        ),
+        "name" => choose(english, "名称", "Name"),
+        "enable_skill" => choose(english, "启用这个技能", "Enable this skill"),
+        "prompt_template" => choose(
+            english,
+            "Prompt 模板（Markdown）",
+            "Prompt Template (Markdown)",
+        ),
+        "skill_name_placeholder" => choose(english, "例如：逐句精读", "For example: Close Reading"),
+        "skill_prompt_placeholder" => choose(
+            english,
+            "写下模型执行此任务时应遵循的目标、步骤和输出格式…",
+            "Describe the goals, steps, and output format the model should follow…",
+        ),
+        "chat_placeholder" => choose(
+            english,
+            "输入问题，按回车发送",
+            "Type a question and press Enter",
+        ),
+        "cancel_template" => choose(english, "取消模板", "Cancel Template"),
+        "clear" => choose(english, "清空", "Clear"),
+        "edit" => choose(english, "编辑", "Edit"),
+        "enable" => choose(english, "启用", "Enable"),
+        "use_next" => choose(english, "下次提问使用", "Use Next"),
+        "review" => choose(english, "复习", "Review"),
+        "remove" => choose(english, "移除", "Remove"),
+        "mark_mastered" => choose(english, "标为掌握", "Mark Mastered"),
+        "language" => choose(english, "界面语言", "Interface Language"),
+        "chinese" => choose(english, "中文", "Chinese"),
+        "english" => choose(english, "英文", "English"),
+        "reading_section" => choose(english, "阅读", "Reading"),
+        "appearance_theme" => choose(english, "外观主题", "Appearance"),
+        "dark" => choose(english, "深色", "Dark"),
+        "light" => choose(english, "浅色", "Light"),
+        "body_font" => choose(english, "正文字体", "Body Font"),
+        "standard" => choose(english, "标准", "Standard"),
+        "monospace" => choose(english, "等宽", "Monospace"),
+        "line_spacing" => choose(english, "正文行距", "Line Spacing"),
+        "default" => choose(english, "默认", "Default"),
+        "comfortable" => choose(english, "舒适", "Comfortable"),
+        "relaxed" => choose(english, "宽松", "Relaxed"),
+        "font_size" => choose(english, "正文字号", "Font Size"),
+        "gloss_enabled" => choose(
+            english,
+            "生词注音（关闭则原样显示文章）",
+            "Vocabulary glosses (off shows original text)",
+        ),
+        "gloss_size" => choose(english, "注音字号", "Gloss Size"),
+        "gloss_color" => choose(english, "注音字色", "Gloss Color"),
+        "gloss_background" => choose(english, "注音背景", "Gloss Background"),
+        "word_color" => choose(english, "词字色", "Word Color"),
+        "word_background" => choose(english, "词背景", "Word Background"),
+        "text_section" => choose(english, "文本", "Text"),
+        "selection_color" => choose(english, "选中颜色", "Selection Color"),
+        "highlight_color" => choose(english, "高亮颜色", "Highlight Color"),
+        "cyan" => choose(english, "青", "Cyan"),
+        "blue" => choose(english, "蓝", "Blue"),
+        "orange" => choose(english, "橙", "Orange"),
+        "gray" => choose(english, "灰", "Gray"),
+        "yellow" => choose(english, "黄", "Yellow"),
+        "none" => choose(english, "无", "None"),
+        "dark_gray" => choose(english, "深灰", "Dark Gray"),
+        "dark_cyan" => choose(english, "深青", "Dark Cyan"),
+        "dark_blue" => choose(english, "深蓝", "Dark Blue"),
+        "reader_settings_saved" => choose(
+            english,
+            "阅读设置与外观主题更改后自动保存在本机。",
+            "Reading and appearance changes are saved on this device.",
+        ),
+        "ai_settings" => choose(english, "AI（OpenAI 兼容接口）", "AI (OpenAI-compatible)"),
+        "save_ai_settings" => choose(english, "保存 AI 设置", "Save AI Settings"),
+        "reload_sample" => choose(english, "重载示例章节", "Reload Sample Chapter"),
+        "api_endpoint_placeholder" => choose(
+            english,
+            "API 根地址或完整 /chat/completions 地址",
+            "API base URL or full /chat/completions URL",
+        ),
+        "model_placeholder" => choose(english, "模型名称（必填）", "Model name (required)"),
+        "api_key_placeholder" => choose(
+            english,
+            "API Key（本地免鉴权服务可留空）",
+            "API key (optional for local services without authentication)",
+        ),
+        "api_key_local_hint" => choose(
+            english,
+            "密钥保存在本机应用数据库中。",
+            "The key is stored in the local app database.",
+        ),
+        "local_ai" => choose(
+            english,
+            "本地 AI（桌面 llama.cpp）",
+            "Local AI (desktop llama.cpp)",
+        ),
+        "local_ai_hint" => choose(
+            english,
+            "填写已安装的 llama-server 与 GGUF 文件路径。服务只监听 127.0.0.1；启动后聊天会自动切换到本地模型。",
+            "Enter the installed llama-server and GGUF paths. The service only listens on 127.0.0.1, and chat switches to it after startup.",
+        ),
+        "local_binary_placeholder" => choose(
+            english,
+            "llama-server 路径，或 PATH 中的 llama-server",
+            "llama-server path, or llama-server available in PATH",
+        ),
+        "local_model_placeholder" => choose(
+            english,
+            "GGUF 模型完整路径",
+            "Full path to a GGUF model",
+        ),
+        "port" => choose(english, "端口", "Port"),
+        "context" => choose(english, "上下文", "Context"),
+        "threads_auto" => choose(english, "线程（0=自动）", "Threads (0=Auto)"),
+        "gpu_layers" => choose(english, "GPU 层", "GPU Layers"),
+        "local_auto_start" => choose(
+            english,
+            "应用启动时自动加载本地模型",
+            "Load the local model when the app starts",
+        ),
+        "local_not_running" => choose(
+            english,
+            "本地服务未启动。macOS 可通过 brew install llama.cpp 安装。",
+            "Local service is not running. On macOS, install it with brew install llama.cpp.",
+        ),
+        "start_local_ai" => choose(english, "启动并使用", "Start and Use"),
+        "save_local_ai" => choose(english, "仅保存设置", "Save Only"),
+        "stop_local_ai" => choose(english, "停止本地服务", "Stop Local Service"),
+        "no_skill_selected" => choose(english, "未选择技能模板", "No skill template selected"),
+        "model_name_required" => choose(
+            english,
+            "请先到设置页填写模型名称",
+            "Enter a model name in Settings first",
+        ),
+        "answer_in_progress" => choose(
+            english,
+            "上一条回答仍在生成，可先停止",
+            "The previous answer is still generating; stop it first",
+        ),
+        "ai_not_configured" => choose(
+            english,
+            "AI 尚未配置，请先到设置页保存接口信息",
+            "AI is not configured; save the connection details in Settings",
+        ),
+        "generating" => choose(english, "正在生成…", "Generating…"),
+        "answer_stopped" => choose(
+            english,
+            "已停止，已保留当前内容",
+            "Stopped; the current response was kept",
+        ),
+        "new_chat_ready" => choose(english, "新对话已就绪", "New chat ready"),
+        "answer_saving" => choose(
+            english,
+            "回答完成 · 正在保存对话",
+            "Answer complete · Saving conversation",
+        ),
+        "answer_saved" => choose(
+            english,
+            "回答完成 · 对话已保存 ✓",
+            "Answer complete · Conversation saved ✓",
+        ),
+        "outputting_answer" => choose(english, "正在输出回答…", "Streaming answer…"),
+        "model_thinking" => choose(english, "模型正在思考…", "Model is thinking…"),
+        _ => key,
+    }
+}
+
+const fn choose(english: bool, chinese: &'static str, english_text: &'static str) -> &'static str {
+    if english {
+        english_text
+    } else {
+        chinese
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_keys_have_distinct_chinese_and_english_text() {
+        for key in [
+            "library",
+            "reader",
+            "chat",
+            "skills",
+            "vocabulary",
+            "statistics",
+            "settings",
+            "language",
+            "gloss_enabled",
+        ] {
+            assert_ne!(
+                text(AppLanguage::Chinese, key),
+                text(AppLanguage::English, key)
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_key_is_visible_instead_of_becoming_blank() {
+        assert_eq!(text(AppLanguage::English, "missing.key"), "missing.key");
+    }
+}

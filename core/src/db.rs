@@ -338,6 +338,9 @@ impl Db {
                 let key: String = row.get("key");
                 let value: String = row.get("value");
                 match key.as_str() {
+                    "reader.language" => {
+                        settings.language = crate::settings::AppLanguage::from_str(&value)
+                    }
                     "reader.theme" => {
                         settings.theme = crate::settings::ReaderTheme::from_str(&value)
                     }
@@ -389,6 +392,7 @@ impl Db {
         self.rt.block_on(async {
             let settings = settings.clone().normalized();
             let now = chrono::Utc::now().timestamp_millis();
+            let language = settings.language.as_str();
             let theme = settings.theme.as_str();
             let font = settings.font.as_str();
             let spacing = settings.spacing.as_str();
@@ -402,6 +406,7 @@ impl Db {
             let selection_color_slot = settings.selection_color_slot.to_string();
             let highlight_color_slot = settings.highlight_color_slot.to_string();
             let values = [
+                ("reader.language", language),
                 ("reader.theme", theme),
                 ("reader.font", font),
                 ("reader.spacing", spacing),

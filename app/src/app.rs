@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 type AiSettings = readwise_core::ai::AiSettings;
+type AppLanguage = readwise_core::settings::AppLanguage;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
 type ReaderFont = readwise_core::settings::ReaderFont;
@@ -263,9 +264,9 @@ impl VocabFilter {
 
     fn label(self) -> &'static str {
         match self {
-            Self::All => "全部",
-            Self::Learning => "学习中",
-            Self::Mastered => "已掌握",
+            Self::All => tr("all"),
+            Self::Learning => tr("learning"),
+            Self::Mastered => tr("mastered"),
         }
     }
 
@@ -362,6 +363,7 @@ fn spawn_load_vocab() {
 }
 
 fn spawn_set_vocab_status(lemma: String, status: &'static str) {
+    let english = app_language() == AppLanguage::English;
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
         if let Err(error) = db.vocab_book_set_status(&lemma, status) {
@@ -372,7 +374,13 @@ fn spawn_set_vocab_status(lemma: String, status: &'static str) {
             Ok(entries) => Cx::post_action(VocabAction::Updated {
                 entries,
                 message: if status == "mastered" {
-                    format!("{lemma} 已标为掌握")
+                    if english {
+                        format!("{lemma} marked as mastered")
+                    } else {
+                        format!("{lemma} 已标为掌握")
+                    }
+                } else if english {
+                    format!("{lemma} moved back to Learning")
                 } else {
                     format!("{lemma} 已回到学习中")
                 },
@@ -384,6 +392,7 @@ fn spawn_set_vocab_status(lemma: String, status: &'static str) {
 }
 
 fn spawn_review_vocab(lemma: String, status: &'static str) {
+    let english = app_language() == AppLanguage::English;
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
         if let Err(error) = db.vocab_book_review_with_status(&lemma, status) {
@@ -394,7 +403,13 @@ fn spawn_review_vocab(lemma: String, status: &'static str) {
             Ok(entries) => Cx::post_action(VocabAction::Updated {
                 entries,
                 message: if status == "mastered" {
-                    format!("{lemma}：这次认识 ✓")
+                    if english {
+                        format!("{lemma}: Got it ✓")
+                    } else {
+                        format!("{lemma}：这次认识 ✓")
+                    }
+                } else if english {
+                    format!("{lemma}: Keep learning")
                 } else {
                     format!("{lemma}：继续学习")
                 },
@@ -406,6 +421,7 @@ fn spawn_review_vocab(lemma: String, status: &'static str) {
 }
 
 fn spawn_remove_vocab(lemma: String) {
+    let english = app_language() == AppLanguage::English;
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
         if let Err(error) = db.vocab_book_remove(&lemma) {
@@ -415,7 +431,11 @@ fn spawn_remove_vocab(lemma: String) {
         match db.vocab_book_list() {
             Ok(entries) => Cx::post_action(VocabAction::Removed {
                 entries,
-                message: format!("已从生词本移除 {lemma}"),
+                message: if english {
+                    format!("Removed {lemma} from Vocabulary")
+                } else {
+                    format!("已从生词本移除 {lemma}")
+                },
             }),
             Err(error) => Cx::post_action(VocabAction::Error(error)),
         }
@@ -1013,6 +1033,26 @@ static GLOSS_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(true
 static READER_THEME: LazyLock<RwLock<ReaderTheme>> =
     LazyLock::new(|| RwLock::new(ReaderTheme::Dark));
 
+/// 应用界面语言；正文内容与书籍元数据保持原文。
+static APP_LANGUAGE: LazyLock<RwLock<AppLanguage>> =
+    LazyLock::new(|| RwLock::new(AppLanguage::Chinese));
+
+fn app_language() -> AppLanguage {
+    *APP_LANGUAGE.read().unwrap()
+}
+
+fn tr(key: &'static str) -> &'static str {
+    crate::i18n::text(app_language(), key)
+}
+
+fn localized(chinese: &'static str, english: &'static str) -> &'static str {
+    if app_language() == AppLanguage::English {
+        english
+    } else {
+        chinese
+    }
+}
+
 /// EPUB 正文字体；应用 UI 与注音释义不跟随此设置。
 static READER_FONT: LazyLock<RwLock<ReaderFont>> =
     LazyLock::new(|| RwLock::new(ReaderFont::Standard));
@@ -1085,6 +1125,7 @@ fn spawn_load_notes(book_id: String) {
 }
 
 fn spawn_create_note(item: ShelfItem, quote: String, extra: String) {
+    let english = app_language() == AppLanguage::English;
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
         let content = [quote.trim(), extra.trim()]
@@ -1100,7 +1141,11 @@ fn spawn_create_note(item: ShelfItem, quote: String, extra: String) {
             Ok(notes) => Cx::post_action(NoteAction::Refreshed {
                 book_id: item.id,
                 notes,
-                message: Some("笔记已保存 ✓".to_string()),
+                message: Some(if english {
+                    "Note saved ✓".to_string()
+                } else {
+                    "笔记已保存 ✓".to_string()
+                }),
                 finish_composer: true,
             }),
             Err(e) => Cx::post_action(NoteAction::Error(e)),
@@ -1109,6 +1154,7 @@ fn spawn_create_note(item: ShelfItem, quote: String, extra: String) {
 }
 
 fn spawn_delete_note(book_id: String, note_id: String) {
+    let english = app_language() == AppLanguage::English;
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
         if let Err(e) = db.delete_note(&note_id) {
@@ -1119,7 +1165,11 @@ fn spawn_delete_note(book_id: String, note_id: String) {
             Ok(notes) => Cx::post_action(NoteAction::Refreshed {
                 book_id,
                 notes,
-                message: Some("笔记已删除".to_string()),
+                message: Some(if english {
+                    "Note deleted".to_string()
+                } else {
+                    "笔记已删除".to_string()
+                }),
                 finish_composer: false,
             }),
             Err(e) => Cx::post_action(NoteAction::Error(e)),
@@ -1543,6 +1593,7 @@ fn current_reader_settings() -> ReaderSettings {
     use crate::ruby_word::*;
 
     ReaderSettings {
+        language: *APP_LANGUAGE.read().unwrap(),
         theme: *READER_THEME.read().unwrap(),
         font: *READER_FONT.read().unwrap(),
         spacing: *READER_SPACING.read().unwrap(),
@@ -2106,7 +2157,7 @@ script_mod! {
                                     width: Fill height: Fit
                                     flow: Right spacing: 10
                                     align: Align{y: 0.5}
-                                    Label{
+                                    library_title := Label{
                                         width: Fill
                                         text: "书库"
                                         draw_text.text_style.font_size: 18
@@ -2131,7 +2182,7 @@ script_mod! {
                                     width: Fill height: Fill
                                     flow: Down spacing: 8
                                     align: Center
-                                    Label{
+                                    library_empty_title := Label{
                                         text: "书架为空"
                                         draw_text.text_style.font_size: 14
                                     }
@@ -2205,7 +2256,7 @@ script_mod! {
                                         flow: Down spacing: 8 padding: 10
                                         draw_bg.color: theme.color_bg_container
                                         draw_bg.border_radius: 8.0
-                                        Label{
+                                        note_quote_title := Label{
                                             text: "引用"
                                             draw_text.color: theme.color_highlight
                                             draw_text.text_style.font_size: 9
@@ -2239,11 +2290,11 @@ script_mod! {
                                         width: Fill height: 110
                                         flow: Down spacing: 7
                                         align: Center
-                                        Label{
+                                        note_empty_title := Label{
                                             text: "还没有笔记"
                                             draw_text.text_style.font_size: 12
                                         }
-                                        Label{
+                                        note_empty_hint := Label{
                                             text: "选中文本，点击「笔记」创建第一条。"
                                             draw_text.color: theme.color_label_inner_inactive
                                             draw_text.text_style.font_size: 8.5
@@ -2261,7 +2312,7 @@ script_mod! {
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
-                                        Label{
+                                        reader_ai_title := Label{
                                             width: Fill
                                             text: "阅读 AI"
                                             draw_text.text_style.font_size: 14
@@ -2494,7 +2545,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 flow: Right spacing: 10
                                 align: Align{y: 0.5}
-                                Label{
+                                statistics_title := Label{
                                     width: Fill height: Fit
                                     text: "阅读统计"
                                     draw_text.text_style.font_size: 18
@@ -2516,7 +2567,7 @@ script_mod! {
                                     flow: Down spacing: 5 padding: 12
                                     draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
-                                    Label{text: "今日阅读" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
+                                    stat_today_title := Label{text: "今日阅读" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
                                     stat_today := Label{text: "0 分钟" draw_text.text_style.font_size: 18}
                                 }
                                 stat_total_card := RoundedView{
@@ -2525,7 +2576,7 @@ script_mod! {
                                     flow: Down spacing: 5 padding: 12
                                     draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
-                                    Label{text: "累计阅读" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
+                                    stat_total_title := Label{text: "累计阅读" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
                                     stat_total := Label{text: "0 分钟" draw_text.text_style.font_size: 18}
                                 }
                                 stat_days_card := RoundedView{
@@ -2534,7 +2585,7 @@ script_mod! {
                                     flow: Down spacing: 5 padding: 12
                                     draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
-                                    Label{text: "阅读天数" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
+                                    stat_days_title := Label{text: "阅读天数" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
                                     stat_days := Label{text: "0 天" draw_text.text_style.font_size: 18}
                                 }
                                 stat_books_card := RoundedView{
@@ -2543,7 +2594,7 @@ script_mod! {
                                     flow: Down spacing: 5 padding: 12
                                     draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
-                                    Label{text: "读完书籍" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
+                                    stat_books_title := Label{text: "读完书籍" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
                                     stat_books := Label{text: "0 / 0" draw_text.text_style.font_size: 18}
                                 }
                             }
@@ -2553,7 +2604,7 @@ script_mod! {
                                 flow: Down spacing: 10 padding: 14
                                 draw_bg.color: theme.color_bg_container
                                 draw_bg.border_radius: 10.0
-                                Label{text: "最近 7 天阅读时长" draw_text.text_style.font_size: 13}
+                                reading_chart_title := Label{text: "最近 7 天阅读时长" draw_text.text_style.font_size: 13}
                                 reading_chart_hint := Label{
                                     width: Fill height: Fit
                                     text: "每天 0 分钟"
@@ -2579,7 +2630,7 @@ script_mod! {
                                 flow: Down spacing: 10 padding: 14
                                 draw_bg.color: theme.color_bg_container
                                 draw_bg.border_radius: 10.0
-                                Label{text: "词汇学习" draw_text.text_style.font_size: 13}
+                                vocab_chart_title := Label{text: "词汇学习" draw_text.text_style.font_size: 13}
                                 vocab_chart_hint := Label{
                                     width: Fill height: Fit
                                     text: "生词 0 · 累计复习 0 次"
@@ -2593,9 +2644,9 @@ script_mod! {
                                 vocab_chart_labels := View{
                                     width: Fill height: Fit
                                     flow: Right spacing: 4
-                                    Label{width: Fill text: "学习中" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
-                                    Label{width: Fill text: "已掌握" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
-                                    Label{width: Fill text: "累计复习" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    vocab_chart_learning := Label{width: Fill text: "学习中" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    vocab_chart_mastered := Label{width: Fill text: "已掌握" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    vocab_chart_reviews := Label{width: Fill text: "累计复习" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
                                 }
                             }
                         }
@@ -2607,7 +2658,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 flow: Down spacing: 4
                                 padding: Inset{left: 24 right: 24 top: 20 bottom: 8}
-                                Label{ text: "AI 对话" draw_text.text_style.font_size: 18 }
+                                chat_title := Label{ text: "AI 对话" draw_text.text_style.font_size: 18 }
                                 chat_status := Label{
                                     width: Fill
                                     text: "正在读取 AI 设置…"
@@ -2660,7 +2711,7 @@ script_mod! {
                                 skills_heading := View{
                                     width: Fill height: Fit
                                     flow: Down spacing: 4
-                                    Label{
+                                    skills_title := Label{
                                         text: "AI 技能"
                                         draw_text.text_style.font_size: 18
                                     }
@@ -2696,7 +2747,7 @@ script_mod! {
                                         text: "新建技能"
                                         draw_text.text_style.font_size: 14
                                     }
-                                    Label{
+                                    skill_name_title := Label{
                                         text: "名称"
                                         draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
@@ -2709,7 +2760,7 @@ script_mod! {
                                         text: "启用这个技能"
                                         active: true
                                     }
-                                    Label{
+                                    skill_prompt_title := Label{
                                         text: "Prompt 模板（Markdown）"
                                         draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
@@ -2742,17 +2793,25 @@ script_mod! {
                             page_settings := ScrollYView{
                             width: Fill height: Fill
                             flow: Down padding: 24 spacing: 12
-                            Label{ text: "设置" draw_text.text_style.font_size: 18 }
-                            Label{
+                            settings_title := Label{ text: "设置" draw_text.text_style.font_size: 18 }
+                            settings_reading_heading := Label{
                                 text: "阅读"
                                 draw_text.text_style.font_size: 13
                                 draw_text.color: theme.color_label_inner_inactive
+                            }
+                            language_row := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 12
+                                align: Align{y: 0.5}
+                                language_label := Label{text: "界面语言"}
+                                language_chinese := RadioButtonTabFlat{text: "中文"}
+                                language_english := RadioButtonTabFlat{text: "英文"}
                             }
                             theme_row := View{
                                 width: Fill height: Fit
                                 flow: Right spacing: 12
                                 align: Align{y: 0.5}
-                                Label{text: "外观主题"}
+                                theme_label := Label{text: "外观主题"}
                                 theme_dark := RadioButtonTabFlat{text: "深色"}
                                 theme_light := RadioButtonTabFlat{text: "浅色"}
                             }
@@ -2760,7 +2819,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 flow: Right spacing: 12
                                 align: Align{y: 0.5}
-                                Label{text: "正文字体"}
+                                font_family_label := Label{text: "正文字体"}
                                 reader_font_standard := RadioButtonTabFlat{text: "标准"}
                                 reader_font_monospace := RadioButtonTabFlat{text: "等宽"}
                             }
@@ -2768,7 +2827,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 flow: Right spacing: 12
                                 align: Align{y: 0.5}
-                                Label{text: "正文行距"}
+                                line_spacing_label := Label{text: "正文行距"}
                                 reader_spacing_default := RadioButtonTabFlat{text: "默认"}
                                 reader_spacing_comfortable := RadioButtonTabFlat{text: "舒适"}
                                 reader_spacing_relaxed := RadioButtonTabFlat{text: "宽松"}
@@ -2777,7 +2836,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "正文字号" }
+                                font_size_title := Label{ text: "正文字号" }
                                 font_dec := ButtonFlat{ text: "A-" }
                                 font_size_label := Label{ text: "默认" }
                                 font_inc := ButtonFlat{ text: "A+" }
@@ -2792,7 +2851,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "注音字号" }
+                                gloss_size_title := Label{ text: "注音字号" }
                                 gloss_dec := ButtonFlat{ text: "A-" }
                                 gloss_size_label := Label{ text: "7.5" }
                                 gloss_inc := ButtonFlat{ text: "A+" }
@@ -2801,7 +2860,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "注音字色" }
+                                gloss_color_title := Label{ text: "注音字色" }
                                 gc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
                                 gc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
                                 gc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
@@ -2811,7 +2870,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "注音背景" }
+                                gloss_bg_title := Label{ text: "注音背景" }
                                 gb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "无" } }
                                 gb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深灰" } }
                                 gb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深青" } }
@@ -2821,7 +2880,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "词字色" }
+                                word_color_title := Label{ text: "词字色" }
                                 wc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "默认" } }
                                 wc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
                                 wc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
@@ -2831,13 +2890,13 @@ script_mod! {
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "词背景" }
+                                word_bg_title := Label{ text: "词背景" }
                                 wb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "无" } }
                                 wb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深灰" } }
                                 wb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深青" } }
                                 wb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深蓝" } }
                             }
-                            Label{
+                            settings_text_heading := Label{
                                 text: "文本"
                                 draw_text.text_style.font_size: 13
                                 draw_text.color: theme.color_label_inner_inactive
@@ -2846,7 +2905,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "选中颜色" }
+                                selection_color_title := Label{ text: "选中颜色" }
                                 sc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
                                 sc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
                                 sc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
@@ -2856,7 +2915,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
-                                Label{ text: "高亮颜色" }
+                                highlight_color_title := Label{ text: "高亮颜色" }
                                 hc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "黄" } }
                                 hc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
                                 hc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
@@ -2868,7 +2927,7 @@ script_mod! {
                                 draw_text.color: theme.color_label_inner_inactive
                                 draw_text.text_style.font_size: 9
                             }
-                            Label{
+                            ai_settings_heading := Label{
                                 text: "AI（OpenAI 兼容接口）"
                                 draw_text.text_style.font_size: 13
                                 draw_text.color: theme.color_label_inner_inactive
@@ -2902,12 +2961,12 @@ script_mod! {
                                 visible: false
                                 width: Fill height: Fit
                                 flow: Down spacing: 9
-                                Label{
+                                local_ai_heading := Label{
                                     text: "本地 AI（桌面 llama.cpp）"
                                     draw_text.text_style.font_size: 13
                                     draw_text.color: theme.color_label_inner_inactive
                                 }
-                                Label{
+                                local_ai_description := Label{
                                     width: Fill height: Fit
                                     text: "填写已安装的 llama-server 与 GGUF 文件路径。服务只监听 127.0.0.1；启动后聊天会自动切换到本地模型。"
                                     draw_text.color: theme.color_label_inner_inactive
@@ -2925,25 +2984,25 @@ script_mod! {
                                     width: Fill height: Fit
                                     flow: Right spacing: 10
                                     align: Align{y: 0.5}
-                                    Label{text: "端口"}
+                                    local_ai_port_label := Label{text: "端口"}
                                     local_ai_port := TextInput{
                                         width: 72 height: 38
                                         is_numeric_only: true
                                         text: "8080"
                                     }
-                                    Label{text: "上下文"}
+                                    local_ai_context_label := Label{text: "上下文"}
                                     local_ai_context := TextInput{
                                         width: 82 height: 38
                                         is_numeric_only: true
                                         text: "4096"
                                     }
-                                    Label{text: "线程（0=自动）"}
+                                    local_ai_threads_label := Label{text: "线程（0=自动）"}
                                     local_ai_threads := TextInput{
                                         width: 62 height: 38
                                         is_numeric_only: true
                                         text: "0"
                                     }
-                                    Label{text: "GPU 层"}
+                                    local_ai_gpu_layers_label := Label{text: "GPU 层"}
                                     local_ai_gpu_layers := TextInput{
                                         width: 62 height: 38
                                         is_numeric_only: true
@@ -3408,11 +3467,7 @@ impl Widget for ChapterList {
                         continue;
                     };
                     let has_gloss = para.contains("<ruby");
-                    let template = if has_gloss {
-                        id!(GlossPara)
-                    } else {
-                        id!(Para)
-                    };
+                    let template = if has_gloss { id!(GlossPara) } else { id!(Para) };
                     let line_spacing = if has_gloss {
                         reader_spacing.gloss_line_spacing()
                     } else {
@@ -3564,6 +3619,7 @@ fn preview_text(text: &str, max_chars: usize) -> String {
 impl Widget for NoteList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let projection = NOTES.read().unwrap();
+        let language = *APP_LANGUAGE.read().unwrap();
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, projection.entries.len());
@@ -3585,6 +3641,8 @@ impl Widget for NoteList {
                     item.label(cx, ids!(note_title)).set_text(cx, &note.title);
                     item.label(cx, ids!(note_preview))
                         .set_text(cx, &preview_text(&note.content, 120));
+                    item.widget(cx, ids!(note_delete_btn))
+                        .set_text(cx, crate::i18n::text(language, "delete"));
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -3606,6 +3664,7 @@ struct ChatList {
 impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let data = CHAT_DATA.read().unwrap();
+        let language = *APP_LANGUAGE.read().unwrap();
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 let message_count = data.messages.len();
@@ -3614,7 +3673,11 @@ impl Widget for ChatList {
                     if data.is_streaming && item_id == message_count {
                         let item = list.item(cx, item_id, id!(Assistant));
                         let text = if data.streaming_text.is_empty() {
-                            "思考中…"
+                            if language == AppLanguage::English {
+                                "Thinking…"
+                            } else {
+                                "思考中…"
+                            }
                         } else {
                             &data.streaming_text
                         };
@@ -3656,6 +3719,7 @@ struct SkillList {
 impl Widget for SkillList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let projection = SKILLS.read().unwrap();
+        let language = *APP_LANGUAGE.read().unwrap();
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, projection.entries.len());
@@ -3678,9 +3742,17 @@ impl Widget for SkillList {
                     item.label(cx, ids!(skill_kind)).set_text(
                         cx,
                         if skill.is_system {
-                            "系统"
+                            if language == AppLanguage::English {
+                                "System"
+                            } else {
+                                "系统"
+                            }
                         } else {
-                            "自定义"
+                            if language == AppLanguage::English {
+                                "Custom"
+                            } else {
+                                "自定义"
+                            }
                         },
                     );
                     item.label(cx, ids!(skill_preview))
@@ -3694,6 +3766,14 @@ impl Widget for SkillList {
                         .set_visible(cx, !skill.is_system && skill.is_active);
                     item.widget(cx, ids!(skill_delete))
                         .set_visible(cx, !skill.is_system);
+                    item.widget(cx, ids!(skill_active))
+                        .set_text(cx, crate::i18n::text(language, "enable"));
+                    item.widget(cx, ids!(skill_use))
+                        .set_text(cx, crate::i18n::text(language, "use_next"));
+                    item.widget(cx, ids!(skill_edit))
+                        .set_text(cx, crate::i18n::text(language, "edit"));
+                    item.widget(cx, ids!(skill_delete))
+                        .set_text(cx, crate::i18n::text(language, "delete"));
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -3719,6 +3799,7 @@ struct VocabList {
 impl Widget for VocabList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let projection = VOCAB_VISIBLE.read().unwrap();
+        let language = *APP_LANGUAGE.read().unwrap();
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, projection.entries.len());
@@ -3746,9 +3827,9 @@ impl Widget for VocabList {
                     item.label(cx, ids!(vocab_status)).set_text(
                         cx,
                         if entry.status == "mastered" {
-                            "已掌握"
+                            crate::i18n::text(language, "mastered")
                         } else {
-                            "学习中"
+                            crate::i18n::text(language, "learning")
                         },
                     );
                     item.label(cx, ids!(vocab_gloss)).set_text(
@@ -3757,7 +3838,11 @@ impl Widget for VocabList {
                             .gloss
                             .as_deref()
                             .filter(|gloss| !gloss.trim().is_empty())
-                            .unwrap_or("暂无释义"),
+                            .unwrap_or(if language == AppLanguage::English {
+                                "No definition"
+                            } else {
+                                "暂无释义"
+                            }),
                     );
                     let context = entry
                         .context_sentence
@@ -3771,17 +3856,35 @@ impl Widget for VocabList {
                         .level
                         .filter(|level| *level > 0)
                         .map(|level| format!("L{level}"))
-                        .unwrap_or_else(|| "词表外".to_string());
-                    item.label(cx, ids!(vocab_meta))
-                        .set_text(cx, &format!("{level} · 已复习 {} 次", entry.review_count));
+                        .unwrap_or_else(|| {
+                            if language == AppLanguage::English {
+                                "Unlisted".to_string()
+                            } else {
+                                "词表外".to_string()
+                            }
+                        });
+                    item.label(cx, ids!(vocab_meta)).set_text(
+                        cx,
+                        &if language == AppLanguage::English {
+                            format!("{level} · Reviewed {} times", entry.review_count)
+                        } else {
+                            format!("{level} · 已复习 {} 次", entry.review_count)
+                        },
+                    );
                     item.button(cx, ids!(vocab_toggle)).set_text(
                         cx,
                         if entry.status == "mastered" {
-                            "继续学习"
+                            crate::i18n::text(language, "keep_learning")
                         } else {
-                            "标为掌握"
+                            crate::i18n::text(language, "mark_mastered")
                         },
                     );
+                    item.widget(cx, ids!(vocab_speak))
+                        .set_text(cx, crate::i18n::text(language, "speak"));
+                    item.widget(cx, ids!(vocab_review))
+                        .set_text(cx, crate::i18n::text(language, "review"));
+                    item.widget(cx, ids!(vocab_remove))
+                        .set_text(cx, crate::i18n::text(language, "remove"));
                     item.widget(cx, ids!(vocab_card_bottom))
                         .set_visible(cx, true);
                     item.draw_all_unscoped(cx);
@@ -3808,6 +3911,7 @@ struct BookShelf {
 impl Widget for BookShelf {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let shelf = SHELF.read().unwrap();
+        let language = *APP_LANGUAGE.read().unwrap();
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
@@ -3828,6 +3932,10 @@ impl Widget for BookShelf {
                     item.label(cx, ids!(card_author)).set_text(cx, &book.author);
                     item.label(cx, ids!(card_status))
                         .set_text(cx, &book.status_line);
+                    item.widget(cx, ids!(read_btn))
+                        .set_text(cx, crate::i18n::text(language, "reader"));
+                    item.widget(cx, ids!(del_btn))
+                        .set_text(cx, crate::i18n::text(language, "delete"));
                     if self.loaded_covers.get(&item_id) != Some(&book.cover_path) {
                         let img = item.image(cx, ids!(cover_img));
                         match &book.cover_path {
@@ -3965,6 +4073,232 @@ impl App {
         );
     }
 
+    fn sync_app_language_controls(&self, cx: &mut Cx, language: AppLanguage) {
+        self.ui.radio_button(cx, ids!(language_chinese)).set_active(
+            cx,
+            language == AppLanguage::Chinese,
+            Animate::No,
+        );
+        self.ui.radio_button(cx, ids!(language_english)).set_active(
+            cx,
+            language == AppLanguage::English,
+            Animate::No,
+        );
+    }
+
+    fn apply_ui_language(&self, cx: &mut Cx, language: AppLanguage) {
+        macro_rules! set_text {
+            ($id:ident, $key:literal) => {
+                self.ui
+                    .widget(cx, ids!($id))
+                    .set_text(cx, crate::i18n::text(language, $key));
+            };
+        }
+        macro_rules! set_empty_text {
+            ($id:ident, $key:literal) => {
+                self.ui
+                    .text_input(cx, ids!($id))
+                    .set_empty_text(cx, crate::i18n::text(language, $key).to_string());
+            };
+        }
+
+        set_text!(nav_library, "library");
+        set_text!(nav_reader, "reader");
+        set_text!(nav_chat, "chat");
+        set_text!(nav_skills, "skills");
+        set_text!(nav_vocab, "vocabulary");
+        set_text!(nav_statistics, "statistics");
+        set_text!(nav_settings, "settings");
+        set_text!(mobile_nav_library, "library");
+        set_text!(mobile_nav_reader, "reader");
+        set_text!(mobile_nav_chat, "chat");
+        set_text!(mobile_nav_skills, "skills");
+        set_text!(mobile_nav_vocab, "vocabulary");
+        set_text!(mobile_nav_statistics, "statistics");
+        set_text!(mobile_nav_settings, "settings");
+
+        set_text!(library_title, "library");
+        set_text!(import_epub_btn, "import_epub");
+        set_text!(library_hint, "library_hint");
+        set_text!(library_empty_title, "library_empty");
+        set_text!(library_empty_hint, "library_empty_hint");
+
+        set_text!(toc_btn, "contents");
+        set_text!(notes_btn, "note");
+        set_text!(note_panel_title, "note");
+        set_text!(note_close_btn, "close");
+        set_text!(note_quote_title, "quote");
+        set_text!(note_cancel_btn, "cancel");
+        set_text!(note_save_btn, "save");
+        set_text!(note_hint, "note_select_hint");
+        set_text!(note_empty_title, "no_notes");
+        set_text!(note_empty_hint, "no_notes_hint");
+        set_text!(reader_ai_title, "reader_ai");
+        set_text!(reader_ai_close, "close");
+        if self.ai_request.is_none() {
+            set_text!(reader_chat_status, "reader_ai_hint");
+        }
+        set_text!(reader_chat_send, "send");
+        set_text!(reader_chat_cancel, "stop");
+        set_text!(reader_chat_clear, "new_chat");
+        set_text!(copy_sel_btn, "copy");
+        set_text!(note_from_sel_btn, "note");
+        set_text!(vocab_from_sel_btn, "word");
+        set_text!(translate_sel_btn, "translate");
+        set_text!(ask_ai_sel_btn, "ask_ai");
+        set_text!(speak_sel_btn, "speak");
+        set_text!(hl_btn, "highlight");
+        set_text!(sel_close_btn, "close");
+        set_text!(close_card_btn, "close");
+        set_text!(add_vocab_btn, "add_vocabulary");
+        set_text!(know_btn, "mark_known");
+
+        set_text!(vocab_title, "vocabulary");
+        set_text!(vocab_start_review, "start_review");
+        set_text!(vocab_filter_all, "all");
+        set_text!(vocab_filter_learning, "learning");
+        set_text!(vocab_filter_mastered, "mastered");
+        set_text!(vocab_review_close, "end_review");
+        set_text!(vocab_review_speak, "speak");
+        set_text!(vocab_review_reveal, "show_definition");
+        set_text!(vocab_review_again, "keep_learning");
+        set_text!(vocab_review_known, "known");
+
+        set_text!(statistics_title, "reading_statistics");
+        set_text!(statistics_refresh, "refresh");
+        set_text!(stat_today_title, "today_reading");
+        set_text!(stat_total_title, "total_reading");
+        set_text!(stat_days_title, "reading_days");
+        set_text!(stat_books_title, "finished_books");
+        set_text!(reading_chart_title, "last_7_days");
+        set_text!(vocab_chart_title, "vocabulary_learning");
+        set_text!(vocab_chart_learning, "learning");
+        set_text!(vocab_chart_mastered, "mastered");
+        set_text!(vocab_chart_reviews, "total_reviews");
+
+        set_text!(chat_title, "chat");
+        set_text!(chat_send, "send");
+        set_text!(chat_cancel, "stop");
+        set_text!(chat_clear, "new_chat");
+        set_text!(chat_skill_clear, "cancel_template");
+        set_text!(skills_title, "skills");
+        set_text!(skill_new, "new_skill");
+        set_text!(skill_editor_title, "new_skill_title");
+        set_text!(skill_name_title, "name");
+        set_text!(skill_active_edit, "enable_skill");
+        set_text!(skill_prompt_title, "prompt_template");
+        set_text!(skill_cancel, "clear");
+        set_text!(skill_save, "save");
+        set_empty_text!(note_extra, "note_placeholder");
+        set_empty_text!(reader_chat_input, "reader_chat_placeholder");
+        set_empty_text!(vocab_search, "vocab_search_placeholder");
+        set_empty_text!(chat_input, "chat_placeholder");
+        set_empty_text!(skill_name_input, "skill_name_placeholder");
+        set_empty_text!(skill_content_input, "skill_prompt_placeholder");
+        set_empty_text!(ai_endpoint, "api_endpoint_placeholder");
+        set_empty_text!(ai_model, "model_placeholder");
+        set_empty_text!(ai_api_key, "api_key_placeholder");
+        set_empty_text!(local_ai_binary, "local_binary_placeholder");
+        set_empty_text!(local_ai_model_path, "local_model_placeholder");
+
+        set_text!(settings_title, "settings");
+        set_text!(settings_reading_heading, "reading_section");
+        set_text!(language_label, "language");
+        set_text!(language_chinese, "chinese");
+        set_text!(language_english, "english");
+        set_text!(theme_label, "appearance_theme");
+        set_text!(theme_dark, "dark");
+        set_text!(theme_light, "light");
+        set_text!(font_family_label, "body_font");
+        set_text!(reader_font_standard, "standard");
+        set_text!(reader_font_monospace, "monospace");
+        set_text!(line_spacing_label, "line_spacing");
+        set_text!(reader_spacing_default, "default");
+        set_text!(reader_spacing_comfortable, "comfortable");
+        set_text!(reader_spacing_relaxed, "relaxed");
+        set_text!(font_size_title, "font_size");
+        set_text!(gloss_enable, "gloss_enabled");
+        set_text!(gloss_size_title, "gloss_size");
+        set_text!(gloss_color_title, "gloss_color");
+        set_text!(gloss_bg_title, "gloss_background");
+        set_text!(word_color_title, "word_color");
+        set_text!(word_bg_title, "word_background");
+        set_text!(settings_text_heading, "text_section");
+        set_text!(selection_color_title, "selection_color");
+        set_text!(highlight_color_title, "highlight_color");
+        set_text!(ai_settings_heading, "ai_settings");
+        set_text!(ai_save, "save_ai_settings");
+        set_text!(reload_button, "reload_sample");
+        set_text!(ai_settings_status, "api_key_local_hint");
+        set_text!(local_ai_heading, "local_ai");
+        set_text!(local_ai_description, "local_ai_hint");
+        set_text!(local_ai_port_label, "port");
+        set_text!(local_ai_context_label, "context");
+        set_text!(local_ai_threads_label, "threads_auto");
+        set_text!(local_ai_gpu_layers_label, "gpu_layers");
+        set_text!(local_ai_auto_start, "local_auto_start");
+        set_text!(local_ai_start, "start_local_ai");
+        set_text!(local_ai_save, "save_local_ai");
+        set_text!(local_ai_stop, "stop_local_ai");
+        if self.local_ai_session.is_none() {
+            set_text!(local_ai_status, "local_not_running");
+        }
+        if READER_FONT_SIZE.read().unwrap().is_none() {
+            set_text!(font_size_label, "default");
+        }
+
+        for (id, key) in [
+            (id!(gc0), "cyan"),
+            (id!(gc1), "blue"),
+            (id!(gc2), "orange"),
+            (id!(gc3), "gray"),
+            (id!(gb0), "none"),
+            (id!(gb1), "dark_gray"),
+            (id!(gb2), "dark_cyan"),
+            (id!(gb3), "dark_blue"),
+            (id!(wc0), "default"),
+            (id!(wc1), "cyan"),
+            (id!(wc2), "blue"),
+            (id!(wc3), "orange"),
+            (id!(wb0), "none"),
+            (id!(wb1), "dark_gray"),
+            (id!(wb2), "dark_cyan"),
+            (id!(wb3), "dark_blue"),
+            (id!(sc0), "cyan"),
+            (id!(sc1), "blue"),
+            (id!(sc2), "orange"),
+            (id!(sc3), "yellow"),
+            (id!(hc0), "yellow"),
+            (id!(hc1), "cyan"),
+            (id!(hc2), "blue"),
+            (id!(hc3), "orange"),
+        ] {
+            self.ui
+                .widget(cx, &[id, id!(b)])
+                .set_text(cx, crate::i18n::text(language, key));
+        }
+        self.ui
+            .label(cx, ids!(settings_hint))
+            .set_text(cx, crate::i18n::text(language, "reader_settings_saved"));
+    }
+
+    fn set_app_language(&mut self, cx: &mut Cx, language: AppLanguage) {
+        if app_language() == language {
+            self.sync_app_language_controls(cx, language);
+            return;
+        }
+        *APP_LANGUAGE.write().unwrap() = language;
+        self.sync_app_language_controls(cx, language);
+        self.apply_ui_language(cx, language);
+        self.refresh_vocab_projection(cx);
+        self.refresh_pending_skill_indicator(cx);
+        if self.active_page == AppPage::Statistics {
+            spawn_load_statistics();
+        }
+        self.persist_reader_settings(cx);
+        self.ui.redraw(cx);
+    }
+
     fn sync_reader_font_controls(&self, cx: &mut Cx, font: ReaderFont) {
         self.ui
             .radio_button(cx, ids!(reader_font_standard))
@@ -4072,9 +4406,13 @@ impl App {
             spawn_load_statistics();
         }
         if self.pending_theme_reapply {
-            self.ui
-                .label(cx, ids!(settings_hint))
-                .set_text(cx, "主题已应用；更改会自动保存在本机。");
+            self.ui.label(cx, ids!(settings_hint)).set_text(
+                cx,
+                localized(
+                    "主题已应用；更改会自动保存在本机。",
+                    "Theme applied; changes are saved on this device.",
+                ),
+            );
             self.pending_theme_reapply = false;
         }
         self.ui.redraw(cx);
@@ -4230,17 +4568,28 @@ impl App {
     }
 
     fn format_reading_duration(seconds: i64) -> String {
+        let english = app_language() == AppLanguage::English;
         if seconds > 0 && seconds < 60 {
-            return "< 1 分钟".to_string();
+            return if english { "< 1 min" } else { "< 1 分钟" }.to_string();
         }
         let minutes = seconds.max(0) / 60;
         if minutes < 60 {
-            format!("{minutes} 分钟")
+            if english {
+                format!("{minutes} min")
+            } else {
+                format!("{minutes} 分钟")
+            }
         } else {
             let hours = minutes / 60;
             let remainder = minutes % 60;
             if remainder == 0 {
-                format!("{hours} 小时")
+                if english {
+                    format!("{hours} hr")
+                } else {
+                    format!("{hours} 小时")
+                }
+            } else if english {
+                format!("{hours} hr {remainder} min")
             } else {
                 format!("{hours} 小时 {remainder} 分")
             }
@@ -4263,7 +4612,14 @@ impl App {
         let Some(book_id) = book_id else { return };
         self.reading_session_pending = true;
         self.reading_session_invalidated = false;
-        self.ui.label(cx, ids!(status)).set_text(cx, "阅读计时中…");
+        self.ui.label(cx, ids!(status)).set_text(
+            cx,
+            if app_language() == AppLanguage::English {
+                "Tracking reading time…"
+            } else {
+                "阅读计时中…"
+            },
+        );
         spawn_start_reading_session(book_id);
     }
 
@@ -4286,6 +4642,7 @@ impl App {
     }
 
     fn apply_statistics(&self, cx: &mut Cx, snapshot: &StatisticsSnapshot) {
+        let english = app_language() == AppLanguage::English;
         self.ui.label(cx, ids!(stat_today)).set_text(
             cx,
             &Self::format_reading_duration(snapshot.today_reading_seconds),
@@ -4294,9 +4651,14 @@ impl App {
             cx,
             &Self::format_reading_duration(snapshot.total_reading_seconds),
         );
-        self.ui
-            .label(cx, ids!(stat_days))
-            .set_text(cx, &format!("{} 天", snapshot.active_days));
+        self.ui.label(cx, ids!(stat_days)).set_text(
+            cx,
+            &if english {
+                format!("{} days", snapshot.active_days)
+            } else {
+                format!("{} 天", snapshot.active_days)
+            },
+        );
         self.ui.label(cx, ids!(stat_books)).set_text(
             cx,
             &format!("{} / {}", snapshot.completed_books, snapshot.total_books),
@@ -4320,23 +4682,25 @@ impl App {
             .map(|day| day.duration_seconds)
             .max()
             .unwrap_or(0);
-        self.ui.label(cx, ids!(reading_chart_hint)).set_text(
-            cx,
-            &format!(
-                "7 天合计 {} · 单日最高 {}",
-                Self::format_reading_duration(
-                    snapshot
-                        .daily_reading
-                        .iter()
-                        .map(|day| day.duration_seconds)
-                        .sum()
-                ),
-                Self::format_reading_duration(daily_peak)
-            ),
+        let total_duration = Self::format_reading_duration(
+            snapshot
+                .daily_reading
+                .iter()
+                .map(|day| day.duration_seconds)
+                .sum(),
         );
+        let peak_duration = Self::format_reading_duration(daily_peak);
+        let reading_hint = if english {
+            format!("7-day total {total_duration} · Daily peak {peak_duration}")
+        } else {
+            format!("7 天合计 {total_duration} · 单日最高 {peak_duration}")
+        };
+        self.ui
+            .label(cx, ids!(reading_chart_hint))
+            .set_text(cx, &reading_hint);
         for (index, day) in snapshot.daily_reading.iter().enumerate() {
             let label = if index + 1 == snapshot.daily_reading.len() {
-                "今天".to_string()
+                if english { "Today" } else { "今天" }.to_string()
             } else {
                 day.date.get(5..).unwrap_or(&day.date).replace('-', "/")
             };
@@ -4366,19 +4730,34 @@ impl App {
                 ],
             );
         }
-        self.ui.label(cx, ids!(vocab_chart_hint)).set_text(
-            cx,
-            &format!(
+        let vocab_hint = if english {
+            format!(
+                "Words {} · Learning {} · Mastered {} · Reviews {}",
+                snapshot.vocab_total,
+                snapshot.vocab_learning,
+                snapshot.vocab_mastered,
+                snapshot.total_reviews
+            )
+        } else {
+            format!(
                 "生词 {} · 学习中 {} · 已掌握 {} · 累计复习 {} 次",
                 snapshot.vocab_total,
                 snapshot.vocab_learning,
                 snapshot.vocab_mastered,
                 snapshot.total_reviews
-            ),
-        );
+            )
+        };
         self.ui
-            .label(cx, ids!(statistics_status))
-            .set_text(cx, "统计已更新 · 阅读页停留时间每 30 秒自动保存");
+            .label(cx, ids!(vocab_chart_hint))
+            .set_text(cx, &vocab_hint);
+        self.ui.label(cx, ids!(statistics_status)).set_text(
+            cx,
+            if english {
+                "Statistics updated · Reading time is saved every 30 seconds"
+            } else {
+                "统计已更新 · 阅读页停留时间每 30 秒自动保存"
+            },
+        );
         self.ui.widget(cx, ids!(page_statistics)).redraw(cx);
     }
 
@@ -4405,6 +4784,7 @@ impl App {
     }
 
     fn refresh_vocab_projection(&self, cx: &mut Cx) {
+        let english = app_language() == AppLanguage::English;
         let query = self.vocab_search.trim().to_lowercase();
         let visible = self
             .vocab_entries
@@ -4434,15 +4814,26 @@ impl App {
         let mastered = total.saturating_sub(learning);
         let visible_count = visible.len();
         VOCAB_VISIBLE.write().unwrap().replace(visible);
-        self.ui.label(cx, ids!(vocab_summary)).set_text(
-            cx,
-            &format!(
+        let summary = if english {
+            format!(
+                "{total} words · Learning {learning} · Mastered {mastered} · Showing {visible_count}"
+            )
+        } else {
+            format!(
                 "共 {total} 词 · 学习中 {learning} · 已掌握 {mastered} · 当前显示 {visible_count}"
-            ),
-        );
+            )
+        };
         self.ui
-            .label(cx, ids!(vocab_filter_hint))
-            .set_text(cx, &format!("当前筛选：{}", self.vocab_filter.label()));
+            .label(cx, ids!(vocab_summary))
+            .set_text(cx, &summary);
+        self.ui.label(cx, ids!(vocab_filter_hint)).set_text(
+            cx,
+            &if english {
+                format!("Filter: {}", self.vocab_filter.label())
+            } else {
+                format!("当前筛选：{}", self.vocab_filter.label())
+            },
+        );
         for (button, filter) in [
             (
                 self.ui.radio_button(cx, ids!(vocab_filter_all)),
@@ -4464,14 +4855,32 @@ impl App {
             .set_visible(cx, learning > 0);
         let has_visible_entries = visible_count > 0;
         let empty_title = if total == 0 {
-            "生词本为空".to_string()
+            if english {
+                "Vocabulary is empty"
+            } else {
+                "生词本为空"
+            }
+            .to_string()
         } else if !query.is_empty() {
-            format!("没有找到“{}”", self.vocab_search.trim())
+            if english {
+                format!("No matches for “{}”", self.vocab_search.trim())
+            } else {
+                format!("没有找到“{}”", self.vocab_search.trim())
+            }
+        } else if english {
+            format!("No words in {}", self.vocab_filter.label())
         } else {
             format!("“{}”中还没有单词", self.vocab_filter.label())
         };
         let empty_hint = if total == 0 {
-            "去阅读页选择一个英文单词加入生词本。".to_string()
+            if english {
+                "Select an English word in the reader and add it to Vocabulary."
+            } else {
+                "去阅读页选择一个英文单词加入生词本。"
+            }
+            .to_string()
+        } else if english {
+            format!("{total} words remain; adjust the search or filter.")
         } else {
             format!("生词本中仍有 {total} 个单词，请调整搜索或筛选条件。")
         };
@@ -4511,16 +4920,27 @@ impl App {
     }
 
     fn start_vocab_review(&mut self, cx: &mut Cx, queue: Vec<String>) {
+        let english = app_language() == AppLanguage::English;
         if self.vocab_review_pending {
-            self.ui
-                .label(cx, ids!(vocab_status_hint))
-                .set_text(cx, "请等待当前复习结果保存完成");
+            self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+                cx,
+                if english {
+                    "Wait for the current review result to be saved"
+                } else {
+                    "请等待当前复习结果保存完成"
+                },
+            );
             return;
         }
         if queue.is_empty() {
-            self.ui
-                .label(cx, ids!(vocab_status_hint))
-                .set_text(cx, "当前没有需要复习的生词");
+            self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+                cx,
+                if english {
+                    "No words are due for review"
+                } else {
+                    "当前没有需要复习的生词"
+                },
+            );
             return;
         }
         self.vocab_review_queue = queue;
@@ -4530,16 +4950,33 @@ impl App {
     }
 
     fn show_vocab_review_card(&mut self, cx: &mut Cx) {
+        let english = app_language() == AppLanguage::English;
         let Some(entry) = self.current_review_entry() else {
-            self.finish_vocab_review(cx, "本轮复习完成 ✓");
+            self.finish_vocab_review(
+                cx,
+                if english {
+                    "Review complete ✓"
+                } else {
+                    "本轮复习完成 ✓"
+                },
+            );
             return;
         };
-        let progress = format!(
-            "复习 {}/{} · 此前复习 {} 次",
-            self.vocab_review_index + 1,
-            self.vocab_review_queue.len(),
-            entry.review_count
-        );
+        let progress = if english {
+            format!(
+                "Review {}/{} · Reviewed {} times",
+                self.vocab_review_index + 1,
+                self.vocab_review_queue.len(),
+                entry.review_count
+            )
+        } else {
+            format!(
+                "复习 {}/{} · 此前复习 {} 次",
+                self.vocab_review_index + 1,
+                self.vocab_review_queue.len(),
+                entry.review_count
+            )
+        };
         self.ui
             .label(cx, ids!(vocab_review_progress))
             .set_text(cx, &progress);
@@ -4548,10 +4985,11 @@ impl App {
             .set_text(cx, &entry.word);
         self.ui.label(cx, ids!(vocab_review_context)).set_text(
             cx,
-            entry
-                .context_sentence
-                .as_deref()
-                .unwrap_or("先回忆含义，再显示释义。"),
+            entry.context_sentence.as_deref().unwrap_or(if english {
+                "Recall the meaning before revealing the definition."
+            } else {
+                "先回忆含义，再显示释义。"
+            }),
         );
         self.ui.label(cx, ids!(vocab_review_gloss)).set_text(
             cx,
@@ -4559,7 +4997,11 @@ impl App {
                 .gloss
                 .as_deref()
                 .filter(|gloss| !gloss.trim().is_empty())
-                .unwrap_or("暂无释义"),
+                .unwrap_or(if english {
+                    "No definition yet"
+                } else {
+                    "暂无释义"
+                }),
         );
         self.ui
             .widget(cx, ids!(vocab_review_panel))
@@ -4609,9 +5051,14 @@ impl App {
         self.ui
             .widget(cx, ids!(vocab_review_known))
             .set_visible(cx, false);
-        self.ui
-            .label(cx, ids!(vocab_status_hint))
-            .set_text(cx, "正在记录复习结果…");
+        self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+            cx,
+            if app_language() == AppLanguage::English {
+                "Saving review result…"
+            } else {
+                "正在记录复习结果…"
+            },
+        );
         spawn_review_vocab(entry.lemma, status);
     }
 
@@ -4718,7 +5165,7 @@ impl App {
         self.editing_skill_id = None;
         self.ui
             .label(cx, ids!(skill_editor_title))
-            .set_text(cx, "新建技能");
+            .set_text(cx, tr("new_skill_title"));
         self.ui
             .text_input(cx, ids!(skill_name_input))
             .set_text(cx, "");
@@ -4731,10 +5178,9 @@ impl App {
         self.ui
             .check_box(cx, ids!(skill_active_edit))
             .set_active(cx, true, Animate::No);
-        self.ui.label(cx, ids!(skill_editor_hint)).set_text(
-            cx,
-            "自定义技能可用于下一次 AI 提问；启用的系统技能会自动作为全局系统提示词。",
-        );
+        self.ui
+            .label(cx, ids!(skill_editor_hint))
+            .set_text(cx, tr("skill_editor_hint"));
     }
 
     fn edit_skill(&mut self, cx: &mut Cx, skill: &readwise_core::skills::models::Skill) {
@@ -4742,7 +5188,13 @@ impl App {
         self.ui.label(cx, ids!(skill_editor_title)).set_text(
             cx,
             if skill.is_system {
-                "编辑系统技能"
+                if app_language() == AppLanguage::English {
+                    "Edit System Skill"
+                } else {
+                    "编辑系统技能"
+                }
+            } else if app_language() == AppLanguage::English {
+                "Edit Skill"
             } else {
                 "编辑技能"
             },
@@ -4762,9 +5214,9 @@ impl App {
         self.ui.label(cx, ids!(skill_editor_hint)).set_text(
             cx,
             if skill.is_system {
-                "系统技能启用后自动作为所有 AI 对话的系统提示词；系统技能不可删除。"
+                tr("system_skill_hint")
             } else {
-                "保存后可从左侧点击「下次提问使用」，模板只应用一次。"
+                tr("custom_skill_hint")
             },
         );
     }
@@ -4781,9 +5233,14 @@ impl App {
         });
         match selected {
             Some(name) => {
+                let status = if app_language() == AppLanguage::English {
+                    format!("Next message will use: {name}")
+                } else {
+                    format!("下一条消息将使用技能：{name}")
+                };
                 self.ui
                     .label(cx, ids!(chat_skill_status))
-                    .set_text(cx, &format!("下一条消息将使用技能：{}", name));
+                    .set_text(cx, &status);
                 self.ui
                     .widget(cx, ids!(chat_skill_clear))
                     .set_visible(cx, true);
@@ -4791,7 +5248,7 @@ impl App {
             None => {
                 self.ui
                     .label(cx, ids!(chat_skill_status))
-                    .set_text(cx, "未选择技能模板");
+                    .set_text(cx, tr("no_skill_selected"));
                 self.ui
                     .widget(cx, ids!(chat_skill_clear))
                     .set_visible(cx, false);
@@ -4806,7 +5263,14 @@ impl App {
         self.pending_skill_id = Some(skill.id.clone());
         self.refresh_pending_skill_indicator(cx);
         self.activate_page(cx, AppPage::Chat);
-        self.set_chat_status(cx, &format!("已选择「{}」，请输入要处理的内容", skill.name));
+        self.set_chat_status(
+            cx,
+            &if app_language() == AppLanguage::English {
+                format!("Selected “{}”; enter the content to process", skill.name)
+            } else {
+                format!("已选择「{}」，请输入要处理的内容", skill.name)
+            },
+        );
         self.ui.redraw(cx);
     }
 
@@ -4899,7 +5363,7 @@ impl App {
         };
         if model.is_empty() {
             self.ai_backend = None;
-            self.set_chat_status(cx, "请先到设置页填写模型名称");
+            self.set_chat_status(cx, tr("model_name_required"));
             return;
         }
         self.ai_backend = Some(OpenAiBackend::new(BackendConfig::OpenAI {
@@ -4908,18 +5372,24 @@ impl App {
             base_url: Some(endpoint.clone()),
             reasoning_effort: None,
         }));
+        let model_kind = if is_local {
+            if app_language() == AppLanguage::English {
+                "Local model"
+            } else {
+                "本地模型"
+            }
+        } else if app_language() == AppLanguage::English {
+            "Remote model"
+        } else {
+            "远程模型"
+        };
         self.set_chat_status(
             cx,
-            &format!(
-                "{}已就绪 · {} · {}",
-                if is_local {
-                    "本地模型"
-                } else {
-                    "远程模型"
-                },
-                model,
-                endpoint
-            ),
+            &if app_language() == AppLanguage::English {
+                format!("{model_kind} ready · {model} · {endpoint}")
+            } else {
+                format!("{model_kind}已就绪 · {model} · {endpoint}")
+            },
         );
     }
 
@@ -4960,14 +5430,14 @@ impl App {
 
     fn send_chat_text(&mut self, cx: &mut Cx, text: String) -> bool {
         if self.ai_request.is_some() {
-            self.set_chat_status(cx, "上一条回答仍在生成，可先停止");
+            self.set_chat_status(cx, tr("answer_in_progress"));
             return false;
         }
         if text.trim().is_empty() {
             return false;
         }
         if self.ai_backend.is_none() {
-            self.set_chat_status(cx, "AI 尚未配置，请先到设置页保存接口信息");
+            self.set_chat_status(cx, tr("ai_not_configured"));
             return false;
         }
         if self.chat_thread_id.is_none() {
@@ -4988,10 +5458,17 @@ impl App {
         let request_text = pending_skill.as_ref().map_or_else(
             || visible_text.clone(),
             |skill| {
-                format!(
-                    "请严格按照下面的技能模板完成用户请求。\n\n【技能：{}】\n{}\n\n【用户请求】\n{}",
-                    skill.name, skill.content, visible_text
-                )
+                if app_language() == AppLanguage::English {
+                    format!(
+                        "Follow the skill template below when completing the request.\n\n[Skill: {}]\n{}\n\n[User request]\n{}",
+                        skill.name, skill.content, visible_text
+                    )
+                } else {
+                    format!(
+                        "请严格按照下面的技能模板完成用户请求。\n\n【技能：{}】\n{}\n\n【用户请求】\n{}",
+                        skill.name, skill.content, visible_text
+                    )
+                }
             },
         );
 
@@ -5031,7 +5508,7 @@ impl App {
         }
         self.ai_timeout = cx.start_timeout(60.0);
         self.set_chat_streaming_controls(cx, true);
-        self.set_chat_status(cx, "正在生成…");
+        self.set_chat_status(cx, tr("generating"));
         self.redraw_chat(cx);
         true
     }
@@ -5058,7 +5535,7 @@ impl App {
         };
         spawn_save_chat(self.chat_thread_id.clone(), messages);
         self.set_chat_streaming_controls(cx, false);
-        self.set_chat_status(cx, "已停止，已保留当前内容");
+        self.set_chat_status(cx, tr("answer_stopped"));
         self.ai_stream.reset();
         self.redraw_chat(cx);
     }
@@ -5067,7 +5544,7 @@ impl App {
         self.cancel_chat(cx);
         *CHAT_DATA.write().unwrap() = ChatData::default();
         self.chat_thread_id = None;
-        self.set_chat_status(cx, "新对话已就绪");
+        self.set_chat_status(cx, tr("new_chat_ready"));
         self.ui.redraw(cx);
     }
 
@@ -5091,7 +5568,7 @@ impl App {
         self.ai_request = None;
         self.ai_stream.reset();
         self.set_chat_streaming_controls(cx, false);
-        self.set_chat_status(cx, "回答完成 · 正在保存对话");
+        self.set_chat_status(cx, tr("answer_saving"));
         spawn_save_chat(self.chat_thread_id.clone(), messages);
         self.redraw_chat(cx);
     }
@@ -5116,7 +5593,14 @@ impl App {
             data.messages.clone()
         };
         self.set_chat_streaming_controls(cx, false);
-        self.set_chat_status(cx, &format!("请求失败：{error}"));
+        self.set_chat_status(
+            cx,
+            &if app_language() == AppLanguage::English {
+                format!("Request failed: {error}")
+            } else {
+                format!("请求失败：{error}")
+            },
+        );
         self.ai_stream.reset();
         spawn_save_chat(self.chat_thread_id.clone(), messages);
         self.redraw_chat(cx);
@@ -5356,6 +5840,7 @@ impl App {
 
         let settings = settings.normalized();
         let theme_changed = *READER_THEME.read().unwrap() != settings.theme;
+        *APP_LANGUAGE.write().unwrap() = settings.language;
         *READER_THEME.write().unwrap() = settings.theme;
         *READER_FONT.write().unwrap() = settings.font;
         *READER_SPACING.write().unwrap() = settings.spacing;
@@ -5374,7 +5859,7 @@ impl App {
             &settings
                 .font_size
                 .map(|value| format!("{value:.0}"))
-                .unwrap_or_else(|| "默认".to_string()),
+                .unwrap_or_else(|| tr("default").to_string()),
         );
         self.ui
             .label(cx, ids!(gloss_size_label))
@@ -5385,6 +5870,8 @@ impl App {
             Animate::No,
         );
         self.sync_theme_controls(cx, settings.theme);
+        self.sync_app_language_controls(cx, settings.language);
+        self.apply_ui_language(cx, settings.language);
         self.sync_reader_font_controls(cx, settings.font);
         self.sync_reader_spacing_controls(cx, settings.spacing);
         self.set_gloss_rows_visible(cx, settings.gloss_enabled);
@@ -5406,9 +5893,10 @@ impl App {
     }
 
     fn persist_reader_settings(&mut self, cx: &mut Cx) {
-        self.ui
-            .label(cx, ids!(settings_hint))
-            .set_text(cx, "正在保存阅读设置…");
+        self.ui.label(cx, ids!(settings_hint)).set_text(
+            cx,
+            localized("正在保存阅读设置…", "Saving reading settings…"),
+        );
         spawn_save_reader_settings(current_reader_settings());
     }
 
@@ -5470,9 +5958,13 @@ impl App {
             .label(cx, ids!(note_quote))
             .set_text(cx, &self.note_quote_text);
         self.ui.text_input(cx, ids!(note_extra)).set_text(cx, "");
-        self.ui
-            .label(cx, ids!(note_hint))
-            .set_text(cx, "补充内容可留空；保存后引用会一并进入笔记。");
+        self.ui.label(cx, ids!(note_hint)).set_text(
+            cx,
+            localized(
+                "补充内容可留空；保存后引用会一并进入笔记。",
+                "Extra text is optional; the quote is saved with the note.",
+            ),
+        );
         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
         self.ui.redraw(cx);
     }
@@ -5488,15 +5980,18 @@ impl App {
 
     fn save_note_from_composer(&mut self, cx: &mut Cx, extra: String) {
         let Some(item) = CURRENT_ITEM.read().unwrap().clone() else {
-            self.ui
-                .label(cx, ids!(note_hint))
-                .set_text(cx, "请先从书库打开一本书");
+            self.ui.label(cx, ids!(note_hint)).set_text(
+                cx,
+                localized("请先从书库打开一本书", "Open a book from the Library first"),
+            );
             return;
         };
         if self.note_quote_text.trim().is_empty() && extra.trim().is_empty() {
             return;
         }
-        self.ui.label(cx, ids!(note_hint)).set_text(cx, "保存中…");
+        self.ui
+            .label(cx, ids!(note_hint))
+            .set_text(cx, localized("保存中…", "Saving…"));
         spawn_create_note(item, self.note_quote_text.clone(), extra);
     }
 
@@ -5520,9 +6015,14 @@ impl App {
         if on {
             let item = CURRENT_ITEM.read().unwrap().clone();
             if let Some(item) = item {
-                self.ui
-                    .label(cx, ids!(title))
-                    .set_text(cx, &format!("《{}》注音中…", item.title));
+                self.ui.label(cx, ids!(title)).set_text(
+                    cx,
+                    &if app_language() == AppLanguage::English {
+                        format!("Adding glosses to “{}”…", item.title)
+                    } else {
+                        format!("《{}》注音中…", item.title)
+                    },
+                );
                 spawn_open_book(item);
             }
         } else {
@@ -5641,7 +6141,11 @@ impl MatchEvent for App {
         if self.ai_request.is_some() && self.ai_timeout.is_timer(event).is_some() {
             self.fail_chat(
                 cx,
-                "请求超过 60 秒仍未完成，请检查网络或接口设置".to_string(),
+                localized(
+                    "请求超过 60 秒仍未完成，请检查网络或接口设置",
+                    "The request did not finish within 60 seconds; check the network and API settings",
+                )
+                .to_string(),
             );
         }
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -5656,9 +6160,14 @@ impl MatchEvent for App {
                     cx.stop_timer(self.local_ai_poll_timer);
                     self.local_ai_poll_timer = Timer::default();
                     self.set_local_ai_running(cx, false);
-                    self.ui
-                        .label(cx, ids!(local_ai_status))
-                        .set_text(cx, &format!("{message}，聊天已恢复远程 API"));
+                    self.ui.label(cx, ids!(local_ai_status)).set_text(
+                        cx,
+                        &if app_language() == AppLanguage::English {
+                            format!("{message}; chat switched back to the remote API")
+                        } else {
+                            format!("{message}，聊天已恢复远程 API")
+                        },
+                    );
                     self.configure_ai_backend(cx);
                 }
                 Ok(None) => {}
@@ -5693,20 +6202,26 @@ impl MatchEvent for App {
             {
                 match import_action {
                     crate::mobile_import::IosImportAction::Picked(paths) => {
-                        self.ui
-                            .label(cx, ids!(library_hint))
-                            .set_text(cx, "正在导入所选 EPUB…");
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            localized("正在导入所选 EPUB…", "Importing selected EPUB files…"),
+                        );
                         spawn_import(paths.clone(), true);
                     }
                     crate::mobile_import::IosImportAction::Cancelled => {
                         self.ui
                             .label(cx, ids!(library_hint))
-                            .set_text(cx, "已取消导入");
+                            .set_text(cx, localized("已取消导入", "Import cancelled"));
                     }
                     crate::mobile_import::IosImportAction::Error(error) => {
-                        self.ui
-                            .label(cx, ids!(library_hint))
-                            .set_text(cx, &format!("导入失败：{error}"));
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Import failed: {error}")
+                            } else {
+                                format!("导入失败：{error}")
+                            },
+                        );
                     }
                 }
                 continue;
@@ -5718,19 +6233,34 @@ impl MatchEvent for App {
                         known_count,
                         reader_settings,
                     } => {
-                        let status = format!(
-                            "数据库就绪\n生词本 {} · 已认识 {}",
-                            vocab_count, known_count
-                        );
+                        let status = if app_language() == AppLanguage::English {
+                            format!(
+                                "Database ready\nVocabulary {} · Known {}",
+                                vocab_count, known_count
+                            )
+                        } else {
+                            format!(
+                                "数据库就绪\n生词本 {} · 已认识 {}",
+                                vocab_count, known_count
+                            )
+                        };
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
-                        let summary = format!("共 {} 词，正在加载列表…", vocab_count);
+                        let summary = if app_language() == AppLanguage::English {
+                            format!("{vocab_count} words; loading list…")
+                        } else {
+                            format!("共 {vocab_count} 词，正在加载列表…")
+                        };
                         self.ui
                             .label(cx, ids!(vocab_summary))
                             .set_text(cx, &summary);
                         self.apply_reader_settings(cx, reader_settings.clone());
-                        self.ui
-                            .label(cx, ids!(settings_hint))
-                            .set_text(cx, "阅读设置已从本机恢复，更改后会自动保存。");
+                        self.ui.label(cx, ids!(settings_hint)).set_text(
+                            cx,
+                            localized(
+                                "阅读设置已从本机恢复，更改后会自动保存。",
+                                "Reading settings restored; changes are saved automatically.",
+                            ),
+                        );
                         spawn_load_shelf();
                         spawn_load_ai_state();
                         spawn_load_skills();
@@ -5738,7 +6268,11 @@ impl MatchEvent for App {
                         spawn_load_vocab();
                     }
                     DbAction::Failed(e) => {
-                        let status = format!("数据库失败:\n{}", e);
+                        let status = if app_language() == AppLanguage::English {
+                            format!("Database failed:\n{e}")
+                        } else {
+                            format!("数据库失败:\n{e}")
+                        };
                         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
                     }
                 }
@@ -5747,14 +6281,23 @@ impl MatchEvent for App {
             if let Some(settings_action) = action.downcast_ref::<ReaderSettingsAction>() {
                 match settings_action {
                     ReaderSettingsAction::Saved => {
-                        self.ui
-                            .label(cx, ids!(settings_hint))
-                            .set_text(cx, "阅读设置已自动保存在本机。");
+                        self.ui.label(cx, ids!(settings_hint)).set_text(
+                            cx,
+                            localized(
+                                "阅读设置已自动保存在本机。",
+                                "Reading settings saved on this device.",
+                            ),
+                        );
                     }
                     ReaderSettingsAction::Error(error) => {
-                        self.ui
-                            .label(cx, ids!(settings_hint))
-                            .set_text(cx, &format!("阅读设置保存失败：{error}"));
+                        self.ui.label(cx, ids!(settings_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Failed to save reading settings: {error}")
+                            } else {
+                                format!("阅读设置保存失败：{error}")
+                            },
+                        );
                     }
                 }
                 continue;
@@ -5778,9 +6321,10 @@ impl MatchEvent for App {
                             self.statistics_after_pending_session = false;
                             self.reading_session_id = Some(id.clone());
                             self.reading_checkpoint_timer = cx.start_interval(30.0);
-                            self.ui
-                                .label(cx, ids!(status))
-                                .set_text(cx, "阅读时长已开始记录");
+                            self.ui.label(cx, ids!(status)).set_text(
+                                cx,
+                                localized("阅读时长已开始记录", "Reading time tracking started"),
+                            );
                         } else {
                             let load_statistics = self.statistics_after_pending_session;
                             self.statistics_after_pending_session = false;
@@ -5799,9 +6343,14 @@ impl MatchEvent for App {
                         }
                         ::log::error!("{error}");
                         if self.on_reader_page {
-                            self.ui
-                                .label(cx, ids!(status))
-                                .set_text(cx, &format!("阅读计时失败：{error}"));
+                            self.ui.label(cx, ids!(status)).set_text(
+                                cx,
+                                &if app_language() == AppLanguage::English {
+                                    format!("Reading timer failed: {error}")
+                                } else {
+                                    format!("阅读计时失败：{error}")
+                                },
+                            );
                         }
                     }
                 }
@@ -5810,10 +6359,16 @@ impl MatchEvent for App {
             if let Some(statistics_action) = action.downcast_ref::<StatisticsAction>() {
                 match statistics_action {
                     StatisticsAction::Loaded(snapshot) => self.apply_statistics(cx, snapshot),
-                    StatisticsAction::Error(error) => self
-                        .ui
-                        .label(cx, ids!(statistics_status))
-                        .set_text(cx, &format!("统计加载失败：{error}")),
+                    StatisticsAction::Error(error) => {
+                        self.ui.label(cx, ids!(statistics_status)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Failed to load statistics: {error}")
+                            } else {
+                                format!("统计加载失败：{error}")
+                            },
+                        )
+                    }
                 }
                 continue;
             }
@@ -5824,10 +6379,15 @@ impl MatchEvent for App {
                         SKILLS.write().unwrap().replace(skills.clone());
                         self.ui.label(cx, ids!(skills_status)).set_text(
                             cx,
-                            &format!(
-                                "共 {} 个技能 · 系统技能自动生效，自定义技能可用于下一次提问",
-                                count
-                            ),
+                            &if app_language() == AppLanguage::English {
+                                format!(
+                                    "{count} skills · System skills apply automatically; custom skills can be used for the next request"
+                                )
+                            } else {
+                                format!(
+                                    "共 {count} 个技能 · 系统技能自动生效，自定义技能可用于下一次提问"
+                                )
+                            },
                         );
                     }
                     SkillAction::Saved(skills) => {
@@ -5843,9 +6403,14 @@ impl MatchEvent for App {
                         }
                         self.refresh_pending_skill_indicator(cx);
                         self.clear_skill_editor(cx);
-                        self.ui
-                            .label(cx, ids!(skills_status))
-                            .set_text(cx, "技能已保存 ✓");
+                        self.ui.label(cx, ids!(skills_status)).set_text(
+                            cx,
+                            if app_language() == AppLanguage::English {
+                                "Skill saved ✓"
+                            } else {
+                                "技能已保存 ✓"
+                            },
+                        );
                     }
                     SkillAction::Toggled(skills) => {
                         SKILLS.write().unwrap().replace(skills.clone());
@@ -5859,9 +6424,14 @@ impl MatchEvent for App {
                             self.pending_skill_id = None;
                         }
                         self.refresh_pending_skill_indicator(cx);
-                        self.ui
-                            .label(cx, ids!(skills_status))
-                            .set_text(cx, "技能状态已更新 ✓");
+                        self.ui.label(cx, ids!(skills_status)).set_text(
+                            cx,
+                            if app_language() == AppLanguage::English {
+                                "Skill status updated ✓"
+                            } else {
+                                "技能状态已更新 ✓"
+                            },
+                        );
                     }
                     SkillAction::Deleted { skills, id } => {
                         SKILLS.write().unwrap().replace(skills.clone());
@@ -5872,14 +6442,24 @@ impl MatchEvent for App {
                             self.pending_skill_id = None;
                             self.refresh_pending_skill_indicator(cx);
                         }
-                        self.ui
-                            .label(cx, ids!(skills_status))
-                            .set_text(cx, "技能已删除");
+                        self.ui.label(cx, ids!(skills_status)).set_text(
+                            cx,
+                            if app_language() == AppLanguage::English {
+                                "Skill deleted"
+                            } else {
+                                "技能已删除"
+                            },
+                        );
                     }
                     SkillAction::Error(error) => {
-                        self.ui
-                            .label(cx, ids!(skills_status))
-                            .set_text(cx, &format!("技能操作失败：{}", error));
+                        self.ui.label(cx, ids!(skills_status)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Skill operation failed: {error}")
+                            } else {
+                                format!("技能操作失败：{error}")
+                            },
+                        );
                     }
                 }
                 self.ui.redraw(cx);
@@ -5889,9 +6469,14 @@ impl MatchEvent for App {
                 match vocab {
                     VocabAction::Loaded(entries) => {
                         self.replace_vocab_entries(cx, entries.clone());
-                        self.ui
-                            .label(cx, ids!(vocab_status_hint))
-                            .set_text(cx, "生词本已加载");
+                        self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+                            cx,
+                            if app_language() == AppLanguage::English {
+                                "Vocabulary loaded"
+                            } else {
+                                "生词本已加载"
+                            },
+                        );
                     }
                     VocabAction::Updated {
                         entries,
@@ -5933,7 +6518,14 @@ impl MatchEvent for App {
                         }
                         if was_reviewing {
                             if self.vocab_review_queue.is_empty() {
-                                self.finish_vocab_review(cx, "本轮复习已结束");
+                                self.finish_vocab_review(
+                                    cx,
+                                    if app_language() == AppLanguage::English {
+                                        "Review ended"
+                                    } else {
+                                        "本轮复习已结束"
+                                    },
+                                );
                             } else {
                                 self.show_vocab_review_card(cx);
                             }
@@ -5947,9 +6539,14 @@ impl MatchEvent for App {
                         if !self.vocab_review_queue.is_empty() {
                             self.show_vocab_review_card(cx);
                         }
-                        self.ui
-                            .label(cx, ids!(vocab_status_hint))
-                            .set_text(cx, &format!("生词本操作失败：{error}"));
+                        self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Vocabulary operation failed: {error}")
+                            } else {
+                                format!("生词本操作失败：{error}")
+                            },
+                        );
                     }
                 }
                 self.ui.redraw(cx);
@@ -5967,9 +6564,13 @@ impl MatchEvent for App {
                             && readwise_core::local_ai::LOCAL_AI_SUPPORTED
                             && !settings.model_path.trim().is_empty()
                         {
-                            self.ui
-                                .label(cx, ids!(local_ai_status))
-                                .set_text(cx, "正在自动加载本地模型…");
+                            self.ui.label(cx, ids!(local_ai_status)).set_text(
+                                cx,
+                                localized(
+                                    "正在自动加载本地模型…",
+                                    "Loading the local model automatically…",
+                                ),
+                            );
                             self.set_local_ai_running(cx, true);
                             spawn_start_local_ai(settings.clone());
                         }
@@ -5977,9 +6578,10 @@ impl MatchEvent for App {
                     LocalAiAction::Saved(settings) => {
                         self.local_ai_settings = settings.clone();
                         self.apply_local_ai_settings_to_ui(cx, settings);
-                        self.ui
-                            .label(cx, ids!(local_ai_status))
-                            .set_text(cx, "本地 AI 设置已保存 ✓");
+                        self.ui.label(cx, ids!(local_ai_status)).set_text(
+                            cx,
+                            localized("本地 AI 设置已保存 ✓", "Local AI settings saved ✓"),
+                        );
                     }
                     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     LocalAiAction::Started { settings, session } => {
@@ -5993,10 +6595,17 @@ impl MatchEvent for App {
                         self.local_ai_poll_timer = cx.start_interval(2.0);
                         self.ui.label(cx, ids!(local_ai_status)).set_text(
                             cx,
-                            &format!(
-                                "本地模型运行中 · PID {} · 端口 {} · 聊天已切换到本地服务",
-                                session.pid, session.port
-                            ),
+                            &if app_language() == AppLanguage::English {
+                                format!(
+                                    "Local model running · PID {} · Port {} · Chat switched to the local service",
+                                    session.pid, session.port
+                                )
+                            } else {
+                                format!(
+                                    "本地模型运行中 · PID {} · 端口 {} · 聊天已切换到本地服务",
+                                    session.pid, session.port
+                                )
+                            },
                         );
                         self.configure_ai_backend(cx);
                     }
@@ -6007,21 +6616,35 @@ impl MatchEvent for App {
                         }
                         self.local_ai_session = None;
                         self.set_local_ai_running(cx, false);
-                        self.ui
-                            .label(cx, ids!(local_ai_status))
-                            .set_text(cx, "本地服务已停止，聊天已恢复远程 API");
+                        self.ui.label(cx, ids!(local_ai_status)).set_text(
+                            cx,
+                            localized(
+                                "本地服务已停止，聊天已恢复远程 API",
+                                "Local service stopped; chat switched back to the remote API",
+                            ),
+                        );
                         self.configure_ai_backend(cx);
                     }
                     LocalAiAction::StartFailed(error) => {
                         self.set_local_ai_running(cx, self.local_ai_session.is_some());
-                        self.ui
-                            .label(cx, ids!(local_ai_status))
-                            .set_text(cx, &format!("本地模型启动失败：{error}"));
+                        self.ui.label(cx, ids!(local_ai_status)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Failed to start local model: {error}")
+                            } else {
+                                format!("本地模型启动失败：{error}")
+                            },
+                        );
                     }
                     LocalAiAction::Error(error) => {
-                        self.ui
-                            .label(cx, ids!(local_ai_status))
-                            .set_text(cx, &format!("本地 AI 操作失败：{error}"));
+                        self.ui.label(cx, ids!(local_ai_status)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Local AI operation failed: {error}")
+                            } else {
+                                format!("本地 AI 操作失败：{error}")
+                            },
+                        );
                     }
                 }
                 self.ui.redraw(cx);
@@ -6073,18 +6696,30 @@ impl MatchEvent for App {
                         self.configure_ai_backend(cx);
                         self.ui
                             .label(cx, ids!(ai_settings_status))
-                            .set_text(cx, "AI 设置已保存 ✓");
+                            .set_text(cx, localized("AI 设置已保存 ✓", "AI settings saved ✓"));
                     }
                     AiStateAction::ThreadSaved(thread_id) => {
                         if self.chat_thread_id.as_deref() == Some(thread_id.as_str()) {
-                            self.set_chat_status(cx, "回答完成 · 对话已保存 ✓");
+                            self.set_chat_status(cx, tr("answer_saved"));
                         }
                     }
                     AiStateAction::Error(error) => {
-                        self.ui
-                            .label(cx, ids!(ai_settings_status))
-                            .set_text(cx, &format!("AI 数据操作失败：{}", error));
-                        self.set_chat_status(cx, &format!("AI 数据操作失败：{}", error));
+                        self.ui.label(cx, ids!(ai_settings_status)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("AI data operation failed: {error}")
+                            } else {
+                                format!("AI 数据操作失败：{error}")
+                            },
+                        );
+                        self.set_chat_status(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("AI data operation failed: {error}")
+                            } else {
+                                format!("AI 数据操作失败：{error}")
+                            },
+                        );
                     }
                 }
                 continue;
@@ -6093,9 +6728,9 @@ impl MatchEvent for App {
                 match card {
                     CardAction::VocabAdded(added) => {
                         let hint = if *added {
-                            "已加入生词本 ✓"
+                            localized("已加入生词本 ✓", "Added to Vocabulary ✓")
                         } else {
-                            "生词本里已有这个词"
+                            localized("生词本里已有这个词", "This word is already in Vocabulary")
                         };
                         self.ui.label(cx, ids!(card_hint)).set_text(cx, hint);
                         self.ui.label(cx, ids!(sel_hint)).set_text(cx, hint);
@@ -6123,9 +6758,14 @@ impl MatchEvent for App {
                     } else {
                         ""
                     };
-                    self.ui
-                        .label(cx, ids!(sel_hint))
-                        .set_text(cx, &format!("已选择：{}{}", preview, suffix));
+                    self.ui.label(cx, ids!(sel_hint)).set_text(
+                        cx,
+                        &if app_language() == AppLanguage::English {
+                            format!("Selected: {preview}{suffix}")
+                        } else {
+                            format!("已选择：{preview}{suffix}")
+                        },
+                    );
                 }
                 self.ui.redraw(cx);
                 continue;
@@ -6160,9 +6800,13 @@ impl MatchEvent for App {
                         }
                         let count = notes.len();
                         self.replace_notes(cx, notes.clone());
-                        let text = message
-                            .clone()
-                            .unwrap_or_else(|| format!("共 {} 条笔记", count));
+                        let text = message.clone().unwrap_or_else(|| {
+                            if app_language() == AppLanguage::English {
+                                format!("{count} notes")
+                            } else {
+                                format!("共 {count} 条笔记")
+                            }
+                        });
                         self.ui.label(cx, ids!(note_hint)).set_text(cx, &text);
                         if *finish_composer {
                             self.close_note_composer(cx);
@@ -6171,9 +6815,14 @@ impl MatchEvent for App {
                         self.ui.redraw(cx);
                     }
                     NoteAction::Error(e) => {
-                        self.ui
-                            .label(cx, ids!(note_hint))
-                            .set_text(cx, &format!("笔记操作失败：{}", e));
+                        self.ui.label(cx, ids!(note_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Note operation failed: {e}")
+                            } else {
+                                format!("笔记操作失败：{e}")
+                            },
+                        );
                     }
                 }
                 continue;
@@ -6186,9 +6835,13 @@ impl MatchEvent for App {
                     } => {
                         self.set_chapter(cx, *resume_chapter);
                         if *GLOSS_ENABLED.read().unwrap() && *gloss_count == 0 {
-                            self.ui
-                                .label(cx, ids!(status))
-                                .set_text(cx, "注音未显示：释义库为空（需生成或导入词义数据）");
+                            self.ui.label(cx, ids!(status)).set_text(
+                                cx,
+                                localized(
+                                    "注音未显示：释义库为空（需生成或导入词义数据）",
+                                    "Glosses are hidden because the definition library is empty",
+                                ),
+                            );
                         }
                         if let Some(book_id) = CURRENT_BOOK
                             .read()
@@ -6201,9 +6854,14 @@ impl MatchEvent for App {
                         self.start_reading_timer(cx);
                     }
                     ReaderAction::OpenError(e) => {
-                        self.ui
-                            .label(cx, ids!(title))
-                            .set_text(cx, &format!("打开失败: {}", e));
+                        self.ui.label(cx, ids!(title)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Failed to open: {e}")
+                            } else {
+                                format!("打开失败: {e}")
+                            },
+                        );
                     }
                 }
                 continue;
@@ -6224,26 +6882,49 @@ impl MatchEvent for App {
                             .set_visible(cx, !is_empty);
                         let hint = if let Some(error) = import_error {
                             if *imported > 0 {
-                                format!(
-                                    "共 {items} 本（新增 {imported} 本，另有文件失败：{error}）"
-                                )
+                                if app_language() == AppLanguage::English {
+                                    format!(
+                                        "{items} books ({imported} added; some files failed: {error})"
+                                    )
+                                } else {
+                                    format!(
+                                        "共 {items} 本（新增 {imported} 本，另有文件失败：{error}）"
+                                    )
+                                }
+                            } else if app_language() == AppLanguage::English {
+                                format!("Import failed: {error} · {items} books")
                             } else {
                                 format!("导入失败：{error} · 当前共 {items} 本")
                             }
                         } else if *imported > 0 {
-                            format!("共 {} 本（本次新增 {} 本）", items, imported)
+                            if app_language() == AppLanguage::English {
+                                format!("{items} books ({imported} added)")
+                            } else {
+                                format!("共 {items} 本（本次新增 {imported} 本）")
+                            }
                         } else if cfg!(target_os = "ios") {
-                            format!("共 {} 本 · 点击“导入 EPUB”从文件中添加", items)
+                            if app_language() == AppLanguage::English {
+                                format!("{items} books · Choose Import EPUB to add files")
+                            } else {
+                                format!("共 {items} 本 · 点击“导入 EPUB”从文件中添加")
+                            }
+                        } else if app_language() == AppLanguage::English {
+                            format!("{items} books · Drop an EPUB or place it in the import folder")
                         } else {
-                            format!("共 {} 本 · 拖入 EPUB 或放进 import 目录添加", items)
+                            format!("共 {items} 本 · 拖入 EPUB 或放进 import 目录添加")
                         };
                         self.ui.label(cx, ids!(library_hint)).set_text(cx, &hint);
                         self.ui.redraw(cx);
                     }
                     ShelfAction::Error(e) => {
-                        self.ui
-                            .label(cx, ids!(library_hint))
-                            .set_text(cx, &format!("书架加载失败: {}", e));
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Failed to load library: {e}")
+                            } else {
+                                format!("书架加载失败: {e}")
+                            },
+                        );
                     }
                 }
                 continue;
@@ -6253,7 +6934,11 @@ impl MatchEvent for App {
             };
             if let HtmlLinkAction::Clicked { url, .. } = action.cast() {
                 if let Some(word) = url.strip_prefix("w:") {
-                    let status = format!("点词：{}", word);
+                    let status = if app_language() == AppLanguage::English {
+                        format!("Word: {word}")
+                    } else {
+                        format!("点词：{word}")
+                    };
                     self.ui.label(cx, ids!(status)).set_text(cx, &status);
                 }
             }
@@ -6285,9 +6970,14 @@ impl MatchEvent for App {
                 let book = SHELF.read().unwrap().get(item_id).cloned();
                 if let Some(book) = book {
                     self.replace_notes(cx, Vec::new());
-                    self.ui
-                        .label(cx, ids!(title))
-                        .set_text(cx, &format!("《{}》加载中…", book.title));
+                    self.ui.label(cx, ids!(title)).set_text(
+                        cx,
+                        &if app_language() == AppLanguage::English {
+                            format!("Loading “{}”…", book.title)
+                        } else {
+                            format!("《{}》加载中…", book.title)
+                        },
+                    );
                     self.activate_page(cx, AppPage::Reader);
                     spawn_open_book(book);
                 }
@@ -6296,14 +6986,18 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(import_epub_btn)).clicked(actions) {
             #[cfg(target_os = "ios")]
             match crate::mobile_import::open_epub_picker() {
-                Ok(()) => self
-                    .ui
-                    .label(cx, ids!(library_hint))
-                    .set_text(cx, "请从“文件”中选择 EPUB…"),
-                Err(error) => self
-                    .ui
-                    .label(cx, ids!(library_hint))
-                    .set_text(cx, &format!("无法打开文件选择器：{error}")),
+                Ok(()) => self.ui.label(cx, ids!(library_hint)).set_text(
+                    cx,
+                    localized("请从“文件”中选择 EPUB…", "Select EPUB files in Files…"),
+                ),
+                Err(error) => self.ui.label(cx, ids!(library_hint)).set_text(
+                    cx,
+                    &if app_language() == AppLanguage::English {
+                        format!("Could not open the file picker: {error}")
+                    } else {
+                        format!("无法打开文件选择器：{error}")
+                    },
+                ),
             }
         }
         let skill_list = self
@@ -6316,7 +7010,7 @@ impl MatchEvent for App {
             if let Some(is_active) = item.check_box(cx, ids!(skill_active)).changed(actions) {
                 self.ui
                     .label(cx, ids!(skills_status))
-                    .set_text(cx, "正在更新技能状态…");
+                    .set_text(cx, localized("正在更新技能状态…", "Updating skill status…"));
                 spawn_toggle_skill(skill.id.clone(), is_active);
             }
             if item.button(cx, ids!(skill_use)).clicked(actions) {
@@ -6328,7 +7022,7 @@ impl MatchEvent for App {
             if item.button(cx, ids!(skill_delete)).clicked(actions) && !skill.is_system {
                 self.ui
                     .label(cx, ids!(skills_status))
-                    .set_text(cx, "正在删除技能…");
+                    .set_text(cx, localized("正在删除技能…", "Deleting skill…"));
                 spawn_delete_skill(skill.id.clone());
             }
         }
@@ -6345,9 +7039,14 @@ impl MatchEvent for App {
             let Some(entry) = entry else { continue };
             if item.button(cx, ids!(vocab_speak)).clicked(actions) {
                 speak_text(entry.word.clone());
-                self.ui
-                    .label(cx, ids!(vocab_status_hint))
-                    .set_text(cx, &format!("正在朗读 {}…", entry.word));
+                self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+                    cx,
+                    &if app_language() == AppLanguage::English {
+                        format!("Speaking {}…", entry.word)
+                    } else {
+                        format!("正在朗读 {}…", entry.word)
+                    },
+                );
             }
             if item.button(cx, ids!(vocab_review)).clicked(actions) {
                 self.start_vocab_review(cx, vec![entry.lemma.clone()]);
@@ -6358,15 +7057,16 @@ impl MatchEvent for App {
                 } else {
                     "mastered"
                 };
-                self.ui
-                    .label(cx, ids!(vocab_status_hint))
-                    .set_text(cx, "正在更新学习状态…");
+                self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+                    cx,
+                    localized("正在更新学习状态…", "Updating learning status…"),
+                );
                 spawn_set_vocab_status(entry.lemma.clone(), status);
             }
             if item.button(cx, ids!(vocab_remove)).clicked(actions) {
                 self.ui
                     .label(cx, ids!(vocab_status_hint))
-                    .set_text(cx, "正在移除生词…");
+                    .set_text(cx, localized("正在移除生词…", "Removing word…"));
                 spawn_remove_vocab(entry.lemma.clone());
             }
         }
@@ -6426,7 +7126,7 @@ impl MatchEvent for App {
             self.activate_page(cx, AppPage::Statistics);
             self.ui
                 .label(cx, ids!(statistics_status))
-                .set_text(cx, "正在更新统计数据…");
+                .set_text(cx, localized("正在更新统计数据…", "Updating statistics…"));
         }
         if self.ui.button(cx, ids!(nav_settings)).clicked(actions)
             || self
@@ -6446,7 +7146,7 @@ impl MatchEvent for App {
         {
             self.ui
                 .label(cx, ids!(statistics_status))
-                .set_text(cx, "正在更新统计数据…");
+                .set_text(cx, localized("正在更新统计数据…", "Updating statistics…"));
             spawn_load_statistics();
         }
         if self.ui.button(cx, ids!(skill_new)).clicked(actions)
@@ -6458,18 +7158,20 @@ impl MatchEvent for App {
             let name = self.ui.text_input(cx, ids!(skill_name_input)).text();
             let content = self.ui.text_input(cx, ids!(skill_content_input)).text();
             if name.trim().is_empty() {
-                self.ui
-                    .label(cx, ids!(skills_status))
-                    .set_text(cx, "技能名称不能为空");
+                self.ui.label(cx, ids!(skills_status)).set_text(
+                    cx,
+                    localized("技能名称不能为空", "Skill name cannot be empty"),
+                );
             } else if content.trim().is_empty() {
-                self.ui
-                    .label(cx, ids!(skills_status))
-                    .set_text(cx, "技能内容不能为空");
+                self.ui.label(cx, ids!(skills_status)).set_text(
+                    cx,
+                    localized("技能内容不能为空", "Skill prompt cannot be empty"),
+                );
             } else {
                 let is_active = self.ui.check_box(cx, ids!(skill_active_edit)).active(cx);
                 self.ui
                     .label(cx, ids!(skills_status))
-                    .set_text(cx, "正在保存技能…");
+                    .set_text(cx, localized("正在保存技能…", "Saving skill…"));
                 spawn_save_skill(self.editing_skill_id.clone(), name, content, is_active);
             }
         }
@@ -6543,7 +7245,21 @@ impl MatchEvent for App {
             .button(cx, ids!(vocab_review_close))
             .clicked(actions)
         {
-            self.finish_vocab_review(cx, "已结束本轮复习");
+            self.finish_vocab_review(cx, localized("已结束本轮复习", "Review ended"));
+        }
+        if let Some(index) = self
+            .ui
+            .radio_button_set(cx, ids_array!(language_chinese, language_english))
+            .selected(cx, actions)
+        {
+            self.set_app_language(
+                cx,
+                if index == 0 {
+                    AppLanguage::Chinese
+                } else {
+                    AppLanguage::English
+                },
+            );
         }
         if let Some(index) = self
             .ui
@@ -6561,10 +7277,7 @@ impl MatchEvent for App {
         }
         if let Some(index) = self
             .ui
-            .radio_button_set(
-                cx,
-                ids_array!(reader_font_standard, reader_font_monospace),
-            )
+            .radio_button_set(cx, ids_array!(reader_font_standard, reader_font_monospace))
             .selected(cx, actions)
         {
             self.set_reader_font(
@@ -6629,7 +7342,7 @@ impl MatchEvent for App {
                 cx.copy_to_clipboard(&text);
                 self.ui
                     .label(cx, ids!(sel_hint))
-                    .set_text(cx, "已复制到剪贴板 ✓");
+                    .set_text(cx, localized("已复制到剪贴板 ✓", "Copied ✓"));
             }
         }
         if self
@@ -6641,12 +7354,18 @@ impl MatchEvent for App {
             if let Some(word) = selected_single_word(&selected) {
                 let lemma = readwise_core::vocab::lemma::lemmatize(&word);
                 let book_id = CURRENT_ITEM.read().unwrap().as_ref().map(|i| i.id.clone());
-                self.ui.label(cx, ids!(sel_hint)).set_text(cx, "加入中…");
-                spawn_add_vocab(lemma, word, String::new(), book_id);
-            } else {
                 self.ui
                     .label(cx, ids!(sel_hint))
-                    .set_text(cx, "加入生词仅支持选择一个英文单词");
+                    .set_text(cx, localized("加入中…", "Adding…"));
+                spawn_add_vocab(lemma, word, String::new(), book_id);
+            } else {
+                self.ui.label(cx, ids!(sel_hint)).set_text(
+                    cx,
+                    localized(
+                        "加入生词仅支持选择一个英文单词",
+                        "Select one English word to add it to Vocabulary",
+                    ),
+                );
             }
         }
         if self.ui.button(cx, ids!(translate_sel_btn)).clicked(actions) {
@@ -6657,15 +7376,22 @@ impl MatchEvent for App {
                     percent_encode_query(&text)
                 );
                 cx.open_url(&url, OpenUrlInPlace::No);
-                self.ui
-                    .label(cx, ids!(sel_hint))
-                    .set_text(cx, "已在浏览器中打开翻译");
+                self.ui.label(cx, ids!(sel_hint)).set_text(
+                    cx,
+                    localized("已在浏览器中打开翻译", "Translation opened in the browser"),
+                );
             }
         }
         if self.ui.button(cx, ids!(ask_ai_sel_btn)).clicked(actions) {
             let selected = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !selected.is_empty() {
-                let prompt = format!("请解释下面这段英文，并指出重要词语和表达：\n\n{}", selected);
+                let prompt = if app_language() == AppLanguage::English {
+                    format!(
+                        "Explain the following English passage and identify important words and expressions:\n\n{selected}"
+                    )
+                } else {
+                    format!("请解释下面这段英文，并指出重要词语和表达：\n\n{selected}")
+                };
                 self.clear_reader_selection(cx);
                 self.note_open = false;
                 self.ui.widget(cx, ids!(note_panel)).set_visible(cx, false);
@@ -6681,7 +7407,9 @@ impl MatchEvent for App {
             let text = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !text.is_empty() {
                 speak_text(text);
-                self.ui.label(cx, ids!(sel_hint)).set_text(cx, "正在发音…");
+                self.ui
+                    .label(cx, ids!(sel_hint))
+                    .set_text(cx, localized("正在发音…", "Speaking…"));
             }
         }
         if self.ui.button(cx, ids!(sel_close_btn)).clicked(actions) {
@@ -6711,13 +7439,17 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(add_vocab_btn)).clicked(actions) {
             if let Some((word, lemma, gloss)) = self.card.clone() {
                 let book_id = CURRENT_ITEM.read().unwrap().as_ref().map(|i| i.id.clone());
-                self.ui.label(cx, ids!(card_hint)).set_text(cx, "加入中…");
+                self.ui
+                    .label(cx, ids!(card_hint))
+                    .set_text(cx, localized("加入中…", "Adding…"));
                 spawn_add_vocab(lemma, word, gloss, book_id);
             }
         }
         if self.ui.button(cx, ids!(know_btn)).clicked(actions) {
             if let Some((_, lemma, _)) = self.card.clone() {
-                self.ui.label(cx, ids!(card_hint)).set_text(cx, "标记中…");
+                self.ui
+                    .label(cx, ids!(card_hint))
+                    .set_text(cx, localized("标记中…", "Marking…"));
                 spawn_mark_known(lemma);
             }
         }
@@ -6773,7 +7505,9 @@ impl MatchEvent for App {
                     .map(|note| note.id.clone());
                 let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
                 if let (Some(book_id), Some(note_id)) = (book_id, note_id) {
-                    self.ui.label(cx, ids!(note_hint)).set_text(cx, "删除中…");
+                    self.ui
+                        .label(cx, ids!(note_hint))
+                        .set_text(cx, localized("删除中…", "Deleting…"));
                     spawn_delete_note(book_id, note_id);
                 }
             }
@@ -6817,9 +7551,10 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(local_ai_save)).clicked(actions) {
             match self.local_ai_settings_from_ui(cx) {
                 Ok(settings) => {
-                    self.ui
-                        .label(cx, ids!(local_ai_status))
-                        .set_text(cx, "正在保存本地 AI 设置…");
+                    self.ui.label(cx, ids!(local_ai_status)).set_text(
+                        cx,
+                        localized("正在保存本地 AI 设置…", "Saving local AI settings…"),
+                    );
                     spawn_save_local_ai_settings(settings);
                 }
                 Err(error) => self
@@ -6832,9 +7567,13 @@ impl MatchEvent for App {
             match self.local_ai_settings_from_ui(cx) {
                 Ok(settings) => match settings.validate() {
                     Ok(()) => {
-                        self.ui
-                            .label(cx, ids!(local_ai_status))
-                            .set_text(cx, "正在加载 GGUF 模型，首次启动可能需要几分钟…");
+                        self.ui.label(cx, ids!(local_ai_status)).set_text(
+                            cx,
+                            localized(
+                                "正在加载 GGUF 模型，首次启动可能需要几分钟…",
+                                "Loading the GGUF model; the first start may take a few minutes…",
+                            ),
+                        );
                         self.set_local_ai_running(cx, true);
                         spawn_start_local_ai(settings);
                     }
@@ -6850,9 +7589,10 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(local_ai_stop)).clicked(actions) {
-            self.ui
-                .label(cx, ids!(local_ai_status))
-                .set_text(cx, "正在停止本地服务…");
+            self.ui.label(cx, ids!(local_ai_status)).set_text(
+                cx,
+                localized("正在停止本地服务…", "Stopping local service…"),
+            );
             spawn_stop_local_ai();
         }
         if self.ui.button(cx, ids!(ai_save)).clicked(actions) {
@@ -6874,21 +7614,26 @@ impl MatchEvent for App {
                     .set_text(cx, error);
             } else if let Ok(settings) = settings {
                 if settings.model.is_empty() {
-                    self.ui
-                        .label(cx, ids!(ai_settings_status))
-                        .set_text(cx, "模型名称不能为空");
+                    self.ui.label(cx, ids!(ai_settings_status)).set_text(
+                        cx,
+                        localized("模型名称不能为空", "Model name cannot be empty"),
+                    );
                     return;
                 }
                 self.ui
                     .label(cx, ids!(ai_settings_status))
-                    .set_text(cx, "正在保存…");
+                    .set_text(cx, localized("正在保存…", "Saving…"));
                 spawn_save_ai_settings(settings);
             }
         }
         if self.ui.button(cx, ids!(reload_button)).clicked(actions) {
             self.reload_count += 1;
             *PARAGRAPHS.write().unwrap() = sample_chapter::build_paragraphs(PARA_COUNT);
-            let status = format!("已重新渲染 {} 次", self.reload_count);
+            let status = if app_language() == AppLanguage::English {
+                format!("Rendered {} times", self.reload_count)
+            } else {
+                format!("已重新渲染 {} 次", self.reload_count)
+            };
             self.ui.label(cx, ids!(status)).set_text(cx, &status);
             self.ui.redraw(cx);
         }
@@ -6991,10 +7736,10 @@ impl AppMain for App {
                     .unwrap()
                     .streaming_text
                     .push_str(&stream_text);
-                self.set_chat_status(cx, "正在输出回答…");
+                self.set_chat_status(cx, tr("outputting_answer"));
                 self.redraw_chat(cx);
             } else if reasoning_started {
-                self.set_chat_status(cx, "模型正在思考…");
+                self.set_chat_status(cx, tr("model_thinking"));
             }
             if let Some(error) = stream_failure {
                 self.fail_chat(cx, error);
@@ -7019,9 +7764,15 @@ impl AppMain for App {
                                 self.finish_chat(cx, fallback);
                             } else {
                                 let error = if self.ai_stream.saw_reasoning {
-                                    "模型完成了思考，但没有返回可显示的正文（可能达到输出上限）"
+                                    localized(
+                                        "模型完成了思考，但没有返回可显示的正文（可能达到输出上限）",
+                                        "The model finished reasoning but returned no visible answer (it may have reached the output limit)",
+                                    )
                                 } else {
-                                    "服务端完成了请求，但没有返回文本"
+                                    localized(
+                                        "服务端完成了请求，但没有返回文本",
+                                        "The server completed the request but returned no text",
+                                    )
                                 };
                                 self.fail_chat(cx, error.to_string());
                             }
@@ -7048,12 +7799,20 @@ impl AppMain for App {
                     .widget(cx, ids!(import_epub_btn))
                     .set_visible(cx, cfg!(target_os = "ios"));
                 if cfg!(target_os = "ios") {
-                    self.ui
-                        .label(cx, ids!(library_hint))
-                        .set_text(cx, "点击“导入 EPUB”，从“文件”App 中选择书籍。");
-                    self.ui
-                        .label(cx, ids!(library_empty_hint))
-                        .set_text(cx, "点击右上角“导入 EPUB”添加书籍");
+                    self.ui.label(cx, ids!(library_hint)).set_text(
+                        cx,
+                        localized(
+                            "点击“导入 EPUB”，从“文件”App 中选择书籍。",
+                            "Choose Import EPUB to select books from Files.",
+                        ),
+                    );
+                    self.ui.label(cx, ids!(library_empty_hint)).set_text(
+                        cx,
+                        localized(
+                            "点击右上角“导入 EPUB”添加书籍",
+                            "Choose Import EPUB in the top-right corner to add books",
+                        ),
+                    );
                 }
                 spawn_db_init(cx.get_data_dir().map(std::path::PathBuf::from));
             }
