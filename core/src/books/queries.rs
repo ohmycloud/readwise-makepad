@@ -107,7 +107,7 @@ pub async fn get_shelf_items(
     data_dir: &Path,
 ) -> Result<Vec<BookShelfItem>, String> {
     let rows = sqlx::query(
-        r#"SELECT b.id, b.title, b.author, b.file_path, b.cover_path, b.created_at,
+        r#"SELECT b.id, b.title, b.author, b.file_path, b.cover_path, b.tags, b.created_at,
                   COALESCE(s.status, 'unread') AS status,
                   COALESCE(s.progress_current, 0) AS progress_current,
                   COALESCE(s.progress_total, 0) AS progress_total
@@ -126,6 +126,10 @@ pub async fn get_shelf_items(
         .iter()
         .map(|row| {
             let file_path: String = row.get("file_path");
+            let tags = row
+                .get::<Option<String>, _>("tags")
+                .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                .unwrap_or_default();
             BookShelfItem {
                 id: row.get("id"),
                 title: row.get("title"),
@@ -135,10 +139,91 @@ pub async fn get_shelf_items(
                 status: row.get("status"),
                 progress_current: row.get("progress_current"),
                 progress_total: row.get("progress_total"),
+                tags,
                 created_at: row.get("created_at"),
             }
         })
         .collect())
+}
+
+/// 标签在保存前统一清理：去空白、大小写不敏感去重，并限制数量与长度。
+pub fn normalize_book_tags(tags: &[String]) -> Result<Vec<String>, String> {
+    const MAX_TAGS: usize = 8;
+    const MAX_TAG_CHARS: usize = 24;
+
+    let mut normalized = Vec::new();
+    for raw in tags {
+        let tag = raw.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if tag.chars().any(char::is_control) {
+            return Err("标签不能包含控制字符".to_string());
+        }
+        if tag.chars().count() > MAX_TAG_CHARS {
+            return Err(format!("标签不能超过 {MAX_TAG_CHARS} 个字符：{tag}"));
+        }
+        if normalized
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(tag))
+        {
+            continue;
+        }
+        normalized.push(tag.to_string());
+        if normalized.len() > MAX_TAGS {
+            return Err(format!("每本书最多设置 {MAX_TAGS} 个标签"));
+        }
+    }
+    Ok(normalized)
+}
+
+/// 原子更新一本书的标签，同时补齐全局标签目录。
+pub async fn set_book_tags(
+    pool: &SqlitePool,
+    book_id: &str,
+    tags: &[String],
+) -> Result<Vec<String>, String> {
+    let tags = normalize_book_tags(tags)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("开启标签事务失败: {e}"))?;
+
+    for tag in &tags {
+        sqlx::query(
+            "INSERT INTO tags (id, name, color, created_at, updated_at)
+             VALUES (?, ?, NULL, ?, ?)
+             ON CONFLICT(name) DO UPDATE SET updated_at = excluded.updated_at",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(tag)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("保存标签失败: {e}"))?;
+    }
+
+    let encoded = if tags.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&tags).map_err(|e| format!("编码标签失败: {e}"))?)
+    };
+    let result = sqlx::query("UPDATE books SET tags = ?, updated_at = ? WHERE id = ?")
+        .bind(encoded)
+        .bind(now)
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("更新书籍标签失败: {e}"))?;
+    if result.rows_affected() == 0 {
+        return Err("书籍不存在".to_string());
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("提交标签事务失败: {e}"))?;
+    Ok(tags)
 }
 
 /// 删除书籍：先删磁盘目录，再删 DB（外键级联清 status 等）。

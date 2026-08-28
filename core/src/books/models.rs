@@ -80,5 +80,7 @@ pub struct BookShelfItem {
     pub status: String,
     pub progress_current: i64,
     pub progress_total: i64,
+    /// 用户为书籍设置的标签名称，顺序与编辑时一致。
+    pub tags: Vec<String>,
     pub created_at: i64,
 }

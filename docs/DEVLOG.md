@@ -2,6 +2,20 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-29 — M8 书库标签与筛选（待实测）
+
+- 补齐 M2 延后的 tags 主链路：书架卡片展示标签并提供编辑弹窗，支持逗号/中文逗号/分号分隔、清空标签、去空白、大小写不敏感去重，以及每书 8 个、每项 24 字符的边界校验。
+- 标签以 JSON 保存回 `books.tags`，同时幂等补齐全局 `tags` 目录；更新使用事务，书籍不存在会明确失败。书架查询统一反序列化标签，旧记录、NULL 或损坏 JSON 安全降级为空列表。
+- 书库新增标签下拉筛选、显示数量摘要和独立的“没有匹配的书籍”空状态。筛选列表沿用版本化 `ListProjection`，每次数据集合替换会重置 PortalList 并切换等价模板，避免旧书卡残留、闪现或筛选按钮与卡片索引错配。
+- 首次运行冒烟发现把 `Modal` 放在 `Root` 层会缺失 Window 的绘制 pass 并触发 Makepad `pass_stack.last().unwrap()`；现将 Window body 改为 Overlay，由共同祖先持有内容和弹窗。修正后 App 持续运行无 Splash/绘制崩溃。
+- 验证：`cargo check --workspace --offline`、完整测试 53/53、`git diff --check` 与桌面 App 启动冒烟均通过。待人工验证标签新增/删除、筛选切换、筛选为空及中英文切换后关闭 milestone。
+
+## 2026-08-29 — M8 中英文界面完成
+
+- 应用设置新增中文/English 语言选择，并纳入 ReaderSettings 事务化持久化；启动恢复、损坏值回退与主题 ScriptReapply 后的状态恢复使用同一强类型语言值。
+- 侧栏与移动导航、书库、阅读器、AI、技能、生词本、复习、统计和设置页的固定文案及主要动态状态统一接入集中式 i18n 映射；PortalList 卡片在绘制时读取当前语言，切换后无需重载业务数据。
+- i18n 阶段已提交为 `dc7f3d2 feat: add persistent Chinese and English UI`；M8 i18n 项关闭。
+
 ## 2026-08-28 — M8 旧数据库迁移闭环
 
 - 审计发现 `CREATE TABLE IF NOT EXISTS` 只能创建缺失表，不能给已有表补列；原有兼容代码每次启动盲试三条 `ALTER TABLE`，再依赖 SQLite 英文错误文本中的 `duplicate column name` 判断是否已迁移，既没有显式版本，也无法发现其他残缺结构。

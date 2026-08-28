@@ -210,6 +210,10 @@ impl Db {
             .block_on(books::delete_book(&self.pool, &self.data_dir, id))
     }
 
+    pub fn set_book_tags(&self, id: &str, tags: &[String]) -> Result<Vec<String>, String> {
+        self.rt.block_on(books::set_book_tags(&self.pool, id, tags))
+    }
+
     pub fn update_progress(
         &self,
         id: &str,
@@ -1028,5 +1032,58 @@ mod migration_tests {
             .block_on(table_columns(&pool, "books"))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn book_tags_are_normalized_saved_and_returned_on_the_shelf() {
+        let (runtime, pool) = runtime_and_pool();
+        runtime.block_on(initialize_schema(&pool)).unwrap();
+        runtime
+            .block_on(
+                sqlx::query(
+                    "INSERT INTO books (
+                        id, title, author, format, file_path, file_size, language,
+                        created_at, updated_at
+                    ) VALUES ('book-1', 'Book', 'Author', 'epub', 'book.epub', 1, 'en', 1, 1)",
+                )
+                .execute(&pool),
+            )
+            .unwrap();
+
+        let saved = runtime
+            .block_on(books::set_book_tags(
+                &pool,
+                "book-1",
+                &[
+                    " Fiction ".to_string(),
+                    "fiction".to_string(),
+                    "Reference".to_string(),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(saved, vec!["Fiction", "Reference"]);
+
+        let shelf = runtime
+            .block_on(books::get_shelf_items(&pool, std::path::Path::new("/data")))
+            .unwrap();
+        assert_eq!(shelf.len(), 1);
+        assert_eq!(shelf[0].tags, saved);
+        assert_eq!(
+            runtime
+                .block_on(
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tags").fetch_one(&pool)
+                )
+                .unwrap(),
+            2
+        );
+
+        let error = runtime
+            .block_on(books::set_book_tags(
+                &pool,
+                "missing",
+                &["Fiction".to_string()],
+            ))
+            .unwrap_err();
+        assert!(error.contains("不存在"));
     }
 }
