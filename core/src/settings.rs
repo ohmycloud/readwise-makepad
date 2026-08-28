@@ -21,9 +21,76 @@ impl ReaderTheme {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderFont {
+    #[default]
+    Standard,
+    Monospace,
+}
+
+impl ReaderFont {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Monospace => "monospace",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "monospace" => Self::Monospace,
+            _ => Self::Standard,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderSpacing {
+    #[default]
+    Default,
+    Comfortable,
+    Relaxed,
+}
+
+impl ReaderSpacing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Comfortable => "comfortable",
+            Self::Relaxed => "relaxed",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "comfortable" => Self::Comfortable,
+            "relaxed" => Self::Relaxed,
+            _ => Self::Default,
+        }
+    }
+
+    pub fn plain_line_spacing(self) -> f32 {
+        match self {
+            Self::Default => 1.2,
+            Self::Comfortable => 1.45,
+            Self::Relaxed => 1.75,
+        }
+    }
+
+    pub fn gloss_line_spacing(self) -> f32 {
+        match self {
+            Self::Default => 2.2,
+            Self::Comfortable => 2.45,
+            Self::Relaxed => 2.75,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReaderSettings {
     pub theme: ReaderTheme,
+    pub font: ReaderFont,
+    pub spacing: ReaderSpacing,
     pub font_size: Option<f32>,
     pub gloss_enabled: bool,
     pub gloss_font_size: f32,
@@ -39,6 +106,8 @@ impl Default for ReaderSettings {
     fn default() -> Self {
         Self {
             theme: ReaderTheme::Dark,
+            font: ReaderFont::Standard,
+            spacing: ReaderSpacing::Default,
             font_size: None,
             gloss_enabled: true,
             gloss_font_size: 7.5,
@@ -102,5 +171,27 @@ mod tests {
         assert_eq!(ReaderTheme::Light.as_str(), "light");
         assert_eq!(ReaderTheme::from_str("light"), ReaderTheme::Light);
         assert_eq!(ReaderTheme::from_str("unknown"), ReaderTheme::Dark);
+    }
+
+    #[test]
+    fn reader_font_uses_stable_storage_values() {
+        assert_eq!(ReaderFont::Standard.as_str(), "standard");
+        assert_eq!(ReaderFont::Monospace.as_str(), "monospace");
+        assert_eq!(ReaderFont::from_str("monospace"), ReaderFont::Monospace);
+        assert_eq!(ReaderFont::from_str("unknown"), ReaderFont::Standard);
+    }
+
+    #[test]
+    fn reader_spacing_preserves_extra_room_for_glosses() {
+        for spacing in [
+            ReaderSpacing::Default,
+            ReaderSpacing::Comfortable,
+            ReaderSpacing::Relaxed,
+        ] {
+            assert!(spacing.gloss_line_spacing() > spacing.plain_line_spacing());
+            assert!(spacing.gloss_line_spacing() >= 2.2);
+            assert_eq!(ReaderSpacing::from_str(spacing.as_str()), spacing);
+        }
+        assert_eq!(ReaderSpacing::from_str("unknown"), ReaderSpacing::Default);
     }
 }

@@ -196,6 +196,12 @@ impl Db {
                     "reader.theme" => {
                         settings.theme = crate::settings::ReaderTheme::from_str(&value)
                     }
+                    "reader.font" => {
+                        settings.font = crate::settings::ReaderFont::from_str(&value)
+                    }
+                    "reader.spacing" => {
+                        settings.spacing = crate::settings::ReaderSpacing::from_str(&value)
+                    }
                     "reader.font_size" => settings.font_size = value.parse().ok(),
                     "reader.gloss_enabled" => settings.gloss_enabled = value == "1",
                     "reader.gloss_font_size" => {
@@ -241,6 +247,8 @@ impl Db {
             let settings = settings.clone().normalized();
             let now = chrono::Utc::now().timestamp_millis();
             let theme = settings.theme.as_str();
+            let font = settings.font.as_str();
+            let spacing = settings.spacing.as_str();
             let font_size = settings.font_size.map(|value| value.to_string()).unwrap_or_default();
             let gloss_enabled = if settings.gloss_enabled { "1" } else { "0" };
             let gloss_font_size = settings.gloss_font_size.to_string();
@@ -252,6 +260,8 @@ impl Db {
             let highlight_color_slot = settings.highlight_color_slot.to_string();
             let values = [
                 ("reader.theme", theme),
+                ("reader.font", font),
+                ("reader.spacing", spacing),
                 ("reader.font_size", font_size.as_str()),
                 ("reader.gloss_enabled", gloss_enabled),
                 ("reader.gloss_font_size", gloss_font_size.as_str()),

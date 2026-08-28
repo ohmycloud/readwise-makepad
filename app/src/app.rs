@@ -12,6 +12,8 @@ use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 type AiSettings = readwise_core::ai::AiSettings;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
+type ReaderFont = readwise_core::settings::ReaderFont;
+type ReaderSpacing = readwise_core::settings::ReaderSpacing;
 type ReaderSettings = readwise_core::settings::ReaderSettings;
 type ReaderTheme = readwise_core::settings::ReaderTheme;
 type StatisticsSnapshot = readwise_core::statistics::models::StatisticsSnapshot;
@@ -1011,6 +1013,14 @@ static GLOSS_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(true
 static READER_THEME: LazyLock<RwLock<ReaderTheme>> =
     LazyLock::new(|| RwLock::new(ReaderTheme::Dark));
 
+/// EPUB 正文字体；应用 UI 与注音释义不跟随此设置。
+static READER_FONT: LazyLock<RwLock<ReaderFont>> =
+    LazyLock::new(|| RwLock::new(ReaderFont::Standard));
+
+/// EPUB 正文行距；带注音段落始终比普通段落保留更多垂直空间。
+static READER_SPACING: LazyLock<RwLock<ReaderSpacing>> =
+    LazyLock::new(|| RwLock::new(ReaderSpacing::Default));
+
 static READER_SETTINGS_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
 static READER_SETTINGS_SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -1534,6 +1544,8 @@ fn current_reader_settings() -> ReaderSettings {
 
     ReaderSettings {
         theme: *READER_THEME.read().unwrap(),
+        font: *READER_FONT.read().unwrap(),
+        spacing: *READER_SPACING.read().unwrap(),
         font_size: *READER_FONT_SIZE.read().unwrap(),
         gloss_enabled: *GLOSS_ENABLED.read().unwrap(),
         gloss_font_size: *GLOSS_FONT_SIZE.read().unwrap(),
@@ -1994,6 +2006,11 @@ script_mod! {
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
+        font_standard_normal: theme.font_regular{}
+        font_standard_italic: theme.font_italic{}
+        font_standard_bold: theme.font_bold{}
+        font_standard_bold_italic: theme.font_bold_italic{}
+        font_monospace: theme.font_code{}
         list := PortalList{
             width: Fill height: Fill
             selectable: true
@@ -2738,6 +2755,23 @@ script_mod! {
                                 theme_dark := RadioButtonTabFlat{text: "深色"}
                                 theme_light := RadioButtonTabFlat{text: "浅色"}
                             }
+                            font_family_row := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 12
+                                align: Align{y: 0.5}
+                                Label{text: "正文字体"}
+                                reader_font_standard := RadioButtonTabFlat{text: "标准"}
+                                reader_font_monospace := RadioButtonTabFlat{text: "等宽"}
+                            }
+                            line_spacing_row := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 12
+                                align: Align{y: 0.5}
+                                Label{text: "正文行距"}
+                                reader_spacing_default := RadioButtonTabFlat{text: "默认"}
+                                reader_spacing_comfortable := RadioButtonTabFlat{text: "舒适"}
+                                reader_spacing_relaxed := RadioButtonTabFlat{text: "宽松"}
+                            }
                             font_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
@@ -3043,6 +3077,16 @@ impl Widget for StatsBars {
 struct ChapterList {
     #[deref]
     view: View,
+    #[live]
+    font_standard_normal: TextStyle,
+    #[live]
+    font_standard_italic: TextStyle,
+    #[live]
+    font_standard_bold: TextStyle,
+    #[live]
+    font_standard_bold_italic: TextStyle,
+    #[live]
+    font_monospace: TextStyle,
     /// 选区自跟踪（PortalList 未暴露区间 API，用公开的命中接口镜像；
     /// 仅镜像记录，绘制仍由原生选区完成）。
     #[rust]
@@ -3319,6 +3363,28 @@ impl ChapterList {
 impl Widget for ChapterList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let paragraphs = PARAGRAPHS.read().unwrap();
+        let reader_font = *READER_FONT.read().unwrap();
+        let reader_spacing = *READER_SPACING.read().unwrap();
+        let normal_family = if reader_font == ReaderFont::Monospace {
+            self.font_monospace.font_family.clone()
+        } else {
+            self.font_standard_normal.font_family.clone()
+        };
+        let italic_family = if reader_font == ReaderFont::Monospace {
+            self.font_monospace.font_family.clone()
+        } else {
+            self.font_standard_italic.font_family.clone()
+        };
+        let bold_family = if reader_font == ReaderFont::Monospace {
+            self.font_monospace.font_family.clone()
+        } else {
+            self.font_standard_bold.font_family.clone()
+        };
+        let bold_italic_family = if reader_font == ReaderFont::Monospace {
+            self.font_monospace.font_family.clone()
+        } else {
+            self.font_standard_bold_italic.font_family.clone()
+        };
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
@@ -3332,11 +3398,26 @@ impl Widget for ChapterList {
                     } else {
                         id!(Para)
                     };
+                    let line_spacing = if para.contains("<ruby") {
+                        reader_spacing.gloss_line_spacing()
+                    } else {
+                        reader_spacing.plain_line_spacing()
+                    };
                     let item = list.item(cx, item_id, template);
                     let mut html = item.widget(cx, ids!(para_html));
                     html.set_text(cx, para);
                     if let Some(mut inner) = html.borrow_mut::<Html>() {
                         inner.text_flow.selectable = !self.compact_layout;
+                        inner.text_flow.text_style_normal.font_family = normal_family.clone();
+                        inner.text_flow.text_style_italic.font_family = italic_family.clone();
+                        inner.text_flow.text_style_bold.font_family = bold_family.clone();
+                        inner.text_flow.text_style_bold_italic.font_family =
+                            bold_italic_family.clone();
+                        inner.text_flow.text_style_normal.line_spacing = line_spacing;
+                        inner.text_flow.text_style_italic.line_spacing = line_spacing;
+                        inner.text_flow.text_style_bold.line_spacing = line_spacing;
+                        inner.text_flow.text_style_bold_italic.line_spacing = line_spacing;
+                        inner.text_flow.text_style_fixed.line_spacing = line_spacing;
                     }
                     if let Some(fs) = *READER_FONT_SIZE.read().unwrap() {
                         script_apply_eval!(cx, html, {
@@ -3874,6 +3955,49 @@ impl App {
             theme == ReaderTheme::Light,
             Animate::No,
         );
+    }
+
+    fn sync_reader_font_controls(&self, cx: &mut Cx, font: ReaderFont) {
+        self.ui
+            .radio_button(cx, ids!(reader_font_standard))
+            .set_active(cx, font == ReaderFont::Standard, Animate::No);
+        self.ui
+            .radio_button(cx, ids!(reader_font_monospace))
+            .set_active(cx, font == ReaderFont::Monospace, Animate::No);
+    }
+
+    fn set_reader_font(&mut self, cx: &mut Cx, font: ReaderFont) {
+        if *READER_FONT.read().unwrap() == font {
+            self.sync_reader_font_controls(cx, font);
+            return;
+        }
+        *READER_FONT.write().unwrap() = font;
+        self.sync_reader_font_controls(cx, font);
+        self.refresh_current_chapter(cx);
+        self.persist_reader_settings(cx);
+    }
+
+    fn sync_reader_spacing_controls(&self, cx: &mut Cx, spacing: ReaderSpacing) {
+        self.ui
+            .radio_button(cx, ids!(reader_spacing_default))
+            .set_active(cx, spacing == ReaderSpacing::Default, Animate::No);
+        self.ui
+            .radio_button(cx, ids!(reader_spacing_comfortable))
+            .set_active(cx, spacing == ReaderSpacing::Comfortable, Animate::No);
+        self.ui
+            .radio_button(cx, ids!(reader_spacing_relaxed))
+            .set_active(cx, spacing == ReaderSpacing::Relaxed, Animate::No);
+    }
+
+    fn set_reader_spacing(&mut self, cx: &mut Cx, spacing: ReaderSpacing) {
+        if *READER_SPACING.read().unwrap() == spacing {
+            self.sync_reader_spacing_controls(cx, spacing);
+            return;
+        }
+        *READER_SPACING.write().unwrap() = spacing;
+        self.sync_reader_spacing_controls(cx, spacing);
+        self.refresh_current_chapter(cx);
+        self.persist_reader_settings(cx);
     }
 
     fn set_reader_theme(&mut self, cx: &mut Cx, theme: ReaderTheme) {
@@ -5228,6 +5352,8 @@ impl App {
         let settings = settings.normalized();
         let theme_changed = *READER_THEME.read().unwrap() != settings.theme;
         *READER_THEME.write().unwrap() = settings.theme;
+        *READER_FONT.write().unwrap() = settings.font;
+        *READER_SPACING.write().unwrap() = settings.spacing;
         *READER_FONT_SIZE.write().unwrap() = settings.font_size;
         *GLOSS_ENABLED.write().unwrap() = settings.gloss_enabled;
         *GLOSS_FONT_SIZE.write().unwrap() = settings.gloss_font_size;
@@ -5254,6 +5380,8 @@ impl App {
             Animate::No,
         );
         self.sync_theme_controls(cx, settings.theme);
+        self.sync_reader_font_controls(cx, settings.font);
+        self.sync_reader_spacing_controls(cx, settings.spacing);
         self.set_gloss_rows_visible(cx, settings.gloss_enabled);
         self.refresh_swatches(cx);
 
@@ -6423,6 +6551,44 @@ impl MatchEvent for App {
                     ReaderTheme::Dark
                 } else {
                     ReaderTheme::Light
+                },
+            );
+        }
+        if let Some(index) = self
+            .ui
+            .radio_button_set(
+                cx,
+                ids_array!(reader_font_standard, reader_font_monospace),
+            )
+            .selected(cx, actions)
+        {
+            self.set_reader_font(
+                cx,
+                if index == 0 {
+                    ReaderFont::Standard
+                } else {
+                    ReaderFont::Monospace
+                },
+            );
+        }
+        if let Some(index) = self
+            .ui
+            .radio_button_set(
+                cx,
+                ids_array!(
+                    reader_spacing_default,
+                    reader_spacing_comfortable,
+                    reader_spacing_relaxed
+                ),
+            )
+            .selected(cx, actions)
+        {
+            self.set_reader_spacing(
+                cx,
+                match index {
+                    1 => ReaderSpacing::Comfortable,
+                    2 => ReaderSpacing::Relaxed,
+                    _ => ReaderSpacing::Default,
                 },
             );
         }
