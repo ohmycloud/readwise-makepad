@@ -2,6 +2,13 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-28 — M7 第二刀：触摸翻屏、iOS Files 导入与原生沙箱目录
+
+- 窄屏阅读正文新增单指横向翻屏：左滑下一屏、右滑上一屏，复用桌面快捷键已有的 `page_scroll`，因此章内翻屏、跨章、进度标签和持久化仍走唯一链路。手势要求短时且水平位移显著；纵向滚动、多指、长按、已有选区以及目录/笔记/阅读 AI 面板都会取消，避免破坏滚动和文本选择。
+- 修正移动数据目录来源：不再假设 iOS/Android 进程一定设置 HOME/XDG。启动时从 Makepad `Cx::get_data_dir()` 取得 iOS Application Support 或 Android `Activity.getFilesDir()`，再交给 `readwise-core` 创建稳定的 `ReadWise` 子目录；桌面仍使用原有 `dirs::data_dir()/ReadWise`，现有数据库位置不变。
+- 审计确认当前锁定的 Makepad 文件对话框不可复用：macOS select-file 仍是日志空壳，iOS 对 `SelectFileDialog` 直接报未实现。为 iOS 在应用 crate 内补了最小 UIKit `UIDocumentPickerViewController` 桥接：书库显示“导入 EPUB”，从 Files 按 EPUB UTI 多选，回调进入现有后台导入/书架刷新链路，成功后清理 iOS import 模式产生的私有临时副本；桌面拖入的用户原文件仍绝不删除。Android 系统选择器仍待接入。
+- 验证：新增水平/垂直/超时手势判定及平台沙箱路径测试；`cargo check --workspace --offline`、完整 iOS 目标 `cargo build -p readwise-app --target aarch64-apple-ios --offline`（含链接）、`cargo test --workspace --offline`（40/40）、桌面 App 启动冒烟和 `git diff --check` 均通过；桌面日志确认仍使用原有 Application Support 数据库。Files 回调、触摸手感与长按互斥仍需真机验收。
+
 ## 2026-08-28 — M7 第一刀：窄屏导航、单栏阅读与移动生命周期
 
 - 保留唯一一棵 PageFlip/业务 widget 树，在其外重组为“桌面侧栏 + 主列（页面 + 移动底栏）”，避免用两套响应式页面复制 TextInput、PortalList 和聊天状态。窗口宽度低于 720pt 时隐藏桌面侧栏，显示可横向滑动的完整底部导航；桌面窗口缩放与手机横竖屏均走同一尺寸事件。

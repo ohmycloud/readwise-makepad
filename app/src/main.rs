@@ -1,6 +1,8 @@
 mod app;
 mod chapter_image;
 mod mark_span;
+#[cfg(target_os = "ios")]
+mod mobile_import;
 mod ruby_word;
 mod sample_chapter;
 

@@ -3,6 +3,7 @@ use crate::sample_chapter;
 use makepad_ai::{
     AiBackend, AiEvent, AiRequest, BackendConfig, Message, OpenAiBackend, RequestId, StreamDelta,
 };
+use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState};
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,10 @@ app_main!(App);
 
 const PARA_COUNT: usize = 200;
 const COMPACT_LAYOUT_BREAKPOINT: f64 = 720.0;
+const READER_SWIPE_MIN_DISTANCE: f64 = 64.0;
+const READER_SWIPE_MAX_DURATION: f64 = 0.9;
+const READER_SWIPE_AXIS_RATIO: f64 = 1.35;
+const READER_SWIPE_VERTICAL_CANCEL: f64 = 28.0;
 
 fn uses_compact_layout(size: DVec2) -> bool {
     size.x > 0.0 && size.y > 0.0 && size.x < COMPACT_LAYOUT_BREAKPOINT
@@ -30,6 +35,70 @@ fn should_keep_started_reading_session(
     is_current_book: bool,
 ) -> bool {
     !invalidated && app_in_foreground && on_reader_page && is_current_book
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReaderSwipeDirection {
+    Previous,
+    Next,
+}
+
+fn reader_swipe_direction(start: DVec2, end: DVec2, elapsed: f64) -> Option<ReaderSwipeDirection> {
+    let delta = end - start;
+    if !(0.0..=READER_SWIPE_MAX_DURATION).contains(&elapsed)
+        || delta.x.abs() < READER_SWIPE_MIN_DISTANCE
+        || delta.x.abs() < delta.y.abs() * READER_SWIPE_AXIS_RATIO
+    {
+        return None;
+    }
+    Some(if delta.x < 0.0 {
+        ReaderSwipeDirection::Next
+    } else {
+        ReaderSwipeDirection::Previous
+    })
+}
+
+#[derive(Default)]
+struct ReaderSwipeGesture {
+    origin: Option<(u64, DVec2, f64)>,
+    cancelled: bool,
+}
+
+impl ReaderSwipeGesture {
+    fn begin(&mut self, uid: u64, abs: DVec2, time: f64) {
+        self.origin = Some((uid, abs, time));
+        self.cancelled = false;
+    }
+
+    fn cancel(&mut self) {
+        self.origin = None;
+        self.cancelled = true;
+    }
+
+    fn update(&mut self, touch: &TouchPoint, event_time: f64) -> Option<ReaderSwipeDirection> {
+        let Some((uid, start, start_time)) = self.origin else {
+            return None;
+        };
+        if touch.uid != uid {
+            self.cancel();
+            return None;
+        }
+        let delta = touch.abs - start;
+        if touch.state == TouchState::Move
+            && delta.y.abs() > READER_SWIPE_VERTICAL_CANCEL
+            && delta.y.abs() > delta.x.abs()
+        {
+            self.cancelled = true;
+        }
+        if touch.state != TouchState::Stop {
+            return None;
+        }
+        self.origin = None;
+        if self.cancelled {
+            return None;
+        }
+        reader_swipe_direction(start, touch.abs, event_time - start_time)
+    }
 }
 
 static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> =
@@ -659,6 +728,26 @@ mod responsive_layout_tests {
             false, true, true, false
         ));
     }
+
+    #[test]
+    fn horizontal_reader_swipes_have_direction_and_reject_scrolls() {
+        assert_eq!(
+            reader_swipe_direction(dvec2(300.0, 400.0), dvec2(210.0, 410.0), 0.4),
+            Some(ReaderSwipeDirection::Next)
+        );
+        assert_eq!(
+            reader_swipe_direction(dvec2(100.0, 400.0), dvec2(180.0, 390.0), 0.4),
+            Some(ReaderSwipeDirection::Previous)
+        );
+        assert_eq!(
+            reader_swipe_direction(dvec2(300.0, 400.0), dvec2(260.0, 300.0), 0.4),
+            None
+        );
+        assert_eq!(
+            reader_swipe_direction(dvec2(300.0, 400.0), dvec2(220.0, 400.0), 1.2),
+            None
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1158,7 +1247,11 @@ fn status_cn(status: &str, cur: i64, total: i64) -> String {
 /// 书架加载结果（后台 → UI）。
 #[derive(Debug)]
 enum ShelfAction {
-    Loaded { items: usize, imported: usize },
+    Loaded {
+        items: usize,
+        imported: usize,
+        import_error: Option<String>,
+    },
     Error(String),
 }
 
@@ -1187,7 +1280,11 @@ fn spawn_load_shelf() {
         let Some(db) = DB.get() else { return };
         let imported = db.scan_import_dir().unwrap_or(0);
         match refresh_shelf(db) {
-            Ok(n) => Cx::post_action(ShelfAction::Loaded { items: n, imported }),
+            Ok(n) => Cx::post_action(ShelfAction::Loaded {
+                items: n,
+                imported,
+                import_error: None,
+            }),
             Err(e) => Cx::post_action(ShelfAction::Error(e)),
         }
     });
@@ -1204,6 +1301,7 @@ fn spawn_delete(id: String) {
             Ok(n) => Cx::post_action(ShelfAction::Loaded {
                 items: n,
                 imported: 0,
+                import_error: None,
             }),
             Err(e) => Cx::post_action(ShelfAction::Error(e)),
         }
@@ -1245,20 +1343,32 @@ fn is_epub_item(item: &DragItem) -> bool {
     matches!(item, DragItem::FilePath { path, .. } if is_epub_path(path))
 }
 
-/// 拖入的 epub 文件在后台导入，完成后刷新书架。
-fn spawn_import(paths: Vec<String>) {
+/// EPUB 文件在后台导入，完成后刷新书架。系统选择器的 import 模式会给应用一份
+/// 临时私有副本，成功入库后可以清理；桌面拖放的用户原文件绝不删除。
+fn spawn_import(paths: Vec<String>, cleanup_sources: bool) {
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
+        let mut imported = 0;
+        let mut errors = Vec::new();
         for p in paths {
-            if let Err(e) = db.import_book(std::path::Path::new(&p)) {
-                //log::error!("导入失败 {}: {}", p, e);
-                println!("导入失败 {}: {}", p, e);
+            match db.import_book(std::path::Path::new(&p)) {
+                Ok(_) => {
+                    imported += 1;
+                    if cleanup_sources {
+                        let _ = std::fs::remove_file(&p);
+                    }
+                }
+                Err(e) => {
+                    println!("导入失败 {}: {}", p, e);
+                    errors.push(e);
+                }
             }
         }
         match refresh_shelf(db) {
             Ok(n) => Cx::post_action(ShelfAction::Loaded {
                 items: n,
-                imported: 0,
+                imported,
+                import_error: errors.into_iter().next(),
             }),
             Err(e) => Cx::post_action(ShelfAction::Error(e)),
         }
@@ -1275,19 +1385,23 @@ enum DbAction {
     Failed(String),
 }
 
-fn spawn_db_init() {
-    std::thread::spawn(|| match readwise_core::Db::open() {
-        Ok(db) => {
-            let entries = db.vocab_book_list().unwrap_or_default();
-            let known = db.get_known_words().unwrap_or_default();
-            let action = DbAction::Ready {
-                vocab_count: entries.len(),
-                known_count: known.len(),
-            };
-            let _ = DB.set(db);
-            Cx::post_action(action);
+fn spawn_db_init(platform_data_dir: Option<std::path::PathBuf>) {
+    std::thread::spawn(move || {
+        let data_dir =
+            readwise_core::paths::app_data_dir_from_platform(platform_data_dir.as_deref());
+        match readwise_core::Db::open_in(data_dir) {
+            Ok(db) => {
+                let entries = db.vocab_book_list().unwrap_or_default();
+                let known = db.get_known_words().unwrap_or_default();
+                let action = DbAction::Ready {
+                    vocab_count: entries.len(),
+                    known_count: known.len(),
+                };
+                let _ = DB.set(db);
+                Cx::post_action(action);
+            }
+            Err(e) => Cx::post_action(DbAction::Failed(e)),
         }
-        Err(e) => Cx::post_action(DbAction::Failed(e)),
     });
 }
 
@@ -1817,7 +1931,20 @@ script_mod! {
                                 width: Fill height: Fit
                                 padding: Inset{ left: 24 right: 24 top: 20 bottom: 8 }
                                 flow: Down spacing: 4
-                                Label{ text: "书库" draw_text.text_style.font_size: 18 }
+                                lib_title_row := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 10
+                                    align: Align{y: 0.5}
+                                    Label{
+                                        width: Fill
+                                        text: "书库"
+                                        draw_text.text_style.font_size: 18
+                                    }
+                                    import_epub_btn := ButtonFlat{
+                                        visible: false
+                                        text: "导入 EPUB"
+                                    }
+                                }
                                 library_hint := Label{
                                     width: Fill
                                     text: "把 EPUB 拖进窗口，或放入导入目录后重启。"
@@ -1837,7 +1964,7 @@ script_mod! {
                                         text: "书架为空"
                                         draw_text.text_style.font_size: 14
                                     }
-                                    Label{
+                                    library_empty_hint := Label{
                                         text: "拖入 EPUB 文件，或放进 ReadWise/import 目录"
                                         draw_text.color: #x8a8a8a
                                         draw_text.text_style.font_size: 9
@@ -3456,6 +3583,8 @@ pub struct App {
     #[rust]
     app_in_foreground: bool,
     #[rust]
+    reader_swipe: ReaderSwipeGesture,
+    #[rust]
     note_quote_text: String,
     /// 释义卡片当前展示的 (word, lemma, gloss)。
     #[rust]
@@ -3463,6 +3592,46 @@ pub struct App {
 }
 
 impl App {
+    fn track_reader_swipe(&mut self, cx: &mut Cx, event: &Event) -> Option<ReaderSwipeDirection> {
+        match event {
+            Event::LongPress(_) | Event::SelectionHandleDrag(_) => {
+                self.reader_swipe.cancel();
+                None
+            }
+            Event::TouchUpdate(event) => {
+                if event.touches.len() != 1 {
+                    self.reader_swipe.cancel();
+                    return None;
+                }
+                let touch = &event.touches[0];
+                if touch.state == TouchState::Start {
+                    let chapter_rect = self
+                        .ui
+                        .widget(cx, ids!(chapter_list))
+                        .area()
+                        .clipped_rect(cx);
+                    let can_begin = self.compact_layout
+                        && self.on_reader_page
+                        && CURRENT_BOOK.read().unwrap().is_some()
+                        && !self.toc_open
+                        && !self.note_open
+                        && !self.reader_ai_open
+                        && SEL_RANGE.read().unwrap().is_none()
+                        && SELECTED_TEXT.read().unwrap().is_empty()
+                        && chapter_rect.contains(touch.abs);
+                    if can_begin {
+                        self.reader_swipe.begin(touch.uid, touch.abs, event.time);
+                    } else {
+                        self.reader_swipe.cancel();
+                    }
+                    return None;
+                }
+                self.reader_swipe.update(touch, event.time)
+            }
+            _ => None,
+        }
+    }
+
     fn sync_reader_panel_layout(&self, cx: &mut Cx) {
         let panel_open = self.toc_open || self.note_open || self.reader_ai_open;
         self.ui
@@ -4936,6 +5105,30 @@ impl MatchEvent for App {
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
+            #[cfg(target_os = "ios")]
+            if let Some(import_action) =
+                action.downcast_ref::<crate::mobile_import::IosImportAction>()
+            {
+                match import_action {
+                    crate::mobile_import::IosImportAction::Picked(paths) => {
+                        self.ui
+                            .label(cx, ids!(library_hint))
+                            .set_text(cx, "正在导入所选 EPUB…");
+                        spawn_import(paths.clone(), true);
+                    }
+                    crate::mobile_import::IosImportAction::Cancelled => {
+                        self.ui
+                            .label(cx, ids!(library_hint))
+                            .set_text(cx, "已取消导入");
+                    }
+                    crate::mobile_import::IosImportAction::Error(error) => {
+                        self.ui
+                            .label(cx, ids!(library_hint))
+                            .set_text(cx, &format!("导入失败：{error}"));
+                    }
+                }
+                continue;
+            }
             if let Some(db_action) = action.downcast_ref::<DbAction>() {
                 match db_action {
                     DbAction::Ready {
@@ -5423,7 +5616,11 @@ impl MatchEvent for App {
             }
             if let Some(shelf) = action.downcast_ref::<ShelfAction>() {
                 match shelf {
-                    ShelfAction::Loaded { items, imported } => {
+                    ShelfAction::Loaded {
+                        items,
+                        imported,
+                        import_error,
+                    } => {
                         let is_empty = *items == 0;
                         self.ui
                             .widget(cx, ids!(library_empty))
@@ -5431,8 +5628,16 @@ impl MatchEvent for App {
                         self.ui
                             .widget(cx, ids!(book_shelf))
                             .set_visible(cx, !is_empty);
-                        let hint = if *imported > 0 {
-                            format!("共 {} 本（导入目录新增 {} 本）", items, imported)
+                        let hint = if let Some(error) = import_error {
+                            if *imported > 0 {
+                                format!("共 {items} 本（新增 {imported} 本，另有文件失败：{error}）")
+                            } else {
+                                format!("导入失败：{error} · 当前共 {items} 本")
+                            }
+                        } else if *imported > 0 {
+                            format!("共 {} 本（本次新增 {} 本）", items, imported)
+                        } else if cfg!(target_os = "ios") {
+                            format!("共 {} 本 · 点击“导入 EPUB”从文件中添加", items)
                         } else {
                             format!("共 {} 本 · 拖入 EPUB 或放进 import 目录添加", items)
                         };
@@ -5492,6 +5697,19 @@ impl MatchEvent for App {
                     self.on_reader_page = true;
                     spawn_open_book(book);
                 }
+            }
+        }
+        if self.ui.button(cx, ids!(import_epub_btn)).clicked(actions) {
+            #[cfg(target_os = "ios")]
+            match crate::mobile_import::open_epub_picker() {
+                Ok(()) => self
+                    .ui
+                    .label(cx, ids!(library_hint))
+                    .set_text(cx, "请从“文件”中选择 EPUB…"),
+                Err(error) => self
+                    .ui
+                    .label(cx, ids!(library_hint))
+                    .set_text(cx, &format!("无法打开文件选择器：{error}")),
             }
         }
         let skill_list = self
@@ -6052,6 +6270,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let reader_swipe = self.track_reader_swipe(cx, event);
         if let Event::MouseDown(e) = event {
             let popup_captures_pointer = SEL_RANGE.read().unwrap().is_some()
                 && self
@@ -6153,7 +6372,18 @@ impl AppMain for App {
                     cx.display_context.screen_size,
                     cx.display_context.safe_area_insets,
                 );
-                spawn_db_init();
+                self.ui
+                    .widget(cx, ids!(import_epub_btn))
+                    .set_visible(cx, cfg!(target_os = "ios"));
+                if cfg!(target_os = "ios") {
+                    self.ui
+                        .label(cx, ids!(library_hint))
+                        .set_text(cx, "点击“导入 EPUB”，从“文件”App 中选择书籍。");
+                    self.ui
+                        .label(cx, ids!(library_empty_hint))
+                        .set_text(cx, "点击右上角“导入 EPUB”添加书籍");
+                }
+                spawn_db_init(cx.get_data_dir().map(std::path::PathBuf::from));
             }
             Event::WindowGeomChange(event) => self.update_responsive_layout(
                 cx,
@@ -6186,13 +6416,26 @@ impl AppMain for App {
                     })
                     .collect();
                 if !paths.is_empty() {
-                    spawn_import(paths);
+                    spawn_import(paths, false);
                 }
             }
             _ => {}
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if let Some(direction) = reader_swipe {
+            let selection_is_clear =
+                SEL_RANGE.read().unwrap().is_none() && SELECTED_TEXT.read().unwrap().is_empty();
+            if self.compact_layout
+                && self.on_reader_page
+                && !self.toc_open
+                && !self.note_open
+                && !self.reader_ai_open
+                && selection_is_clear
+            {
+                self.page_scroll(cx, direction == ReaderSwipeDirection::Next);
+            }
+        }
         if matches!(event, Event::MouseUp(_)) {
             SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
         }

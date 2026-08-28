@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{migrate::MigrateDatabase, Sqlite, SqlitePool};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::books::{self, models::*};
 use crate::notes::{self, models::Note};
@@ -29,11 +29,16 @@ pub struct Db {
 impl Db {
     /// 打开（必要时创建）应用数据库并初始化 schema。
     pub fn open() -> Result<Self, String> {
+        Self::open_in(crate::paths::app_data_dir())
+    }
+
+    /// 在调用方解析出的应用数据目录中打开数据库。
+    /// 移动端由 Makepad 传入原生沙箱路径，避免依赖 HOME/XDG 环境变量。
+    pub fn open_in(data_dir: PathBuf) -> Result<Self, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("创建运行时失败: {}", e))?;
-        let data_dir = crate::paths::app_data_dir();
         let pool = rt.block_on(initialize(&data_dir))?;
         Ok(Self { rt, pool, data_dir })
     }
