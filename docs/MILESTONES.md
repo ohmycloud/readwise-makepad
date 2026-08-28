@@ -39,7 +39,7 @@
 
 - [x] cargo workspace：`readwise-core`（纯业务逻辑）+ `readwise-app`（Makepad UI）
 - [x] 迁移 database（schema.sql、sqlx、默认 skills）+ vocab 全模块，去 tauri 化；`Db` 同步门面（内置 tokio runtime）
-- [x] App 外壳：窗口标题、侧栏导航、PageFlip 页面切换；主题显式注册为 dark（运行时深/浅切换移至 M8——前提是自定义色全部改用 theme.* 变量）
+- [x] App 外壳：窗口标题、侧栏导航、PageFlip 页面切换；深/浅主题在 M8 接入运行时切换与持久化
 - [x] 日志（log 门面 → stderr 最小 logger）、应用数据目录（paths::app_data_dir，iOS 差异 M7 验证）
 - [x] 开发日志机制（DEVLOG.md）
 - [x] 应用图标（桌面 Dock + iOS，源文件 app/resources/icon.svg）
@@ -104,7 +104,7 @@
 ## M8 打磨与发布
 
 - [ ] i18n（中/英）
-- [ ] 设置页整合（正文字号、注音开关/字号/配色、选区色与高亮色已统一持久化；字体族与主题切换待做）
+- [ ] 设置页整合（正文字号、注音开关/字号/配色、选区色、高亮色与深/浅主题已统一持久化；自定义 UI 已迁移到官方 `theme.*` token；字体族待做）
 - [ ] 性能优化（draw batching、GC、启动时间）
 - [ ] 桌面打包分发；iOS TestFlight
 - [ ] 老版本数据迁移（sqlite 库直接兼容，验证 schema 一致性）

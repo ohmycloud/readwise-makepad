@@ -1,5 +1,29 @@
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ReaderTheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "light" => Self::Light,
+            _ => Self::Dark,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReaderSettings {
+    pub theme: ReaderTheme,
     pub font_size: Option<f32>,
     pub gloss_enabled: bool,
     pub gloss_font_size: f32,
@@ -14,6 +38,7 @@ pub struct ReaderSettings {
 impl Default for ReaderSettings {
     fn default() -> Self {
         Self {
+            theme: ReaderTheme::Dark,
             font_size: None,
             gloss_enabled: true,
             gloss_font_size: 7.5,
@@ -69,5 +94,13 @@ mod tests {
         assert_eq!(settings.font_size, Some(20.0));
         assert_eq!(settings.gloss_font_size, 7.5);
         assert_eq!(settings.highlight_color_slot, 3);
+    }
+
+    #[test]
+    fn reader_theme_uses_stable_storage_values() {
+        assert_eq!(ReaderTheme::Dark.as_str(), "dark");
+        assert_eq!(ReaderTheme::Light.as_str(), "light");
+        assert_eq!(ReaderTheme::from_str("light"), ReaderTheme::Light);
+        assert_eq!(ReaderTheme::from_str("unknown"), ReaderTheme::Dark);
     }
 }

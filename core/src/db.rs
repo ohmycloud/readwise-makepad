@@ -193,6 +193,9 @@ impl Db {
                 let key: String = row.get("key");
                 let value: String = row.get("value");
                 match key.as_str() {
+                    "reader.theme" => {
+                        settings.theme = crate::settings::ReaderTheme::from_str(&value)
+                    }
                     "reader.font_size" => settings.font_size = value.parse().ok(),
                     "reader.gloss_enabled" => settings.gloss_enabled = value == "1",
                     "reader.gloss_font_size" => {
@@ -237,6 +240,7 @@ impl Db {
         self.rt.block_on(async {
             let settings = settings.clone().normalized();
             let now = chrono::Utc::now().timestamp_millis();
+            let theme = settings.theme.as_str();
             let font_size = settings.font_size.map(|value| value.to_string()).unwrap_or_default();
             let gloss_enabled = if settings.gloss_enabled { "1" } else { "0" };
             let gloss_font_size = settings.gloss_font_size.to_string();
@@ -247,6 +251,7 @@ impl Db {
             let selection_color_slot = settings.selection_color_slot.to_string();
             let highlight_color_slot = settings.highlight_color_slot.to_string();
             let values = [
+                ("reader.theme", theme),
                 ("reader.font_size", font_size.as_str()),
                 ("reader.gloss_enabled", gloss_enabled),
                 ("reader.gloss_font_size", gloss_font_size.as_str()),

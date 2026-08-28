@@ -2,6 +2,16 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-28 — M8 第二刀：主题 token 迁移与运行时切换
+
+- 没有直接添加一个只改变系统按钮的“浅色模式”开关。审计发现 App 自定义 UI 仍有大量固定深灰背景和浅灰文字；运行时切换 Makepad 主题只会让官方 widget 与未覆盖属性变化，书架卡片、阅读侧栏、聊天气泡、统计卡等仍会保持深色，形成不可用的混合主题。
+- 将书架/笔记/技能/聊天/生词虚拟列表模板、阅读目录/笔记/AI 面板、移动安全区与底栏、统计卡/图表、正文链接，以及页面级主文字/次要文字/强调色迁移到 `theme.color_bg_*`、`theme.color_text*`、`theme.color_label_inner_inactive` 和 `theme.color_highlight`。用户明确选择的注音、选区和高亮色仍保留固定预设，不被主题偷换。
+- 用户复测发现统计柱体被通用 `theme.color_highlight` 映射成灰色。图表颜色不再借用交互强调 token：新增 `color_chart_reading`、`color_chart_vocab` 和 `color_chart_grid` 应用级语义 token，深色主题恢复蓝/青绿柱体，浅色主题使用对浅背景对比更清晰的深蓝/深青绿。
+- PortalList 目录项此前在 Rust 重绑时硬编码选中/普通背景；改为 `TocList` 的 live 主题色字段再通过插值应用，避免列表复用绕过主题。色板未选中底色同样提升为 App live 主题字段，选中格才使用用户选择色。
+- 设置页新增“深色 / 浅色”单选项并纳入现有 `ReaderSettings` 事务化持久化。切页状态提升为 Rust `AppPage`，主题重新应用后会恢复当前 PageFlip 页面、响应式布局、阅读侧栏、书架/笔记空状态、生词投影与聊天控制状态，不把 UI 默认值误当业务状态。
+- 首次实现使用 `request_live_edit()` 重跑整棵脚本树，真实浅色→深色测试捕获到 Makepad ScriptObject use-after-free。最终改为保留深浅主题共享对象模板，运行时用 `splat` 原地更新当前主题，再走框架专为共享对象变更提供的 `request_script_reapply()`；它不会销毁 widget 树，也避免重置输入和动态列表。
+- 验证：`cargo check --workspace --offline`、`git diff --check` 通过；沙箱外完整 `cargo test --workspace --offline` 44/44 通过。桌面 App 深色正常启动，并用测试态浅色启动后由数据库恢复深色，实际走完主题 ScriptReapply，持续运行无崩溃或脚本错误；视觉细节仍需人工验收。
+
 ## 2026-08-28 — M8 第一刀：阅读设置统一持久化
 
 - 审计确认设置页的正文字号、生词注音开关/字号/字色/背景、词字色/背景、选区色和新高亮色此前都只写全局内存，重启必然恢复默认。新增强类型 `ReaderSettings`，为数值和色槽提供默认值、有限值检查、范围裁剪与损坏数据回退。

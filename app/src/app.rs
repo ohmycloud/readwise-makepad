@@ -13,6 +13,7 @@ type AiSettings = readwise_core::ai::AiSettings;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
 type ReaderSettings = readwise_core::settings::ReaderSettings;
+type ReaderTheme = readwise_core::settings::ReaderTheme;
 type StatisticsSnapshot = readwise_core::statistics::models::StatisticsSnapshot;
 type VocabEntry = readwise_core::vocab::models::VocabBookEntry;
 
@@ -80,6 +81,32 @@ fn should_keep_started_reading_session(
 enum ReaderSwipeDirection {
     Previous,
     Next,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AppPage {
+    Library,
+    #[default]
+    Reader,
+    Chat,
+    Skills,
+    Vocab,
+    Statistics,
+    Settings,
+}
+
+impl AppPage {
+    fn live_id(self) -> LiveId {
+        match self {
+            Self::Library => id!(page_library),
+            Self::Reader => id!(page_reader),
+            Self::Chat => id!(page_chat),
+            Self::Skills => id!(page_skills),
+            Self::Vocab => id!(page_vocab),
+            Self::Statistics => id!(page_statistics),
+            Self::Settings => id!(page_settings),
+        }
+    }
 }
 
 fn reader_swipe_direction(start: DVec2, end: DVec2, elapsed: f64) -> Option<ReaderSwipeDirection> {
@@ -980,6 +1007,10 @@ static SELECTION_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(0)
 /// 生词注音总开关（关闭 = 原样显示文章）。
 static GLOSS_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(true));
 
+/// 当前 Makepad 主题。script_mod 重跑时从这里选择官方深色/浅色 token。
+static READER_THEME: LazyLock<RwLock<ReaderTheme>> =
+    LazyLock::new(|| RwLock::new(ReaderTheme::Dark));
+
 static READER_SETTINGS_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
 static READER_SETTINGS_SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -1502,6 +1533,7 @@ fn current_reader_settings() -> ReaderSettings {
     use crate::ruby_word::*;
 
     ReaderSettings {
+        theme: *READER_THEME.read().unwrap(),
         font_size: *READER_FONT_SIZE.read().unwrap(),
         gloss_enabled: *GLOSS_ENABLED.read().unwrap(),
         gloss_font_size: *GLOSS_FONT_SIZE.read().unwrap(),
@@ -1691,7 +1723,7 @@ script_mod! {
                 width: Fill height: 76
                 flow: Right spacing: 14 padding: 12
                 align: Align{ y: 0.5 }
-                draw_bg.color: #x2a2a2a
+                draw_bg.color: theme.color_bg_container
                 draw_bg.border_radius: 8.0
                 cover := View{
                     width: 44 height: 52
@@ -1699,7 +1731,7 @@ script_mod! {
                     cover_ph := SolidView{
                         width: Fill height: Fill
                         align: Align{ x: 0.5 y: 0.5 }
-                        draw_bg.color: #x1f6f63
+                        draw_bg.color: theme.color_highlight
                         draw_bg.border_radius: 4.0
                         cover_letter := Label{
                             text: ""
@@ -1722,12 +1754,12 @@ script_mod! {
                     card_author := Label{
                         width: Fill
                         text: ""
-                        draw_text.color: #x9a9a9a
+                        draw_text.color: theme.color_label_inner_inactive
                     }
                     card_status := Label{
                         width: Fill
                         text: ""
-                        draw_text.color: #x7fb2a6
+                        draw_text.color: theme.color_highlight
                         draw_text.text_style.font_size: 9
                     }
                 }
@@ -1740,6 +1772,8 @@ script_mod! {
     mod.widgets.TocListBase = #(TocList::register_widget(vm))
     mod.widgets.TocList = set_type_default() do mod.widgets.TocListBase{
         width: Fill height: Fill
+        active_bg: theme.color_bg_highlight_inline
+        inactive_bg: theme.color_bg_app
         list := PortalList{
             width: Fill height: Fill
             padding: Inset{ left: 8 right: 8 top: 8 bottom: 8 }
@@ -1747,7 +1781,7 @@ script_mod! {
             scroll_bar: ScrollBar{}
             TocItem := SolidView{
                 width: Fill height: Fit
-                draw_bg.color: #x232323
+                draw_bg.color: theme.color_bg_app
                 toc_item_btn := ButtonFlat{
                     width: Fill
                     text: ""
@@ -1761,7 +1795,7 @@ script_mod! {
         new_batch: true
         padding: 10
         flow: Down spacing: 6
-        draw_bg.color: #x292929
+        draw_bg.color: theme.color_bg_container
         draw_bg.border_radius: 7.0
         note_title := Label{
             width: Fill
@@ -1771,7 +1805,7 @@ script_mod! {
         note_preview := Label{
             width: Fill
             text: ""
-            draw_text.color: #xaaaaaa
+            draw_text.color: theme.color_label_inner_inactive
             draw_text.text_style.font_size: 9
         }
         note_actions := View{
@@ -1798,7 +1832,7 @@ script_mod! {
         width: Fill height: Fit
         flow: Down spacing: 7 padding: 10
         new_batch: true
-        draw_bg.color: #x292929
+        draw_bg.color: theme.color_bg_container
         draw_bg.border_radius: 8.0
         skill_top := View{
             width: Fill height: Fit
@@ -1812,14 +1846,14 @@ script_mod! {
             skill_kind := Label{
                 width: Fit height: Fit
                 text: ""
-                draw_text.color: #x7fb2a6
+                draw_text.color: theme.color_highlight
                 draw_text.text_style.font_size: 8.5
             }
         }
         skill_preview := Label{
             width: Fill height: Fit
             text: ""
-            draw_text.color: #xaaaaaa
+            draw_text.color: theme.color_label_inner_inactive
             draw_text.text_style.font_size: 9
         }
         skill_actions := View{
@@ -1848,7 +1882,7 @@ script_mod! {
                 margin: Inset{left: 90}
                 padding: 12
                 new_batch: true
-                draw_bg.color: #x24433e
+                draw_bg.color: theme.color_bg_highlight_inline
                 draw_bg.border_radius: 9.0
                 message := Label{
                     width: Fill height: Fit
@@ -1861,7 +1895,7 @@ script_mod! {
                 margin: Inset{right: 90}
                 padding: 12
                 new_batch: true
-                draw_bg.color: #x292929
+                draw_bg.color: theme.color_bg_container
                 draw_bg.border_radius: 9.0
                 message := Label{
                     width: Fill height: Fit
@@ -1889,7 +1923,7 @@ script_mod! {
         width: Fill height: Fit
         flow: Down spacing: 7 padding: 12
         new_batch: true
-        draw_bg.color: #x292929
+        draw_bg.color: theme.color_bg_container
         draw_bg.border_radius: 8.0
         vocab_card_top := View{
             width: Fill height: Fit
@@ -1903,20 +1937,20 @@ script_mod! {
             vocab_status := Label{
                 width: Fit height: Fit
                 text: ""
-                draw_text.color: #x7fb2a6
+                draw_text.color: theme.color_highlight
                 draw_text.text_style.font_size: 9
             }
         }
         vocab_gloss := Label{
             width: Fill height: Fit
             text: ""
-            draw_text.color: #xc9c9c9
+            draw_text.color: theme.color_text
             draw_text.text_style.font_size: 11
         }
         vocab_context := Label{
             width: Fill height: Fit
             text: ""
-            draw_text.color: #x9a9a9a
+            draw_text.color: theme.color_label_inner_inactive
             draw_text.text_style.font_size: 9
         }
         vocab_card_bottom := View{
@@ -1926,7 +1960,7 @@ script_mod! {
             vocab_meta := Label{
                 width: Fill height: Fit
                 text: ""
-                draw_text.color: #x7f7f7f
+                draw_text.color: theme.color_label_inner_disabled
                 draw_text.text_style.font_size: 8.5
             }
             vocab_speak := ButtonFlatter{text: "发音"}
@@ -1952,9 +1986,9 @@ script_mod! {
     mod.widgets.StatsBarsBase = #(StatsBars::register_widget(vm))
     mod.widgets.StatsBars = set_type_default() do mod.widgets.StatsBarsBase{
         width: Fill height: 190
-        draw_bg.color: #x202322
-        draw_grid.color: #x373b39
-        draw_bar.color: #x62b6ff
+        draw_bg.color: theme.color_bg_container
+        draw_grid.color: theme.color_chart_grid
+        draw_bar.color: theme.color_chart_reading
     }
 
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
@@ -1971,9 +2005,9 @@ script_mod! {
                 para_html := Html{
                     width: Fill height: Fit
                     selectable: true
-                    a.color: #xc9c9c9
-                    a.hover_color: #x62b6ff
-                    a.pressed_color: #x2a8fe0
+                    a.color: theme.color_text
+                    a.hover_color: theme.color_text_hover
+                    a.pressed_color: theme.color_text_focus
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                 }
@@ -1990,9 +2024,9 @@ script_mod! {
                     text_style_fixed.line_spacing: 2.2
                     paragraph_margin.bottom: 1.4
                     heading_margin.bottom: 1.1
-                    a.color: #xc9c9c9
-                    a.hover_color: #x62b6ff
-                    a.pressed_color: #x2a8fe0
+                    a.color: theme.color_text
+                    a.hover_color: theme.color_text_hover
+                    a.pressed_color: theme.color_text_focus
                     ruby := mod.widgets.RubyWord{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
@@ -2002,6 +2036,7 @@ script_mod! {
     }
 
     startup() do #(App::script_component(vm)){
+        swatch_inactive: theme.color_bg_container
         ui: Root{
             main_window := Window{
                 window.title: "ReadWise"
@@ -2011,7 +2046,7 @@ script_mod! {
                     sidebar := SolidView{
                         width: 150 height: Fill
                         flow: Down padding: 12 spacing: 8
-                        draw_bg.color: #x1f1f1f
+                        draw_bg.color: theme.color_bg_app
                         app_title := Label{
                             text: "ReadWise"
                             draw_text.text_style.font_size: 15
@@ -2036,7 +2071,7 @@ script_mod! {
                         mobile_safe_top := SolidView{
                             visible: false
                             width: Fill height: 0
-                            draw_bg.color: #x1f1f1f
+                            draw_bg.color: theme.color_bg_app
                         }
                         pages := PageFlip{
                             width: Fill height: Fill
@@ -2066,7 +2101,7 @@ script_mod! {
                                 library_hint := Label{
                                     width: Fill
                                     text: "把 EPUB 拖进窗口，或放入导入目录后重启。"
-                                    draw_text.color: #x9a9a9a
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9
                                 }
                             }
@@ -2084,7 +2119,7 @@ script_mod! {
                                     }
                                     library_empty_hint := Label{
                                         text: "拖入 EPUB 文件，或放进 ReadWise/import 目录"
-                                        draw_text.color: #x8a8a8a
+                                        draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
                                 }
@@ -2110,7 +2145,7 @@ script_mod! {
                                 status := Label{ text: "" }
                                 chapter_pos := Label{
                                     text: ""
-                                    draw_text.color: #x8a8a8a
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9.5
                                 }
                             }
@@ -2124,7 +2159,7 @@ script_mod! {
                                     visible: false
                                     width: 260 height: Fill
                                     flow: Down
-                                    draw_bg.color: #x232323
+                                    draw_bg.color: theme.color_bg_app
                                     toc_list := mod.widgets.TocList{}
                                     }
                                     chapter_list := mod.widgets.ChapterList{}
@@ -2133,7 +2168,7 @@ script_mod! {
                                     width: 320 height: Fill
                                     new_batch: true
                                     flow: Down spacing: 10 padding: 12
-                                    draw_bg.color: #x232323
+                                    draw_bg.color: theme.color_bg_app
                                     note_header := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
@@ -2150,17 +2185,17 @@ script_mod! {
                                         width: Fill height: Fit
                                         new_batch: true
                                         flow: Down spacing: 8 padding: 10
-                                        draw_bg.color: #x2d2d2d
+                                        draw_bg.color: theme.color_bg_container
                                         draw_bg.border_radius: 8.0
                                         Label{
                                             text: "引用"
-                                            draw_text.color: #x7fb2a6
+                                            draw_text.color: theme.color_highlight
                                             draw_text.text_style.font_size: 9
                                         }
                                         note_quote := Label{
                                             width: Fill
                                             text: ""
-                                            draw_text.color: #xc9c9c9
+                                            draw_text.color: theme.color_text
                                             draw_text.text_style.font_size: 9.5
                                         }
                                         note_extra := TextInput{
@@ -2178,7 +2213,7 @@ script_mod! {
                                     note_hint := Label{
                                         width: Fill
                                         text: "选中文本后可添加笔记"
-                                        draw_text.color: #x8a8a8a
+                                        draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
                                     note_empty := View{
@@ -2192,7 +2227,7 @@ script_mod! {
                                         }
                                         Label{
                                             text: "选中文本，点击「笔记」创建第一条。"
-                                            draw_text.color: #x8a8a8a
+                                            draw_text.color: theme.color_label_inner_inactive
                                             draw_text.text_style.font_size: 8.5
                                         }
                                     }
@@ -2203,7 +2238,7 @@ script_mod! {
                                     width: 360 height: Fill
                                     new_batch: true
                                     flow: Down spacing: 10 padding: 12
-                                    draw_bg.color: #x232323
+                                    draw_bg.color: theme.color_bg_app
                                     reader_ai_header := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
@@ -2218,7 +2253,7 @@ script_mod! {
                                     reader_chat_status := Label{
                                         width: Fill height: Fit
                                         text: "选择文字后点“问 AI”，或在下方直接提问"
-                                        draw_text.color: #x8f8f8f
+                                        draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
                                     reader_chat_list := mod.widgets.ChatList{}
@@ -2253,7 +2288,7 @@ script_mod! {
                                         new_batch: true
                                         padding: Inset{left: 12 right: 12 top: 9 bottom: 9}
                                         flow: Down spacing: 5
-                                        draw_bg.color: #x303030
+                                        draw_bg.color: theme.color_bg_container
                                         draw_bg.border_radius: 10.0
                                         selection_actions := ScrollXView{
                                             width: Fill height: 38
@@ -2271,7 +2306,7 @@ script_mod! {
                                         sel_hint := Label{
                                             width: Fill
                                             text: ""
-                                            draw_text.color: #x9a9a9a
+                                            draw_text.color: theme.color_label_inner_inactive
                                             draw_text.text_style.font_size: 8.5
                                         }
                                     }
@@ -2283,7 +2318,7 @@ script_mod! {
                                 margin: Inset{ left: 16 right: 16 bottom: 12 top: 4 }
                                 padding: 14
                                 flow: Down spacing: 10
-                                draw_bg.color: #x2e2e2e
+                                draw_bg.color: theme.color_bg_container
                                 draw_bg.border_radius: 10.0
                                 card_head := View{
                                     width: Fill height: Fit
@@ -2296,7 +2331,7 @@ script_mod! {
                                     card_gloss := Label{
                                         width: Fill
                                         text: ""
-                                        draw_text.color: #x7fb2a6
+                                        draw_text.color: theme.color_highlight
                                         draw_text.text_style.font_size: 13
                                     }
                                     close_card_btn := ButtonFlat{ text: "关闭" }
@@ -2310,7 +2345,7 @@ script_mod! {
                                     card_hint := Label{
                                         width: Fill
                                         text: ""
-                                        draw_text.color: #x9a9a9a
+                                        draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
                                 }
@@ -2334,7 +2369,7 @@ script_mod! {
                             vocab_summary := Label{
                                 width: Fill height: Fit
                                 text: "等待数据库…"
-                                draw_text.color: #x9a9a9a
+                                draw_text.color: theme.color_label_inner_inactive
                                 draw_text.text_style.font_size: 9
                             }
                             vocab_toolbar := View{
@@ -2352,7 +2387,7 @@ script_mod! {
                             vocab_filter_hint := Label{
                                 width: Fill height: Fit
                                 text: "当前筛选：全部"
-                                draw_text.color: #x7fb2a6
+                                draw_text.color: theme.color_highlight
                                 draw_text.text_style.font_size: 8.5
                             }
                             vocab_review_panel := RoundedView{
@@ -2360,7 +2395,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 flow: Down spacing: 9 padding: 14
                                 new_batch: true
-                                draw_bg.color: #x24433e
+                                draw_bg.color: theme.color_bg_highlight_inline
                                 draw_bg.border_radius: 10.0
                                 vocab_review_top := View{
                                     width: Fill height: Fit
@@ -2369,7 +2404,7 @@ script_mod! {
                                     vocab_review_progress := Label{
                                         width: Fill height: Fit
                                         text: ""
-                                        draw_text.color: #x7fb2a6
+                                        draw_text.color: theme.color_highlight
                                         draw_text.text_style.font_size: 9
                                     }
                                     vocab_review_close := ButtonFlatter{text: "结束复习"}
@@ -2382,14 +2417,14 @@ script_mod! {
                                 vocab_review_context := Label{
                                     width: Fill height: Fit
                                     text: ""
-                                    draw_text.color: #xaaaaaa
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 10
                                 }
                                 vocab_review_gloss := Label{
                                     visible: false
                                     width: Fill height: Fit
                                     text: ""
-                                    draw_text.color: #xc9c9c9
+                                    draw_text.color: theme.color_text
                                     draw_text.text_style.font_size: 13
                                 }
                                 vocab_review_actions := View{
@@ -2411,7 +2446,7 @@ script_mod! {
                             vocab_status_hint := Label{
                                 width: Fill height: Fit
                                 text: ""
-                                draw_text.color: #x8f8f8f
+                                draw_text.color: theme.color_label_inner_inactive
                                 draw_text.text_style.font_size: 9
                             }
                             vocab_empty := View{
@@ -2427,7 +2462,7 @@ script_mod! {
                                 vocab_empty_hint := Label{
                                     width: Fit height: Fit
                                     text: "去阅读页选择一个英文单词加入生词本。"
-                                    draw_text.color: #x8f8f8f
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9
                                 }
                             }
@@ -2451,7 +2486,7 @@ script_mod! {
                             statistics_status := Label{
                                 width: Fill height: Fit
                                 text: "正在读取统计数据…"
-                                draw_text.color: #x8f8f8f
+                                draw_text.color: theme.color_label_inner_inactive
                                 draw_text.text_style.font_size: 9
                             }
                             statistics_summary := View{
@@ -2461,36 +2496,36 @@ script_mod! {
                                     width: Fill height: 88
                                     new_batch: true
                                     flow: Down spacing: 5 padding: 12
-                                    draw_bg.color: #x252a28
+                                    draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
-                                    Label{text: "今日阅读" draw_text.color: #x9a9a9a draw_text.text_style.font_size: 9}
+                                    Label{text: "今日阅读" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
                                     stat_today := Label{text: "0 分钟" draw_text.text_style.font_size: 18}
                                 }
                                 stat_total_card := RoundedView{
                                     width: Fill height: 88
                                     new_batch: true
                                     flow: Down spacing: 5 padding: 12
-                                    draw_bg.color: #x252a28
+                                    draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
-                                    Label{text: "累计阅读" draw_text.color: #x9a9a9a draw_text.text_style.font_size: 9}
+                                    Label{text: "累计阅读" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
                                     stat_total := Label{text: "0 分钟" draw_text.text_style.font_size: 18}
                                 }
                                 stat_days_card := RoundedView{
                                     width: Fill height: 88
                                     new_batch: true
                                     flow: Down spacing: 5 padding: 12
-                                    draw_bg.color: #x252a28
+                                    draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
-                                    Label{text: "阅读天数" draw_text.color: #x9a9a9a draw_text.text_style.font_size: 9}
+                                    Label{text: "阅读天数" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
                                     stat_days := Label{text: "0 天" draw_text.text_style.font_size: 18}
                                 }
                                 stat_books_card := RoundedView{
                                     width: Fill height: 88
                                     new_batch: true
                                     flow: Down spacing: 5 padding: 12
-                                    draw_bg.color: #x252a28
+                                    draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
-                                    Label{text: "读完书籍" draw_text.color: #x9a9a9a draw_text.text_style.font_size: 9}
+                                    Label{text: "读完书籍" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 9}
                                     stat_books := Label{text: "0 / 0" draw_text.text_style.font_size: 18}
                                 }
                             }
@@ -2498,51 +2533,51 @@ script_mod! {
                                 width: Fill height: Fit
                                 new_batch: true
                                 flow: Down spacing: 10 padding: 14
-                                draw_bg.color: #x252525
+                                draw_bg.color: theme.color_bg_container
                                 draw_bg.border_radius: 10.0
                                 Label{text: "最近 7 天阅读时长" draw_text.text_style.font_size: 13}
                                 reading_chart_hint := Label{
                                     width: Fill height: Fit
                                     text: "每天 0 分钟"
-                                    draw_text.color: #x8f8f8f
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9
                                 }
                                 reading_chart := mod.widgets.StatsBars{}
                                 reading_chart_labels := View{
                                     width: Fill height: Fit
                                     flow: Right spacing: 4
-                                    stat_day_0 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
-                                    stat_day_1 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
-                                    stat_day_2 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
-                                    stat_day_3 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
-                                    stat_day_4 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
-                                    stat_day_5 := Label{width: Fill text: "" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
-                                    stat_day_6 := Label{width: Fill text: "今天" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    stat_day_0 := Label{width: Fill text: "" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    stat_day_1 := Label{width: Fill text: "" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    stat_day_2 := Label{width: Fill text: "" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    stat_day_3 := Label{width: Fill text: "" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    stat_day_4 := Label{width: Fill text: "" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    stat_day_5 := Label{width: Fill text: "" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    stat_day_6 := Label{width: Fill text: "今天" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
                                 }
                             }
                             vocab_chart_card := RoundedView{
                                 width: Fill height: Fit
                                 new_batch: true
                                 flow: Down spacing: 10 padding: 14
-                                draw_bg.color: #x252525
+                                draw_bg.color: theme.color_bg_container
                                 draw_bg.border_radius: 10.0
                                 Label{text: "词汇学习" draw_text.text_style.font_size: 13}
                                 vocab_chart_hint := Label{
                                     width: Fill height: Fit
                                     text: "生词 0 · 累计复习 0 次"
-                                    draw_text.color: #x8f8f8f
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9
                                 }
                                 vocab_chart := mod.widgets.StatsBars{
                                     height: 150
-                                    draw_bar.color: #x7fb2a6
+                                    draw_bar.color: theme.color_chart_vocab
                                 }
                                 vocab_chart_labels := View{
                                     width: Fill height: Fit
                                     flow: Right spacing: 4
-                                    Label{width: Fill text: "学习中" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
-                                    Label{width: Fill text: "已掌握" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
-                                    Label{width: Fill text: "累计复习" draw_text.color: #x8f8f8f draw_text.text_style.font_size: 8}
+                                    Label{width: Fill text: "学习中" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    Label{width: Fill text: "已掌握" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
+                                    Label{width: Fill text: "累计复习" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: 8}
                                 }
                             }
                         }
@@ -2558,7 +2593,7 @@ script_mod! {
                                 chat_status := Label{
                                     width: Fill
                                     text: "正在读取 AI 设置…"
-                                    draw_text.color: #x8f8f8f
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9
                                 }
                                 chat_skill_row := View{
@@ -2568,7 +2603,7 @@ script_mod! {
                                     chat_skill_status := Label{
                                         width: Fill height: Fit
                                         text: "未选择技能模板"
-                                        draw_text.color: #x7fb2a6
+                                        draw_text.color: theme.color_highlight
                                         draw_text.text_style.font_size: 9
                                     }
                                     chat_skill_clear := ButtonFlatter{
@@ -2614,7 +2649,7 @@ script_mod! {
                                     skills_status := Label{
                                         width: Fill height: Fit
                                         text: "正在读取技能…"
-                                        draw_text.color: #x8f8f8f
+                                        draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
                                 }
@@ -2628,7 +2663,7 @@ script_mod! {
                                     width: 330 height: Fill
                                     padding: 10
                                     new_batch: true
-                                    draw_bg.color: #x232323
+                                    draw_bg.color: theme.color_bg_app
                                     draw_bg.border_radius: 9.0
                                     skill_list := mod.widgets.SkillList{}
                                 }
@@ -2636,7 +2671,7 @@ script_mod! {
                                     width: Fill height: Fill
                                     flow: Down spacing: 9 padding: 14
                                     new_batch: true
-                                    draw_bg.color: #x252525
+                                    draw_bg.color: theme.color_bg_container
                                     draw_bg.border_radius: 9.0
                                     skill_editor_title := Label{
                                         width: Fill height: Fit
@@ -2645,7 +2680,7 @@ script_mod! {
                                     }
                                     Label{
                                         text: "名称"
-                                        draw_text.color: #xaaaaaa
+                                        draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
                                     skill_name_input := TextInput{
@@ -2658,7 +2693,7 @@ script_mod! {
                                     }
                                     Label{
                                         text: "Prompt 模板（Markdown）"
-                                        draw_text.color: #xaaaaaa
+                                        draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
                                     skill_content_input := TextInput{
@@ -2672,7 +2707,7 @@ script_mod! {
                                     skill_editor_hint := Label{
                                         width: Fill height: Fit
                                         text: "自定义技能可用于下一次 AI 提问；启用的系统技能会自动作为全局系统提示词。"
-                                        draw_text.color: #x8f8f8f
+                                        draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 8.5
                                     }
                                     skill_editor_actions := View{
@@ -2693,7 +2728,15 @@ script_mod! {
                             Label{
                                 text: "阅读"
                                 draw_text.text_style.font_size: 13
-                                draw_text.color: #x9a9a9a
+                                draw_text.color: theme.color_label_inner_inactive
+                            }
+                            theme_row := View{
+                                width: Fill height: Fit
+                                flow: Right spacing: 12
+                                align: Align{y: 0.5}
+                                Label{text: "外观主题"}
+                                theme_dark := RadioButtonTabFlat{text: "深色"}
+                                theme_light := RadioButtonTabFlat{text: "浅色"}
                             }
                             font_row := View{
                                 width: Fill height: Fit
@@ -2724,76 +2767,76 @@ script_mod! {
                                 spacing: 12
                                 align: Align{ y: 0.5 }
                                 Label{ text: "注音字色" }
-                                gc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
-                                gc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
-                                gc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
-                                gc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "灰" } }
+                                gc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
+                                gc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
+                                gc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
+                                gc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "灰" } }
                             }
                             gloss_bg_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
                                 Label{ text: "注音背景" }
-                                gb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "无" } }
-                                gb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深灰" } }
-                                gb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深青" } }
-                                gb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深蓝" } }
+                                gb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "无" } }
+                                gb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深灰" } }
+                                gb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深青" } }
+                                gb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深蓝" } }
                             }
                             word_color_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
                                 Label{ text: "词字色" }
-                                wc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "默认" } }
-                                wc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
-                                wc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
-                                wc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
+                                wc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "默认" } }
+                                wc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
+                                wc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
+                                wc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
                             }
                             word_bg_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
                                 Label{ text: "词背景" }
-                                wb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "无" } }
-                                wb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深灰" } }
-                                wb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深青" } }
-                                wb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "深蓝" } }
+                                wb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "无" } }
+                                wb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深灰" } }
+                                wb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深青" } }
+                                wb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深蓝" } }
                             }
                             Label{
                                 text: "文本"
                                 draw_text.text_style.font_size: 13
-                                draw_text.color: #x9a9a9a
+                                draw_text.color: theme.color_label_inner_inactive
                             }
                             sel_color_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
                                 Label{ text: "选中颜色" }
-                                sc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
-                                sc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
-                                sc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
-                                sc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "黄" } }
+                                sc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
+                                sc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
+                                sc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
+                                sc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "黄" } }
                             }
                             hl_color_row := View{
                                 width: Fill height: Fit
                                 spacing: 12
                                 align: Align{ y: 0.5 }
                                 Label{ text: "高亮颜色" }
-                                hc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "黄" } }
-                                hc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "青" } }
-                                hc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "蓝" } }
-                                hc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: #x2a2a2a b := ButtonFlat{ text: "橙" } }
+                                hc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "黄" } }
+                                hc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
+                                hc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
+                                hc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
                             }
                             settings_hint := Label{
                                 width: Fill
-                                text: "阅读设置更改后自动保存在本机；深浅主题将在后续补齐。"
-                                draw_text.color: #x9a9a9a
+                                text: "阅读设置与外观主题更改后自动保存在本机。"
+                                draw_text.color: theme.color_label_inner_inactive
                                 draw_text.text_style.font_size: 9
                             }
                             Label{
                                 text: "AI（OpenAI 兼容接口）"
                                 draw_text.text_style.font_size: 13
-                                draw_text.color: #x9a9a9a
+                                draw_text.color: theme.color_label_inner_inactive
                             }
                             ai_endpoint := TextInput{
                                 width: Fill height: 38
@@ -2817,7 +2860,7 @@ script_mod! {
                             ai_settings_status := Label{
                                 width: Fill height: Fit
                                 text: "密钥保存在本机应用数据库中。"
-                                draw_text.color: #x8f8f8f
+                                draw_text.color: theme.color_label_inner_inactive
                                 draw_text.text_style.font_size: 9
                             }
                             local_ai_section := View{
@@ -2827,12 +2870,12 @@ script_mod! {
                                 Label{
                                     text: "本地 AI（桌面 llama.cpp）"
                                     draw_text.text_style.font_size: 13
-                                    draw_text.color: #x9a9a9a
+                                    draw_text.color: theme.color_label_inner_inactive
                                 }
                                 Label{
                                     width: Fill height: Fit
                                     text: "填写已安装的 llama-server 与 GGUF 文件路径。服务只监听 127.0.0.1；启动后聊天会自动切换到本地模型。"
-                                    draw_text.color: #x8f8f8f
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9
                                 }
                                 local_ai_binary := TextInput{
@@ -2888,7 +2931,7 @@ script_mod! {
                                 local_ai_status := Label{
                                     width: Fill height: Fit
                                     text: "本地服务未启动。macOS 可通过 brew install llama.cpp 安装。"
-                                    draw_text.color: #x8f8f8f
+                                    draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9
                                 }
                             }
@@ -2900,7 +2943,7 @@ script_mod! {
                             new_batch: true
                             flow: Down
                             padding: Inset{left: 4 right: 4 top: 5 bottom: 5}
-                            draw_bg.color: #x1f1f1f
+                            draw_bg.color: theme.color_bg_app
                             mobile_nav_scroll := ScrollXView{
                                 width: Fill height: 44
                                 flow: Right spacing: 4
@@ -3359,6 +3402,10 @@ impl Widget for ChapterList {
 struct TocList {
     #[deref]
     view: View,
+    #[live]
+    active_bg: Vec4f,
+    #[live]
+    inactive_bg: Vec4f,
 }
 
 impl Widget for TocList {
@@ -3382,12 +3429,14 @@ impl Widget for TocList {
                     let mut item_mut = item.clone();
                     item.button(cx, ids!(toc_item_btn)).set_text(cx, &text);
                     if item_id == current {
+                        let color = self.active_bg;
                         script_apply_eval!(cx, item_mut, {
-                            draw_bg.color: #x31554b
+                            draw_bg.color: #(color)
                         });
                     } else {
+                        let color = self.inactive_bg;
                         script_apply_eval!(cx, item_mut, {
-                            draw_bg.color: #x232323
+                            draw_bg.color: #(color)
                         });
                     }
                     item.draw_all_unscoped(cx);
@@ -3723,6 +3772,8 @@ pub struct App {
     source: ScriptObjectRef,
     #[live]
     ui: WidgetRef,
+    #[live]
+    swatch_inactive: Vec4f,
     #[rust]
     reload_count: usize,
     #[rust]
@@ -3775,6 +3826,10 @@ pub struct App {
     #[rust]
     on_reader_page: bool,
     #[rust]
+    active_page: AppPage,
+    #[rust]
+    pending_theme_reapply: bool,
+    #[rust]
     toc_open: bool,
     #[rust]
     note_open: bool,
@@ -3800,6 +3855,99 @@ pub struct App {
 }
 
 impl App {
+    fn activate_page(&mut self, cx: &mut Cx, page: AppPage) {
+        self.ui
+            .page_flip(cx, ids!(pages))
+            .set_active_page(cx, page.live_id());
+        self.active_page = page;
+        self.on_reader_page = page == AppPage::Reader;
+    }
+
+    fn sync_theme_controls(&self, cx: &mut Cx, theme: ReaderTheme) {
+        self.ui.radio_button(cx, ids!(theme_dark)).set_active(
+            cx,
+            theme == ReaderTheme::Dark,
+            Animate::No,
+        );
+        self.ui.radio_button(cx, ids!(theme_light)).set_active(
+            cx,
+            theme == ReaderTheme::Light,
+            Animate::No,
+        );
+    }
+
+    fn set_reader_theme(&mut self, cx: &mut Cx, theme: ReaderTheme) {
+        if *READER_THEME.read().unwrap() == theme {
+            self.sync_theme_controls(cx, theme);
+            return;
+        }
+        *READER_THEME.write().unwrap() = theme;
+        self.sync_theme_controls(cx, theme);
+        self.persist_reader_settings(cx);
+        self.apply_runtime_theme(cx, theme);
+    }
+
+    fn apply_runtime_theme(&mut self, cx: &mut Cx, theme: ReaderTheme) {
+        if theme == ReaderTheme::Light {
+            script_eval!(cx, {
+                mod.theme.splat(mod.readwise_theme_light)
+            });
+        } else {
+            script_eval!(cx, {
+                mod.theme.splat(mod.readwise_theme_dark)
+            });
+        }
+        self.pending_theme_reapply = true;
+        cx.request_script_reapply();
+    }
+
+    /// ScriptReapply 不销毁 widget 树；这里只恢复可能由脚本默认值重写的
+    /// 页面、响应式布局和投影视图，业务数据仍由 Rust 状态持有。
+    fn restore_after_script_reload(&mut self, cx: &mut Cx) {
+        self.activate_page(cx, self.active_page);
+        self.responsive_layout_initialized = false;
+        self.update_responsive_layout(
+            cx,
+            cx.display_context.screen_size,
+            cx.display_context.safe_area_insets,
+        );
+        self.apply_reader_settings(cx, current_reader_settings());
+        self.sync_reader_panel_layout(cx);
+
+        let shelf_is_empty = SHELF.read().unwrap().is_empty();
+        self.ui
+            .widget(cx, ids!(library_empty))
+            .set_visible(cx, shelf_is_empty);
+        self.ui
+            .widget(cx, ids!(book_shelf))
+            .set_visible(cx, !shelf_is_empty);
+
+        let notes_are_empty = NOTES.read().unwrap().entries.is_empty();
+        self.ui
+            .widget(cx, ids!(note_empty))
+            .set_visible(cx, notes_are_empty);
+        self.ui
+            .widget(cx, ids!(note_list))
+            .set_visible(cx, !notes_are_empty);
+        self.ui
+            .widget(cx, ids!(note_composer))
+            .set_visible(cx, !self.note_quote_text.is_empty());
+
+        self.refresh_vocab_projection(cx);
+        self.refresh_pending_skill_indicator(cx);
+        self.set_chat_streaming_controls(cx, self.ai_request.is_some());
+        if self.active_page == AppPage::Statistics {
+            spawn_load_statistics();
+        }
+        if self.pending_theme_reapply {
+            self.ui
+                .label(cx, ids!(settings_hint))
+                .set_text(cx, "主题已应用；更改会自动保存在本机。");
+            self.pending_theme_reapply = false;
+        }
+        self.ui.redraw(cx);
+    }
+
     fn track_reader_swipe(&mut self, cx: &mut Cx, event: &Event) -> Option<ReaderSwipeDirection> {
         match event {
             Event::LongPress(_) | Event::SelectionHandleDrag(_) => {
@@ -4525,10 +4673,7 @@ impl App {
         }
         self.pending_skill_id = Some(skill.id.clone());
         self.refresh_pending_skill_indicator(cx);
-        self.ui
-            .page_flip(cx, ids!(pages))
-            .set_active_page(cx, id!(page_chat));
-        self.on_reader_page = false;
+        self.activate_page(cx, AppPage::Chat);
         self.set_chat_status(cx, &format!("已选择「{}」，请输入要处理的内容", skill.name));
         self.ui.redraw(cx);
     }
@@ -5001,7 +5146,10 @@ impl App {
             7 => script_apply_eval!(cx, w, { draw_bg.color: #x294f45 }),
             8 => script_apply_eval!(cx, w, { draw_bg.color: #x293d61 }),
             9 => script_apply_eval!(cx, w, { draw_bg.color: #xd9c96a }),
-            _ => script_apply_eval!(cx, w, { draw_bg.color: #x2a2a2a }),
+            _ => {
+                let color = self.swatch_inactive;
+                script_apply_eval!(cx, w, { draw_bg.color: #(color) });
+            }
         }
     }
 
@@ -5078,6 +5226,8 @@ impl App {
         use crate::ruby_word::*;
 
         let settings = settings.normalized();
+        let theme_changed = *READER_THEME.read().unwrap() != settings.theme;
+        *READER_THEME.write().unwrap() = settings.theme;
         *READER_FONT_SIZE.write().unwrap() = settings.font_size;
         *GLOSS_ENABLED.write().unwrap() = settings.gloss_enabled;
         *GLOSS_FONT_SIZE.write().unwrap() = settings.gloss_font_size;
@@ -5103,6 +5253,7 @@ impl App {
             settings.gloss_enabled,
             Animate::No,
         );
+        self.sync_theme_controls(cx, settings.theme);
         self.set_gloss_rows_visible(cx, settings.gloss_enabled);
         self.refresh_swatches(cx);
 
@@ -5116,6 +5267,9 @@ impl App {
             }
         }
         self.refresh_current_chapter(cx);
+        if theme_changed {
+            self.apply_runtime_theme(cx, settings.theme);
+        }
     }
 
     fn persist_reader_settings(&mut self, cx: &mut Cx) {
@@ -5937,7 +6091,9 @@ impl MatchEvent for App {
                             .set_visible(cx, !is_empty);
                         let hint = if let Some(error) = import_error {
                             if *imported > 0 {
-                                format!("共 {items} 本（新增 {imported} 本，另有文件失败：{error}）")
+                                format!(
+                                    "共 {items} 本（新增 {imported} 本，另有文件失败：{error}）"
+                                )
                             } else {
                                 format!("导入失败：{error} · 当前共 {items} 本")
                             }
@@ -5985,7 +6141,6 @@ impl MatchEvent for App {
             .ui
             .widget(cx, ids!(book_shelf))
             .portal_list(cx, ids!(list));
-        let pages = self.ui.page_flip(cx, ids!(pages));
         for (item_id, item) in shelf_list.items_with_actions(actions) {
             if item.button(cx, ids!(del_btn)).clicked(actions) {
                 let book_id = SHELF.read().unwrap().get(item_id).map(|b| b.id.clone());
@@ -6000,8 +6155,7 @@ impl MatchEvent for App {
                     self.ui
                         .label(cx, ids!(title))
                         .set_text(cx, &format!("《{}》加载中…", book.title));
-                    pages.set_active_page(cx, id!(page_reader));
-                    self.on_reader_page = true;
+                    self.activate_page(cx, AppPage::Reader);
                     spawn_open_book(book);
                 }
             }
@@ -6092,14 +6246,12 @@ impl MatchEvent for App {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
-            pages.set_active_page(cx, id!(page_library));
-            self.on_reader_page = false;
+            self.activate_page(cx, AppPage::Library);
         }
         if self.ui.button(cx, ids!(nav_reader)).clicked(actions)
             || self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions)
         {
-            pages.set_active_page(cx, id!(page_reader));
-            self.on_reader_page = true;
+            self.activate_page(cx, AppPage::Reader);
             self.start_reading_timer(cx);
         }
         if self.ui.button(cx, ids!(nav_chat)).clicked(actions)
@@ -6108,8 +6260,7 @@ impl MatchEvent for App {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
-            pages.set_active_page(cx, id!(page_chat));
-            self.on_reader_page = false;
+            self.activate_page(cx, AppPage::Chat);
         }
         if self.ui.button(cx, ids!(nav_skills)).clicked(actions)
             || self.ui.button(cx, ids!(mobile_nav_skills)).clicked(actions)
@@ -6117,8 +6268,7 @@ impl MatchEvent for App {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
-            pages.set_active_page(cx, id!(page_skills));
-            self.on_reader_page = false;
+            self.activate_page(cx, AppPage::Skills);
         }
         if self.ui.button(cx, ids!(nav_vocab)).clicked(actions)
             || self.ui.button(cx, ids!(mobile_nav_vocab)).clicked(actions)
@@ -6126,8 +6276,7 @@ impl MatchEvent for App {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
-            pages.set_active_page(cx, id!(page_vocab));
-            self.on_reader_page = false;
+            self.activate_page(cx, AppPage::Vocab);
             spawn_load_vocab();
         }
         if self.ui.button(cx, ids!(nav_statistics)).clicked(actions)
@@ -6136,13 +6285,12 @@ impl MatchEvent for App {
                 .button(cx, ids!(mobile_nav_statistics))
                 .clicked(actions)
         {
-            pages.set_active_page(cx, id!(page_statistics));
             if self.on_reader_page {
                 self.stop_reading_timer(cx, true);
             } else {
                 spawn_load_statistics();
             }
-            self.on_reader_page = false;
+            self.activate_page(cx, AppPage::Statistics);
             self.ui
                 .label(cx, ids!(statistics_status))
                 .set_text(cx, "正在更新统计数据…");
@@ -6156,8 +6304,7 @@ impl MatchEvent for App {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
-            pages.set_active_page(cx, id!(page_settings));
-            self.on_reader_page = false;
+            self.activate_page(cx, AppPage::Settings);
         }
         if self
             .ui
@@ -6264,6 +6411,20 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.finish_vocab_review(cx, "已结束本轮复习");
+        }
+        if let Some(index) = self
+            .ui
+            .radio_button_set(cx, ids_array!(theme_dark, theme_light))
+            .selected(cx, actions)
+        {
+            self.set_reader_theme(
+                cx,
+                if index == 0 {
+                    ReaderTheme::Dark
+                } else {
+                    ReaderTheme::Light
+                },
+            );
         }
         if self.ui.button(cx, ids!(font_inc)).clicked(actions) {
             self.adjust_font(cx, 1.0);
@@ -6567,7 +6728,29 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::theme_mod(vm);
         script_eval!(vm, {
-            mod.theme = mod.themes.dark
+            mod.themes.dark = mod.themes.dark{
+                color_chart_grid: #xFFFFFF18
+                color_chart_reading: #x62B6FF
+                color_chart_vocab: #x7FB2A6
+            }
+            mod.themes.light = mod.themes.light{
+                color_chart_grid: #x00000018
+                color_chart_reading: #x236EAD
+                color_chart_vocab: #x397F70
+            }
+        });
+        if *READER_THEME.read().unwrap() == ReaderTheme::Light {
+            script_eval!(vm, {
+                mod.theme = mod.themes.light
+            });
+        } else {
+            script_eval!(vm, {
+                mod.theme = mod.themes.dark
+            });
+        }
+        script_eval!(vm, {
+            mod.readwise_theme_dark = mod.themes.dark{}
+            mod.readwise_theme_light = mod.themes.light{}
         });
         makepad_widgets::widgets_mod(vm);
         crate::ruby_word::script_mod(vm);
@@ -6673,6 +6856,7 @@ impl AppMain for App {
             }
         }
         match event {
+            Event::ScriptReapply => self.restore_after_script_reload(cx),
             Event::Startup => {
                 self.update_responsive_layout(
                     cx,
