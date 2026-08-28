@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{migrate::MigrateDatabase, Sqlite, SqlitePool};
+use sqlx::{
+    migrate::MigrateDatabase,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Row, Sqlite, SqlitePool,
+};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::books::{self, models::*};
 use crate::notes::{self, models::Note};
@@ -17,6 +23,145 @@ struct DefaultSkill {
     is_system: bool,
     is_active: bool,
 }
+
+/// 1 = 老 Tauri 版基线；2 = app_settings + book_notes 归一化高亮位置列。
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+
+const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
+    (
+        "threads",
+        &[
+            "id",
+            "book_id",
+            "metadata",
+            "title",
+            "messages",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    ("app_settings", &["key", "value", "updated_at"]),
+    (
+        "books",
+        &[
+            "id",
+            "title",
+            "author",
+            "format",
+            "file_path",
+            "cover_path",
+            "file_size",
+            "language",
+            "tags",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "book_status",
+        &[
+            "book_id",
+            "status",
+            "progress_current",
+            "progress_total",
+            "location",
+            "last_read_at",
+            "started_at",
+            "completed_at",
+            "metadata",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "reading_sessions",
+        &[
+            "id",
+            "book_id",
+            "started_at",
+            "ended_at",
+            "duration_seconds",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    ("tags", &["id", "name", "color", "created_at", "updated_at"]),
+    (
+        "notes",
+        &[
+            "id",
+            "book_id",
+            "book_meta",
+            "title",
+            "content",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "book_notes",
+        &[
+            "id",
+            "book_id",
+            "type",
+            "cfi",
+            "text",
+            "style",
+            "color",
+            "section_id",
+            "norm_start",
+            "norm_end",
+            "note",
+            "context_before",
+            "context_after",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "public_highlight_retry_queue",
+        &[
+            "id",
+            "job_type",
+            "payload_json",
+            "attempts",
+            "last_error",
+            "created_at",
+            "next_retry_at",
+        ],
+    ),
+    (
+        "skills",
+        &[
+            "id",
+            "name",
+            "content",
+            "is_active",
+            "is_system",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    ("word_glosses", &["lemma", "gloss", "level", "created_at"]),
+    ("book_words", &["book_id", "lemma", "context_sentence"]),
+    ("book_glosses", &["book_id", "lemma", "gloss", "created_at"]),
+    ("known_words", &["lemma", "source", "created_at"]),
+    (
+        "vocab_book",
+        &[
+            "lemma",
+            "word",
+            "gloss",
+            "level",
+            "context_sentence",
+            "book_id",
+            "status",
+            "review_count",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+];
 
 /// 同步门面：内部持有 tokio 运行时，UI 侧（Makepad 后台线程）直接调用阻塞方法，
 /// 不必在 App 里铺设 async 管线。所有方法在后台线程调用，结果经 Cx::post_action 回 UI。
@@ -196,9 +341,7 @@ impl Db {
                     "reader.theme" => {
                         settings.theme = crate::settings::ReaderTheme::from_str(&value)
                     }
-                    "reader.font" => {
-                        settings.font = crate::settings::ReaderFont::from_str(&value)
-                    }
+                    "reader.font" => settings.font = crate::settings::ReaderFont::from_str(&value),
                     "reader.spacing" => {
                         settings.spacing = crate::settings::ReaderSpacing::from_str(&value)
                     }
@@ -609,22 +752,33 @@ pub async fn initialize(data_dir: &Path) -> Result<SqlitePool, String> {
         log::info!("Database found at: {}", db_url);
     }
 
-    let pool = SqlitePool::connect(&db_url)
+    let connect_options = SqliteConnectOptions::from_str(&db_url)
+        .map_err(|e| format!("解析数据库地址失败: {}", e))?
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .connect_with(connect_options)
         .await
         .map_err(|e| format!("连接数据库失败: {}", e))?;
 
-    sqlx::query(include_str!("./schema.sql"))
-        .execute(&pool)
-        .await
-        .map_err(|e| format!("初始化 schema 失败: {}", e))?;
+    initialize_schema(&pool).await?;
 
-    ensure_book_note_columns(&pool).await?;
     statistics::recover_open_reading_sessions(&pool).await?;
     initialize_starter_glosses(&pool).await?;
 
     initialize_default_skills(&pool).await?;
 
     Ok(pool)
+}
+
+async fn initialize_schema(pool: &SqlitePool) -> Result<(), String> {
+    reject_newer_schema(pool).await?;
+    sqlx::query(include_str!("./schema.sql"))
+        .execute(pool)
+        .await
+        .map_err(|e| format!("初始化 schema 失败: {}", e))?;
+
+    migrate_schema(pool).await?;
+    validate_schema(pool).await
 }
 
 /// 新安装或释义缓存近乎为空时，补入离线基础词义。
@@ -670,19 +824,81 @@ async fn initialize_starter_glosses(pool: &SqlitePool) -> Result<(), String> {
     Ok(())
 }
 
-async fn ensure_book_note_columns(pool: &SqlitePool) -> Result<(), String> {
-    let statements = [
-        "ALTER TABLE book_notes ADD COLUMN section_id TEXT",
-        "ALTER TABLE book_notes ADD COLUMN norm_start INTEGER",
-        "ALTER TABLE book_notes ADD COLUMN norm_end INTEGER",
-    ];
+async fn schema_version(pool: &SqlitePool) -> Result<i64, String> {
+    sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("读取数据库 schema 版本失败: {}", e))
+}
 
-    for statement in statements {
-        if let Err(error) = sqlx::query(statement).execute(pool).await {
-            let message = error.to_string();
-            if !message.contains("duplicate column name") {
-                return Err(format!("补充 book_notes 列失败: {}", message));
-            }
+async fn reject_newer_schema(pool: &SqlitePool) -> Result<(), String> {
+    let version = schema_version(pool).await?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "数据库版本 {} 高于当前应用支持的版本 {}，请升级应用后再打开",
+            version, CURRENT_SCHEMA_VERSION
+        ));
+    }
+    Ok(())
+}
+
+async fn table_columns(pool: &SqlitePool, table: &str) -> Result<HashSet<String>, String> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("读取 {table} 表结构失败: {e}"))?;
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect())
+}
+
+async fn ensure_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    declaration: &str,
+) -> Result<(), String> {
+    if table_columns(pool, table).await?.contains(column) {
+        return Ok(());
+    }
+    sqlx::query(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+    ))
+    .execute(pool)
+    .await
+    .map_err(|e| format!("迁移 {table}.{column} 失败: {e}"))?;
+    Ok(())
+}
+
+async fn migrate_schema(pool: &SqlitePool) -> Result<(), String> {
+    ensure_column(pool, "book_notes", "section_id", "TEXT").await?;
+    ensure_column(pool, "book_notes", "norm_start", "INTEGER").await?;
+    ensure_column(pool, "book_notes", "norm_end", "INTEGER").await?;
+
+    sqlx::query(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
+        .execute(pool)
+        .await
+        .map_err(|e| format!("写入数据库 schema 版本失败: {e}"))?;
+    Ok(())
+}
+
+async fn validate_schema(pool: &SqlitePool) -> Result<(), String> {
+    for (table, required_columns) in REQUIRED_SCHEMA {
+        let columns = table_columns(pool, table).await?;
+        if columns.is_empty() {
+            return Err(format!("数据库结构不完整：缺少 {table} 表"));
+        }
+        let missing: Vec<_> = required_columns
+            .iter()
+            .filter(|column| !columns.contains(**column))
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "数据库结构不完整：{table} 缺少列 {}",
+                missing.join(", ")
+            ));
         }
     }
     Ok(())
@@ -719,4 +935,93 @@ async fn initialize_default_skills(pool: &SqlitePool) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    fn runtime_and_pool() -> (tokio::runtime::Runtime, SqlitePool) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pool = runtime
+            .block_on(
+                SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:"),
+            )
+            .unwrap();
+        (runtime, pool)
+    }
+
+    #[test]
+    fn legacy_schema_is_upgraded_idempotently_without_losing_rows() {
+        let (runtime, pool) = runtime_and_pool();
+        runtime
+            .block_on(
+                sqlx::query(
+                    "CREATE TABLE book_notes (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        book_id TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        cfi TEXT NOT NULL,
+                        text TEXT,
+                        style TEXT,
+                        color TEXT,
+                        note TEXT NOT NULL,
+                        context_before TEXT,
+                        context_after TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    INSERT INTO book_notes (
+                        id, book_id, type, cfi, note, created_at, updated_at
+                    ) VALUES ('legacy-note', 'legacy-book', 'annotation', '/6/2', 'kept', 1, 1);",
+                )
+                .execute(&pool),
+            )
+            .unwrap();
+
+        runtime.block_on(initialize_schema(&pool)).unwrap();
+        runtime.block_on(initialize_schema(&pool)).unwrap();
+
+        let columns = runtime
+            .block_on(table_columns(&pool, "book_notes"))
+            .unwrap();
+        assert!(columns.contains("section_id"));
+        assert!(columns.contains("norm_start"));
+        assert!(columns.contains("norm_end"));
+        assert_eq!(
+            runtime
+                .block_on(
+                    sqlx::query_scalar::<_, String>(
+                        "SELECT note FROM book_notes WHERE id = 'legacy-note'"
+                    )
+                    .fetch_one(&pool)
+                )
+                .unwrap(),
+            "kept"
+        );
+        assert_eq!(
+            runtime.block_on(schema_version(&pool)).unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn newer_database_is_rejected_before_schema_changes() {
+        let (runtime, pool) = runtime_and_pool();
+        runtime
+            .block_on(sqlx::query("PRAGMA user_version = 999").execute(&pool))
+            .unwrap();
+
+        let error = runtime.block_on(initialize_schema(&pool)).unwrap_err();
+        assert!(error.contains("999"));
+        assert!(runtime
+            .block_on(table_columns(&pool, "books"))
+            .unwrap()
+            .is_empty());
+    }
 }

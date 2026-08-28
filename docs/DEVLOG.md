@@ -2,6 +2,14 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-28 — M8 旧数据库迁移闭环
+
+- 审计发现 `CREATE TABLE IF NOT EXISTS` 只能创建缺失表，不能给已有表补列；原有兼容代码每次启动盲试三条 `ALTER TABLE`，再依赖 SQLite 英文错误文本中的 `duplicate column name` 判断是否已迁移，既没有显式版本，也无法发现其他残缺结构。
+- 引入 SQLite `PRAGMA user_version`，当前 schema 定为 v2（旧 Tauri 基线为 v1；v2 包含 `app_settings` 与 `book_notes` 的 section/normalized range）。版本为 0/旧版的数据库原位升级；高于应用支持版本的数据库会在执行 schema 写入前拒绝打开，防止旧应用误改新库。
+- 迁移改为先读取 `PRAGMA table_info`，只补确实缺失的 `section_id`、`norm_start`、`norm_end`，重复执行幂等且不依赖错误文案。迁移后逐一验证 15 张业务表及其运行时必需列，问题在启动阶段给出具体表/列，而不是等用户进入某页面才出现 SQL 错误。
+- SQLite 连接统一启用 `foreign_keys`，使 schema 已声明的书籍删除级联/笔记置空约束在连接池的每条连接上真正生效。
+- 新增旧版 `book_notes` 内存库回归：插入旧数据后连续执行两次升级，确认三列补齐、原行保留且版本为 v2；另测未来 v999 数据库在任何建表前被拒绝。完整测试 48/48 与 `cargo check --workspace --offline` 已通过；真实数据库从 v0 启动升级到 v2，无需补列且 App 正常运行，升级后的 `foreign_key_check` 无违规记录。
+
 ## 2026-08-28 — M8 性能第一轮：正文与 AI 流式热路径
 
 - 阅读正文的 PortalList 此前在每次绘制可见项时都调用 `Html::set_text`，即使 item 仍绑定同一段落也会重新解析整段 HTML。现先比较 Html 已持有的 body，仅在 PortalList item 确实改绑到其他段落时解析；滚动停稳后的普通重绘不再重复做解析工作。
