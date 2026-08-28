@@ -2006,6 +2006,7 @@ script_mod! {
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
+        font_default_size: theme.font_size_p
         font_standard_normal: theme.font_regular{}
         font_standard_italic: theme.font_italic{}
         font_standard_bold: theme.font_bold{}
@@ -3078,6 +3079,8 @@ struct ChapterList {
     #[deref]
     view: View,
     #[live]
+    font_default_size: f32,
+    #[live]
     font_standard_normal: TextStyle,
     #[live]
     font_standard_italic: TextStyle,
@@ -3365,6 +3368,17 @@ impl Widget for ChapterList {
         let paragraphs = PARAGRAPHS.read().unwrap();
         let reader_font = *READER_FONT.read().unwrap();
         let reader_spacing = *READER_SPACING.read().unwrap();
+        let reader_font_size = READER_FONT_SIZE
+            .read()
+            .unwrap()
+            .unwrap_or(self.font_default_size);
+        let selection_color = Vec4f::from_u32(match *SELECTION_SLOT.read().unwrap() {
+            1 => 0x4a90_d988,
+            2 => 0xe887_5a88,
+            3 => 0xd9c9_6a88,
+            _ => 0x7fb2_a688,
+        });
+        let selection_range = *SEL_RANGE.read().unwrap();
         let normal_family = if reader_font == ReaderFont::Monospace {
             self.font_monospace.font_family.clone()
         } else {
@@ -3393,21 +3407,26 @@ impl Widget for ChapterList {
                     let Some(para) = paragraphs.get(item_id) else {
                         continue;
                     };
-                    let template = if para.contains("<ruby") {
+                    let has_gloss = para.contains("<ruby");
+                    let template = if has_gloss {
                         id!(GlossPara)
                     } else {
                         id!(Para)
                     };
-                    let line_spacing = if para.contains("<ruby") {
+                    let line_spacing = if has_gloss {
                         reader_spacing.gloss_line_spacing()
                     } else {
                         reader_spacing.plain_line_spacing()
                     };
                     let item = list.item(cx, item_id, template);
-                    let mut html = item.widget(cx, ids!(para_html));
-                    html.set_text(cx, para);
+                    let html = item.widget(cx, ids!(para_html));
                     if let Some(mut inner) = html.borrow_mut::<Html>() {
+                        if inner.body.as_ref() != para {
+                            inner.set_text(cx, para);
+                        }
                         inner.text_flow.selectable = !self.compact_layout;
+                        inner.text_flow.font_size = reader_font_size;
+                        inner.text_flow.draw_selection.color = selection_color;
                         inner.text_flow.text_style_normal.font_family = normal_family.clone();
                         inner.text_flow.text_style_italic.font_family = italic_family.clone();
                         inner.text_flow.text_style_bold.font_family = bold_family.clone();
@@ -3419,18 +3438,7 @@ impl Widget for ChapterList {
                         inner.text_flow.text_style_bold_italic.line_spacing = line_spacing;
                         inner.text_flow.text_style_fixed.line_spacing = line_spacing;
                     }
-                    if let Some(fs) = *READER_FONT_SIZE.read().unwrap() {
-                        script_apply_eval!(cx, html, {
-                            font_size: #(fs)
-                        });
-                    }
-                    match *SELECTION_SLOT.read().unwrap() {
-                        1 => script_apply_eval!(cx, html, { draw_selection.color: #x4a90d988 }),
-                        2 => script_apply_eval!(cx, html, { draw_selection.color: #xe8875a88 }),
-                        3 => script_apply_eval!(cx, html, { draw_selection.color: #xd9c96a88 }),
-                        _ => script_apply_eval!(cx, html, { draw_selection.color: #x7fb2a688 }),
-                    }
-                    if let Some((start, end)) = *SEL_RANGE.read().unwrap() {
+                    if let Some((start, end)) = selection_range {
                         if item_id < start.0 || item_id > end.0 {
                             item.selection_clear();
                         } else if item_id == start.0 && item_id == end.0 {
@@ -4916,14 +4924,10 @@ impl App {
     }
 
     fn redraw_chat(&self, cx: &mut Cx) {
-        let main_list = self
-            .ui
-            .widget(cx, ids!(chat_list))
-            .portal_list(cx, ids!(list));
-        let reader_list = self
-            .ui
-            .widget(cx, ids!(reader_chat_list))
-            .portal_list(cx, ids!(list));
+        let main_widget = self.ui.widget(cx, ids!(chat_list));
+        let reader_widget = self.ui.widget(cx, ids!(reader_chat_list));
+        let main_list = main_widget.portal_list(cx, ids!(list));
+        let reader_list = reader_widget.portal_list(cx, ids!(list));
         let items = {
             let data = CHAT_DATA.read().unwrap();
             data.messages.len() + usize::from(data.is_streaming)
@@ -4934,7 +4938,8 @@ impl App {
             reader_list.set_tail_range(true);
             reader_list.set_first_id_and_scroll(items - 1, 0.0);
         }
-        self.ui.redraw(cx);
+        main_widget.redraw(cx);
+        reader_widget.redraw(cx);
     }
 
     fn send_chat(&mut self, cx: &mut Cx) {
@@ -6964,22 +6969,32 @@ impl AppMain for App {
             }
         } else {
             let mut stream_failure = None;
+            let mut stream_text = String::new();
+            let mut reasoning_started = false;
             for update in stream_updates {
                 match update {
                     AiSseUpdate::ReasoningStarted => {
-                        self.set_chat_status(cx, "模型正在思考…");
-                        self.redraw_chat(cx);
+                        reasoning_started = true;
                     }
                     AiSseUpdate::Text(text) => {
-                        CHAT_DATA.write().unwrap().streaming_text.push_str(&text);
-                        self.set_chat_status(cx, "正在输出回答…");
-                        self.redraw_chat(cx);
+                        stream_text.push_str(&text);
                     }
                     AiSseUpdate::Done => {}
                     AiSseUpdate::Failure(error) => {
                         stream_failure.get_or_insert(error);
                     }
                 }
+            }
+            if !stream_text.is_empty() {
+                CHAT_DATA
+                    .write()
+                    .unwrap()
+                    .streaming_text
+                    .push_str(&stream_text);
+                self.set_chat_status(cx, "正在输出回答…");
+                self.redraw_chat(cx);
+            } else if reasoning_started {
+                self.set_chat_status(cx, "模型正在思考…");
             }
             if let Some(error) = stream_failure {
                 self.fail_chat(cx, error);

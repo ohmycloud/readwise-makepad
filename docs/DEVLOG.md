@@ -2,6 +2,14 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-28 — M8 性能第一轮：正文与 AI 流式热路径
+
+- 阅读正文的 PortalList 此前在每次绘制可见项时都调用 `Html::set_text`，即使 item 仍绑定同一段落也会重新解析整段 HTML。现先比较 Html 已持有的 body，仅在 PortalList item 确实改绑到其他段落时解析；滚动停稳后的普通重绘不再重复做解析工作。
+- 正文字号、字体、行距、选区色和选区范围改为每次 `ChapterList::draw_walk` 只读取一次全局状态。字号与选区色直接写入公开的 `TextFlow`/`DrawColor` 字段，移除每个可见段落两次 `script_apply_eval!`，避免高频绘制反复进入 Splash VM；默认字号仍来自当前主题 token，深浅主题切换行为不变。
+- AI SSE 一次事件中可能包含多个文本片段，原实现逐片段加锁、更新状态并重绘整棵 App UI。现合并同批文本后只写入和重绘一次，重绘范围只覆盖主 AI 与阅读侧栏的两个 ChatList；状态 Label 继续由自身更新，不牵连书架、正文和其他页面。
+- 本轮没有盲目添加 `texture_caching` 或手动 GC：正文/列表是持续变化的滚动内容，不适合整树纹理缓存；GC 与 draw batching 需要 Studio 数据再决定，避免用额外显存和 draw list 换取未经测量的“优化”。
+- 验证：`cargo check --workspace --offline`、`cargo test --workspace --offline`（46/46）、`git diff --check` 与桌面 App 真实启动均通过；无编译告警（依赖仓库重复 package 提示除外）、Splash 解析错误或启动异常。
+
 ## 2026-08-28 — M8 第三刀：正文字体与行距
 
 - 设置页补齐正文字体和行距：字体提供跟随主题正文样式的“标准”与适合代码类书籍的“等宽”；只影响 EPUB 正文及 ruby 主词，不改变应用 UI 和注音释义字体。当前锁定的 Makepad 未内置适合英语长文的衬线字体，因此没有用不可靠的系统字体路径伪造一个选项。
