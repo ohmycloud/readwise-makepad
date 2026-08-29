@@ -2259,6 +2259,52 @@ script_mod! {
         draw_bar.color: theme.color_chart_reading
     }
 
+    let ReaderCodeView = mod.widgets.CodeView{
+        editor +: {
+            width: Fill
+            height: Fit
+            word_wrap: false
+            show_gutter: false
+            draw_bg +: {color: #0000}
+            draw_text +: {
+                text_style +: {font_size: 10.5 line_spacing: 1.35}
+            }
+        }
+    }
+
+    let ReaderCodeViewLight = ReaderCodeView{
+        editor +: {
+            token_colors +: {
+                whitespace: #7b746b
+                delimiter: #2b2925
+                delimiter_highlight: #111
+                unknown: #2b2925
+                branch_keyword: #7b3f8c
+                constant: #9a3f35
+                identifier: #2b2925
+                loop_keyword: #a34f00
+                number: #3c6e34
+                other_keyword: #295f9e
+                punctuator: #2b2925
+                string: #9a3f35
+                function: #6f5600
+                typename: #00736d
+                comment: #4f7250
+            }
+        }
+    }
+
+    let ReaderCodePara = RoundedView{
+        width: Fill height: Fit
+        new_batch: true
+        margin: Inset{top: 4 bottom: 4 left: 2 right: 2}
+        padding: Inset{top: 10 bottom: 10 left: 12 right: 12}
+        draw_bg +: {
+            border_radius: 7.0
+            border_size: 1.0
+        }
+    }
+
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
@@ -2306,25 +2352,29 @@ script_mod! {
                     mark := mod.widgets.MarkSpan{}
                 }
             }
-            CodePara := RoundedView{
-                width: Fill height: Fit
-                new_batch: true
-                margin: Inset{top: 4 bottom: 4 left: 2 right: 2}
-                padding: Inset{top: 10 bottom: 10 left: 12 right: 12}
-                draw_bg.color: #x20252b
-                draw_bg.border_radius: 7.0
-                code_view := mod.widgets.CodeView{
-                    editor +: {
-                        width: Fill
-                        height: Fit
-                        word_wrap: false
-                        show_gutter: false
-                        draw_bg +: {color: #0000}
-                        draw_text +: {
-                            text_style +: {font_size: 10.5 line_spacing: 1.35}
-                        }
-                    }
-                }
+            CodePaper := ReaderCodePara{
+                draw_bg +: {color: #f7f4ea border_color: #d8d1c2}
+                code_view := ReaderCodeViewLight{}
+            }
+            CodeSepia := ReaderCodePara{
+                draw_bg +: {color: #f2e3c6 border_color: #ccb995}
+                code_view := ReaderCodeViewLight{}
+            }
+            CodeSage := ReaderCodePara{
+                draw_bg +: {color: #e7efe3 border_color: #becdb8}
+                code_view := ReaderCodeViewLight{}
+            }
+            CodeNight := ReaderCodePara{
+                draw_bg +: {color: #20252b border_color: #46505a}
+                code_view := ReaderCodeView{}
+            }
+            CodeThemeLight := ReaderCodePara{
+                draw_bg +: {color: #d9d9d9 border_color: #b9b9b9}
+                code_view := ReaderCodeViewLight{}
+            }
+            CodeThemeDark := ReaderCodePara{
+                draw_bg +: {color: #4d4d4d border_color: #686868}
+                code_view := ReaderCodeView{}
             }
         }
     }
@@ -3766,10 +3816,19 @@ impl Widget for ChapterList {
         let code_blocks = CODE_BLOCKS.read().unwrap();
         let reader_font = *READER_FONT.read().unwrap();
         let reader_spacing = *READER_SPACING.read().unwrap();
-        let (_, reader_text_color) = reader_palette(
-            *READER_BACKGROUND.read().unwrap(),
-            *READER_THEME.read().unwrap(),
-        );
+        let reader_background = *READER_BACKGROUND.read().unwrap();
+        let reader_theme = *READER_THEME.read().unwrap();
+        let (_, reader_text_color) = reader_palette(reader_background, reader_theme);
+        let code_template = match reader_background {
+            ReaderBackground::Paper => id!(CodePaper),
+            ReaderBackground::Sepia => id!(CodeSepia),
+            ReaderBackground::Sage => id!(CodeSage),
+            ReaderBackground::Night => id!(CodeNight),
+            ReaderBackground::FollowTheme if reader_theme == ReaderTheme::Light => {
+                id!(CodeThemeLight)
+            }
+            ReaderBackground::FollowTheme => id!(CodeThemeDark),
+        };
         let reader_font_size = READER_FONT_SIZE
             .read()
             .unwrap()
@@ -3812,7 +3871,7 @@ impl Widget for ChapterList {
                     let code_text = code_blocks.get(item_id).and_then(Option::as_deref);
                     let has_gloss = para.contains("<ruby");
                     let template = if code_text.is_some() {
-                        id!(CodePara)
+                        code_template
                     } else if has_gloss {
                         id!(GlossPara)
                     } else {
