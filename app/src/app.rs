@@ -1537,7 +1537,12 @@ enum ShelfAction {
     TagsSaved {
         items: usize,
     },
+    Deleted {
+        items: usize,
+        title: String,
+    },
     TagError(String),
+    DeleteError(String),
     Error(String),
 }
 
@@ -1593,20 +1598,20 @@ fn spawn_load_shelf() {
     });
 }
 
-/// 后台删除书籍后刷新书架。
-fn spawn_delete(id: String) {
+/// 后台删除书籍后刷新书架；删除失败时不再伪装成一次普通刷新。
+fn spawn_delete(id: String, title: String) {
     std::thread::spawn(move || {
-        let Some(db) = DB.get() else { return };
-        if let Err(e) = db.delete_book(&id) {
-            println!("删除失败 {}: {}", id, e);
+        let Some(db) = DB.get() else {
+            Cx::post_action(ShelfAction::DeleteError("数据库尚未就绪".to_string()));
+            return;
+        };
+        if let Err(error) = db.delete_book(&id) {
+            Cx::post_action(ShelfAction::DeleteError(error));
+            return;
         }
         match refresh_shelf(db) {
-            Ok(n) => Cx::post_action(ShelfAction::Loaded {
-                items: n,
-                imported: 0,
-                import_error: None,
-            }),
-            Err(e) => Cx::post_action(ShelfAction::Error(e)),
+            Ok(items) => Cx::post_action(ShelfAction::Deleted { items, title }),
+            Err(error) => Cx::post_action(ShelfAction::DeleteError(error)),
         }
     });
 }
@@ -3281,6 +3286,36 @@ script_mod! {
                     }
                 }
                     }
+                    library_delete_modal := Modal{
+                        content +: {
+                            width: 380 height: Fit
+                            library_delete_card := RoundedView{
+                                width: Fill height: Fit
+                                new_batch: true
+                                flow: Down spacing: 14 padding: 22
+                                draw_bg.color: theme.color_bg_container
+                                draw_bg.border_radius: 10.0
+                                library_delete_modal_title := Label{
+                                    width: Fill
+                                    text: "删除书籍"
+                                    draw_text.text_style.font_size: 15
+                                }
+                                library_delete_modal_message := Label{
+                                    width: Fill height: Fit
+                                    text: ""
+                                    draw_text.color: theme.color_label_inner_inactive
+                                    draw_text.text_style.font_size: 10
+                                }
+                                library_delete_actions := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    library_delete_cancel := ButtonFlat{text: "取消"}
+                                    library_delete_confirm := Button{text: "确认删除"}
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4267,6 +4302,9 @@ pub struct App {
     library_tag_filter: Option<String>,
     #[rust]
     editing_book_tags_id: Option<String>,
+    /// 待用户确认删除的 (book_id, title)。实际磁盘与数据库操作只在确认后开始。
+    #[rust]
+    pending_delete_book: Option<(String, String)>,
     #[rust]
     vocab_entries: Vec<VocabEntry>,
     #[rust]
@@ -4465,6 +4503,47 @@ impl App {
         spawn_set_book_tags(book_id, tags);
     }
 
+    fn open_delete_book_confirmation(&mut self, cx: &mut Cx, book: &ShelfItem) {
+        self.pending_delete_book = Some((book.id.clone(), book.title.clone()));
+        let message = if app_language() == AppLanguage::English {
+            format!(
+                "Delete “{}” from ReadWise? Reading progress, notes, and highlights will also be removed. The original EPUB outside the app is not affected.",
+                book.title
+            )
+        } else {
+            format!(
+                "确定要从 ReadWise 删除《{}》吗？阅读进度、笔记和高亮也会一并删除。应用外的原始 EPUB 不受影响。",
+                book.title
+            )
+        };
+        self.ui
+            .label(cx, ids!(library_delete_modal_message))
+            .set_text(cx, &message);
+        self.ui.modal(cx, ids!(library_delete_modal)).open(cx);
+    }
+
+    fn cancel_delete_book_confirmation(&mut self, cx: &mut Cx) {
+        self.pending_delete_book = None;
+        self.ui.modal(cx, ids!(library_delete_modal)).close(cx);
+    }
+
+    fn confirm_delete_book(&mut self, cx: &mut Cx) {
+        let Some((book_id, title)) = self.pending_delete_book.take() else {
+            self.ui.modal(cx, ids!(library_delete_modal)).close(cx);
+            return;
+        };
+        self.ui.modal(cx, ids!(library_delete_modal)).close(cx);
+        self.ui.label(cx, ids!(library_hint)).set_text(
+            cx,
+            &if app_language() == AppLanguage::English {
+                format!("Deleting “{title}”…")
+            } else {
+                format!("正在删除《{title}》…")
+            },
+        );
+        spawn_delete(book_id, title);
+    }
+
     fn sync_theme_controls(&self, cx: &mut Cx, theme: ReaderTheme) {
         self.ui.radio_button(cx, ids!(theme_dark)).set_active(
             cx,
@@ -4533,6 +4612,9 @@ impl App {
         set_text!(library_tag_cancel, "cancel");
         set_text!(library_tag_save, "save");
         set_empty_text!(library_tag_input, "tag_input_placeholder");
+        set_text!(library_delete_modal_title, "delete_book_title");
+        set_text!(library_delete_cancel, "cancel");
+        set_text!(library_delete_confirm, "delete_book_confirm");
 
         set_text!(toc_btn, "contents");
         set_text!(notes_btn, "note");
@@ -7324,6 +7406,27 @@ impl MatchEvent for App {
                             },
                         );
                     }
+                    ShelfAction::Deleted { items, title } => {
+                        self.refresh_shelf_projection(cx);
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Deleted “{title}” · {items} books")
+                            } else {
+                                format!("已删除《{title}》 · 共 {items} 本")
+                            },
+                        );
+                    }
+                    ShelfAction::DeleteError(e) => {
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Failed to delete book: {e}")
+                            } else {
+                                format!("删除书籍失败：{e}")
+                            },
+                        );
+                    }
                     ShelfAction::Error(e) => {
                         self.ui.label(cx, ids!(library_hint)).set_text(
                             cx,
@@ -7391,6 +7494,24 @@ impl MatchEvent for App {
         {
             self.save_library_tag_editor(cx);
         }
+        if self
+            .ui
+            .button(cx, ids!(library_delete_cancel))
+            .clicked(actions)
+            || self
+                .ui
+                .modal(cx, ids!(library_delete_modal))
+                .dismissed(actions)
+        {
+            self.cancel_delete_book_confirmation(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_delete_confirm))
+            .clicked(actions)
+        {
+            self.confirm_delete_book(cx);
+        }
 
         let shelf_list = self
             .ui
@@ -7404,7 +7525,7 @@ impl MatchEvent for App {
                 .cloned();
             let Some(book) = book else { continue };
             if item.button(cx, ids!(del_btn)).clicked(actions) {
-                spawn_delete(book.id.clone());
+                self.open_delete_book_confirmation(cx, &book);
             }
             if item.button(cx, ids!(tag_btn)).clicked(actions) {
                 self.open_library_tag_editor(cx, &book);

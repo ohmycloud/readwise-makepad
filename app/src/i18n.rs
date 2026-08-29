@@ -45,6 +45,8 @@ pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
             "Choose another tag or edit the tags on a book.",
         ),
         "delete" => choose(english, "删除", "Delete"),
+        "delete_book_title" => choose(english, "删除书籍", "Delete Book"),
+        "delete_book_confirm" => choose(english, "确认删除", "Delete Book"),
         "close" => choose(english, "关闭", "Close"),
         "cancel" => choose(english, "取消", "Cancel"),
         "save" => choose(english, "保存", "Save"),
@@ -311,6 +313,8 @@ mod tests {
             "settings",
             "language",
             "gloss_enabled",
+            "delete_book_title",
+            "delete_book_confirm",
         ] {
             assert_ne!(
                 text(AppLanguage::Chinese, key),
