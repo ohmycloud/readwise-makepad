@@ -2,6 +2,13 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-29 — M8 macOS 公证发布闭环（待凭据实跑）
+
+- `scripts/package_macos.sh` 新增可选 `READWISE_NOTARY_PROFILE`：Developer ID 签名并生成上传 ZIP 后，使用钥匙串中的 `notarytool` profile 提交且等待结果，再依次执行票据装订/验证、签名复验和 Gatekeeper `spctl` 评估，最后重新归档，确保交付 ZIP 中包含已装订的 `.app`。
+- 公证 profile 与 ad-hoc 签名组合会在构建前明确拒绝，缺少 Xcode `notarytool` 也会提前失败；只提供 Developer ID 而不提供 profile 时仍可产出签名但未公证的包，默认无凭据路径继续生成本机 ad-hoc 包。
+- README 补充 `notarytool store-credentials` 的一次性钥匙串配置和完整发布命令。凭据不会进入环境默认值、日志文件或仓库；实际 Apple 服务提交仍需 Developer ID、Team ID 与 App Store Connect 专用密码。
+- 验证：`bash -n` 通过，ad-hoc + notary profile 的无效组合在编译前被拒绝；本机 Xcode 16 的 `notarytool 1.1.2`/`stapler` 参数与脚本一致。无凭据离线路径真实重建 16MB `.app` 与 6.2MB ZIP，plist、ad-hoc 签名和归档内容均通过；实际 Apple 公证服务调用仍待发布凭据。
+
 ## 2026-08-29 — M8 macOS 原生 EPUB 选择器（待实测）
 
 - 补齐桌面书库只能拖放或使用投递箱的体验缺口：macOS 现在显示“导入 EPUB”按钮，点击后打开原生 `NSOpenPanel`，支持一次选择多本 EPUB，并复用现有后台导入、错误汇总和书架投影刷新链路。

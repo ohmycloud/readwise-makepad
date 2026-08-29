@@ -48,7 +48,24 @@ READWISE_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
   scripts/package_macos.sh
 ```
 
-脚本会启用 hardened runtime 和可信时间戳。公开下载前仍需用 `xcrun notarytool` 提交公证并用 `xcrun stapler` 装订；证书和公证凭据不存入仓库。
+脚本会启用 hardened runtime 和可信时间戳。公开下载前，先把 App Store Connect 专用密码安全存入 macOS 钥匙串（只需一次）：
+
+```bash
+xcrun notarytool store-credentials "readwise-notary" \
+  --apple-id "your-apple-id@example.com" \
+  --team-id "TEAMID" \
+  --password "APP-SPECIFIC-PASSWORD"
+```
+
+再同时提供 Developer ID 证书和钥匙串 profile：
+
+```bash
+READWISE_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+READWISE_NOTARY_PROFILE="readwise-notary" \
+  scripts/package_macos.sh
+```
+
+脚本会提交 ZIP 并等待公证结果，随后把票据装订到 `.app`，执行 `stapler validate`、`codesign` 与 Gatekeeper `spctl` 校验，并重新生成包含装订票据的最终 ZIP。证书和公证凭据都不存入仓库。
 
 ## 运行（iOS）
 

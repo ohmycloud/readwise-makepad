@@ -12,6 +12,7 @@ fi
 
 bundle_id="${READWISE_BUNDLE_ID:-org.ohmycloud.readwise}"
 signing_identity="${READWISE_CODESIGN_IDENTITY:--}"
+notary_profile="${READWISE_NOTARY_PROFILE:-}"
 app_version="$(awk '
     /^\[package\]$/ { in_package = 1; next }
     /^\[/ { in_package = 0 }
@@ -26,6 +27,16 @@ app_version="$(awk '
 
 if [[ -z "$app_version" ]]; then
     echo "Could not read readwise-app version from app/Cargo.toml" >&2
+    exit 1
+fi
+
+if [[ -n "$notary_profile" && "$signing_identity" == "-" ]]; then
+    echo "READWISE_NOTARY_PROFILE requires a Developer ID signature; set READWISE_CODESIGN_IDENTITY." >&2
+    exit 1
+fi
+
+if [[ -n "$notary_profile" ]] && ! xcrun --find notarytool >/dev/null 2>&1; then
+    echo "Notarization requires Xcode's notarytool." >&2
     exit 1
 fi
 
@@ -65,11 +76,32 @@ else
 fi
 codesign --verify --deep --strict --verbose=2 "$dist_app"
 
-rm -f "$archive"
-ditto -c -k --sequesterRsrc --keepParent "$dist_app" "$archive"
+create_archive() {
+    rm -f "$archive"
+    ditto -c -k --sequesterRsrc --keepParent "$dist_app" "$archive"
+}
+
+create_archive
+
+if [[ -n "$notary_profile" ]]; then
+    echo "Submitting $archive for Apple notarization..."
+    xcrun notarytool submit "$archive" --keychain-profile "$notary_profile" --wait
+    xcrun stapler staple "$dist_app"
+    xcrun stapler validate "$dist_app"
+    codesign --verify --deep --strict --verbose=2 "$dist_app"
+    spctl --assess --type execute --verbose=2 "$dist_app"
+
+    # The first ZIP is the notarization upload. Recreate it so the distributed
+    # archive contains the stapled ticket as well.
+    create_archive
+fi
 
 echo "macOS app: $dist_app"
 echo "Distribution archive: $archive"
 if [[ "$signing_identity" == "-" ]]; then
     echo "The bundle is ad-hoc signed for local testing. Set READWISE_CODESIGN_IDENTITY to a Developer ID Application identity for external distribution."
+elif [[ -z "$notary_profile" ]]; then
+    echo "The bundle is Developer ID signed but not notarized. Set READWISE_NOTARY_PROFILE to a notarytool keychain profile for public distribution."
+else
+    echo "The bundle is Developer ID signed, notarized, stapled, and accepted by Gatekeeper."
 fi

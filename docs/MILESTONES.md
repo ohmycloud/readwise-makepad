@@ -106,7 +106,7 @@
 - [x] i18n（中/英；应用语言可在设置页切换并持久化，动态列表与运行时状态同步本地化）
 - [x] 设置页整合（正文字号、标准/等宽字体、默认/舒适/宽松行距、注音开关/字号/配色、选区色、高亮色与深/浅主题已统一持久化；自定义 UI 已迁移到官方 `theme.*` token）
 - [ ] 性能优化（两轮已完成正文热路径/AI 重绘收窄、整书注音改为当前章惰性缓存；draw batching 与 GC 已审计，启动基线为数据库设置 258ms、书库 850ms，待长书实测后关闭）
-- [ ] 桌面打包分发；iOS TestFlight（macOS `.app`/ZIP、产品元数据、图标与本地/Developer ID 签名脚本已完成；公证、Windows/Linux 包及 TestFlight 待发布凭据或目标环境）
+- [ ] 桌面打包分发；iOS TestFlight（macOS `.app`/ZIP、产品元数据、图标、本地/Developer ID 签名及可选公证/装订/Gatekeeper 校验流程已完成；实际公证、Windows/Linux 包及 TestFlight 待发布凭据或目标环境）
 - [x] 老版本数据迁移（保留旧 SQLite 数据原位升级；schema v2、缺列幂等补齐、完整表/列验证、未来版本拒绝与外键约束已完成）
 
 ## 明确放弃/降级的功能
