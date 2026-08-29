@@ -67,6 +67,46 @@ READWISE_NOTARY_PROFILE="readwise-notary" \
 
 脚本会提交 ZIP 并等待公证结果，随后把票据装订到 `.app`，执行 `stapler validate`、`codesign` 与 Gatekeeper `spctl` 校验，并重新生成包含装订票据的最终 ZIP。证书和公证凭据都不存入仓库。
 
+## Linux 应用包
+
+在 Linux x86_64 或 aarch64 主机上运行：
+
+```bash
+scripts/package_linux.sh
+```
+
+脚本使用本机 ABI 构建 release 可执行文件，生成包含程序、512px 图标和用户级安装器的版本化归档：
+
+```text
+target/dist/ReadWise-linux-<架构>-<版本>.tar.gz
+```
+
+解压后可直接运行 `./ReadWise`，也可执行 `./install-user.sh` 安装到当前用户的 XDG 目录，无需 root 权限。安装器默认写入 `~/.local/bin` 与 `~/.local/share`；可以用 `XDG_BIN_HOME`、`XDG_DATA_HOME` 覆盖。
+
+## Windows 应用包
+
+在 Windows PowerShell 中运行：
+
+```powershell
+pwsh -File scripts/package_windows.ps1
+```
+
+脚本通过本机 Windows 工具链构建带应用图标的 `ReadWise.exe`，并输出：
+
+```text
+target\dist\ReadWise-windows-<架构>-<版本>.zip
+```
+
+默认产物未签名，只适合内部验证。公开分发时可从证书存储按 thumbprint 选择代码签名证书；时间戳服务地址由发布者显式提供，凭据和服务配置不进入仓库：
+
+```powershell
+$env:READWISE_WINDOWS_CERT_THUMBPRINT = "<certificate thumbprint>"
+$env:READWISE_WINDOWS_TIMESTAMP_URL = "<RFC 3161 timestamp URL>"
+pwsh -File scripts/package_windows.ps1
+```
+
+设置证书后，脚本要求 Windows SDK 的 `signtool.exe`，并在归档前使用系统 Authenticode API 验证签名。
+
 ## 运行（iOS）
 
 前置条件：完整版 Xcode（App Store 安装，打开一次接受协议，并在 Settings → Platforms 装好 iOS 支持）。
@@ -105,6 +145,41 @@ cargo makepad apple ios \
   --profile=<profile 名或路径> --cert=<证书标识> --device=<设备标识> \
   run-device -p readwise-app --release
 ```
+
+## Android 应用包
+
+先确保 `cargo-makepad` 与项目锁定的 Makepad 版本一致，再安装 arm64 Android 工具链。ReadWise 的 TLS 依赖会编译原生代码，因此必须安装完整 NDK；默认精简 NDK 不够：
+
+```bash
+cargo install --git https://github.com/makepad/makepad --branch dev cargo-makepad
+cargo makepad android --abi=aarch64 install-toolchain --full-ndk
+cargo fetch --locked --target aarch64-linux-android
+```
+
+生成用于真机测试、由 Makepad 开发证书签名的 release APK：
+
+```bash
+scripts/package_android.sh
+```
+
+产物为：
+
+```text
+target/dist/ReadWise-android-aarch64-<版本>.apk
+```
+
+应用使用 `org.ohmycloud.readwise` 包名、Cargo 版本、API 26 最低版本和 API 35 目标版本。Android 清单只申请 AI/API 通信必需的网络与网络状态权限，不申请相机、麦克风、定位、蓝牙、存储或查询全部应用权限。
+
+如需额外生成 Play Store AAB，提供发布 keystore 和密码。密码通过环境变量传递，不写入命令行或仓库；key alias 默认从 `cargo makepad android keystore-create` 生成的 `.makepad` sidecar 读取：
+
+```bash
+READWISE_ANDROID_KEYSTORE="/secure/path/readwise-upload.keystore" \
+MAKEPAD_KEYSTORE_PASS="<password>" \
+READWISE_ANDROID_VERSION_CODE="<递增整数>" \
+  scripts/package_android.sh
+```
+
+没有发布 keystore 时脚本不会生成可能被误认成正式发布包的 AAB。可用 `READWISE_ANDROID_ABI` 覆盖默认 `aarch64`，用 `READWISE_ANDROID_SDK_PATH` 指向自定义 Makepad Android 工具链目录。
 
 ## 当前验证入口
 

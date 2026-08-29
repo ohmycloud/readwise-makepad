@@ -29,6 +29,20 @@
 - 每种纸张色绑定经过配对的正文色；背景应用在正文列表外层，正文色则在 `ChapterList` 绑定每个 PortalList 可见段落时重新投影，避免滚动复用后局部恢复旧颜色。主题切换、ScriptReapply、窄屏侧栏切换和启动恢复仍走同一 `ReaderSettings` 状态链路。
 - 新增稳定存储值与损坏值回退测试，数据库使用 `reader.background` 与其他阅读设置在同一事务内保存。`cargo check --workspace --offline` 通过；完整测试在允许回环端口的环境 56/56 通过；桌面 App 真实启动无 Splash 解析或设置恢复错误。
 
+## 2026-08-29 — M7 Android release APK 与 Play Store 打包入口（待真机）
+
+- 将 `readwise-app` 的 Makepad 依赖从根 workspace 继承改为 app crate 直接声明同一 git 分支：当前 `cargo-makepad` 会把 app manifest 复制为独立 Android wrapper workspace，原来的 `workspace = true` 在包装后没有 `[workspace.dependencies]` 可继承，真实构建会在解析 manifest 时失败；Cargo.lock 仍固定为同一 Makepad commit。
+- 修正跨平台入口：桌面/iOS 的 stderr logger 与 `main() -> app_main()` 不再参与 Android/OHOS library 构建，由 Makepad 导出的 JNI 原生入口接管。新增 Cargo 产品元数据（ReadWise / `org.ohmycloud.readwise` / versionCode 1 / minSdk 26）、五档 Android launcher icon，以及项目专用 `AndroidManifest.xml.template`。
+- 默认 Makepad 清单会申请相机、录音、定位、蓝牙、媒体存储和查询全部应用等 ReadWise 不需要的权限，现缩减为 `INTERNET` 与 `ACCESS_NETWORK_STATE`；同时关闭系统备份，保留 Makepad Activity 的主题、配置切换和单实例语义。
+- 新增 `scripts/package_android.sh`：默认生成开发证书签名的 arm64 release APK；只有显式提供发布 keystore 与密码时才额外生成 Play Store AAB，密码走环境变量，ABI、SDK 路径和递增 versionCode 均可配置。项目含原生 TLS 依赖，工具链安装必须带 `--full-ndk`；实测还发现旧 `cargo-makepad` 的精简 NDK 目录复制缺陷，因此 README 明确要求 CLI 与锁定 Makepad 对齐。
+- macOS arm64 上已真实生成 43MB `ReadWise-android-aarch64-0.1.0.apk`。`aapt` 验证包名、versionCode/versionName、minSdk 26、targetSdk 35、五档图标和仅两项网络权限；`apksigner` 验证 v2/v3 签名有效且证书为 Android Debug。AAB 发布签名与 Android 真机安装/交互仍待对应凭据和设备。
+
+## 2026-08-29 — M8 Windows/Linux 桌面分发流程（待原生环境实跑）
+
+- 基于当前锁定的 `cargo-makepad desktop build` 实际行为补齐另外两个桌面平台：Linux 不再分发 Makepad 自动生成、指向开发机 `target` 绝对路径的 `.desktop`，而是输出按架构和 Cargo 版本命名的 tar.gz，包含便携可执行文件、产品图标和无需 root 的 XDG 用户安装器。
+- Windows 新增 PowerShell 发布脚本，输出版本化 ZIP；沿用 Makepad 构建期 ICO 资源嵌入，并支持通过 `READWISE_WINDOWS_CERT_THUMBPRINT` 选择系统证书进行 Authenticode SHA-256 签名。时间戳 URL 由发布环境显式传入，签名后由系统 API 复验，证书及服务配置不写入仓库。
+- 两个脚本都拒绝在非目标宿主系统运行，避免把交叉编译或错误 ABI 的文件误标为正式包；使用 `--locked --offline` 固定依赖。Bash 语法、PowerShell AST、平台保护分支和 `git diff --check` 已在 macOS 验证；最终二进制、桌面菜单集成、SmartScreen/Authenticode 仍待对应 Linux/Windows 原生主机实跑。
+
 ## 2026-08-29 — M8 macOS 公证发布闭环（待凭据实跑）
 
 - `scripts/package_macos.sh` 新增可选 `READWISE_NOTARY_PROFILE`：Developer ID 签名并生成上传 ZIP 后，使用钥匙串中的 `notarytool` profile 提交且等待结果，再依次执行票据装订/验证、签名复验和 Gatekeeper `spctl` 评估，最后重新归档，确保交付 ZIP 中包含已装订的 `.app`。

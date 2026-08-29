@@ -10,8 +10,10 @@ mod ruby_word;
 mod sample_chapter;
 
 /// 零依赖的最小 logger：把 core（log 门面）的日志打到 stderr。
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 struct StderrLogger;
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 impl log::Log for StderrLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         metadata.level() <= log::Level::Info
@@ -31,8 +33,10 @@ impl log::Log for StderrLogger {
     fn flush(&self) {}
 }
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 static LOGGER: StderrLogger = StderrLogger;
 
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 fn main() {
     let _ = log::set_logger(&LOGGER).map(|_| log::set_max_level(log::LevelFilter::Info));
     app::app_main()

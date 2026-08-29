@@ -10,8 +10,8 @@
 |------|------|
 | macOS 桌面 | ✅ 已验证 |
 | iOS（iPhone） | ✅ 已验证（真机 + 模拟器） |
-| Windows / Linux 桌面 | 🟡 顺路支持，需补测（无 mac 专属代码；Windows 窗口装饰小差异待处理） |
-| Android | 🟡 顺路支持，需补测（cargo makepad android 打包链路待走） |
+| Windows / Linux 桌面 | 🟡 原生打包脚本已实现，待对应主机实跑与 UI 补测（Windows 窗口装饰小差异待处理） |
+| Android | 🟡 arm64 release APK 已真实构建并校验，待真机安装与交互补测 |
 | **Web (wasm)** | ❌ **明确不做**。Makepad 框架支持 wasm，但 readwise-core 的 sqlx + SQLite + tokio 在浏览器沙箱跑不了（无文件系统/原生线程）。支持 Web 需为 wasm 单独做数据层（IndexedDB/OPFS sqlite-wasm）或改远程架构，违背本地优先设计，不纳入路线图。 |
 
 ## 总体策略
@@ -95,7 +95,7 @@
 
 ## M7 移动端适配
 
-- [ ] cargo-makepad 打包 iOS（真机）/ Android
+- [ ] cargo-makepad 打包 iOS（真机）/ Android（Android arm64 release APK、产品包名/版本、最小权限清单、五档图标、开发签名校验及可选 Play Store AAB 流程已完成；待 Android 真机安装，iOS 分发仍待凭据/上游归档出口）
 - [ ] 触摸交互：横向翻屏、长按选词后拖动扩选已实现（区分纵向滚动/长按/多指）；虚拟键盘显示时隐藏移动底栏并禁用翻屏手势；上述交互均待真机专项验收
 - [ ] 响应式布局：手机上侧栏折叠、单栏阅读（窄屏底栏、阅读面板单栏与安全区已实现，待真机验收）
 - [ ] 移动端文件导入、数据目录、生命周期（iOS Files 多选导入、原生沙箱目录与后台/恢复计时已实现，待真机验收；Android 系统选择器受当前 Makepad Activity 未转发 `onActivityResult` 限制，待上游扩展点或框架升级）
@@ -107,7 +107,7 @@
 - [x] i18n（中/英；应用语言可在设置页切换并持久化，动态列表与运行时状态同步本地化）
 - [x] 设置页整合（正文字号、标准/等宽字体、默认/舒适/宽松行距、纸白/米黄/浅绿/夜间/跟随主题阅读背景、注音开关/字号/配色、选区色、高亮色与深/浅主题已统一持久化；自定义 UI 已迁移到官方 `theme.*` token）
 - [ ] 性能优化（两轮已完成正文热路径/AI 重绘收窄、整书注音改为当前章惰性缓存；draw batching 与 GC 已审计，启动基线为数据库设置 258ms、书库 850ms，待长书实测后关闭）
-- [ ] 桌面打包分发；iOS TestFlight（macOS `.app`/ZIP、产品元数据、图标、本地/Developer ID 签名及可选公证/装订/Gatekeeper 校验流程已完成；实际公证、Windows/Linux 包及 TestFlight 待发布凭据或目标环境）
+- [ ] 桌面打包分发；iOS TestFlight（macOS `.app`/ZIP、公证/装订/Gatekeeper 流程已完成；Linux 原生 tar.gz + XDG 用户安装器、Windows 原生 ZIP + 可选 Authenticode 签名流程已实现；实际公证、Windows/Linux 原生实跑及 TestFlight 待发布凭据或目标环境）
 - [x] 老版本数据迁移（保留旧 SQLite 数据原位升级；schema v2、缺列幂等补齐、完整表/列验证、未来版本拒绝与外键约束已完成）
 
 ## 明确放弃/降级的功能
