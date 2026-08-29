@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 makepad-ai = { workspace = true }
+makepad-code-editor = { workspace = true }
 makepad-widgets = { workspace = true }
 readwise-core = { path = "../core" }
 log = "0.4"

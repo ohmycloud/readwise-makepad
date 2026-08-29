@@ -174,6 +174,23 @@ impl ReaderSwipeGesture {
 
 static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> =
     LazyLock::new(|| RwLock::new(sample_chapter::build_paragraphs(PARA_COUNT)));
+static CODE_BLOCKS: LazyLock<RwLock<Vec<Option<String>>>> = LazyLock::new(|| {
+    RwLock::new(
+        sample_chapter::build_paragraphs(PARA_COUNT)
+            .iter()
+            .map(|chunk| readwise_core::books::epub_meta::code_block_text(chunk))
+            .collect(),
+    )
+});
+
+fn replace_paragraphs(chunks: Vec<String>) {
+    let code_blocks = chunks
+        .iter()
+        .map(|chunk| readwise_core::books::epub_meta::code_block_text(chunk))
+        .collect();
+    *CODE_BLOCKS.write().unwrap() = code_blocks;
+    *PARAGRAPHS.write().unwrap() = chunks;
+}
 
 /// 全局数据库句柄：后台线程初始化后写入，各处只读使用。
 static DB: OnceLock<readwise_core::Db> = OnceLock::new();
@@ -2289,6 +2306,26 @@ script_mod! {
                     mark := mod.widgets.MarkSpan{}
                 }
             }
+            CodePara := RoundedView{
+                width: Fill height: Fit
+                new_batch: true
+                margin: Inset{top: 4 bottom: 4 left: 2 right: 2}
+                padding: Inset{top: 10 bottom: 10 left: 12 right: 12}
+                draw_bg.color: #x20252b
+                draw_bg.border_radius: 7.0
+                code_view := mod.widgets.CodeView{
+                    editor +: {
+                        width: Fill
+                        height: Fit
+                        word_wrap: false
+                        show_gutter: false
+                        draw_bg +: {color: #0000}
+                        draw_text +: {
+                            text_style +: {font_size: 10.5 line_spacing: 1.35}
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3726,6 +3763,7 @@ impl ChapterList {
 impl Widget for ChapterList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let paragraphs = PARAGRAPHS.read().unwrap();
+        let code_blocks = CODE_BLOCKS.read().unwrap();
         let reader_font = *READER_FONT.read().unwrap();
         let reader_spacing = *READER_SPACING.read().unwrap();
         let (_, reader_text_color) = reader_palette(
@@ -3771,34 +3809,45 @@ impl Widget for ChapterList {
                     let Some(para) = paragraphs.get(item_id) else {
                         continue;
                     };
+                    let code_text = code_blocks.get(item_id).and_then(Option::as_deref);
                     let has_gloss = para.contains("<ruby");
-                    let template = if has_gloss { id!(GlossPara) } else { id!(Para) };
+                    let template = if code_text.is_some() {
+                        id!(CodePara)
+                    } else if has_gloss {
+                        id!(GlossPara)
+                    } else {
+                        id!(Para)
+                    };
                     let line_spacing = if has_gloss {
                         reader_spacing.gloss_line_spacing()
                     } else {
                         reader_spacing.plain_line_spacing()
                     };
                     let item = list.item(cx, item_id, template);
-                    let html = item.widget(cx, ids!(para_html));
-                    if let Some(mut inner) = html.borrow_mut::<Html>() {
-                        if inner.body.as_ref() != para {
-                            inner.set_text(cx, para);
-                        }
-                        inner.text_flow.selectable = !self.compact_layout;
-                        inner.text_flow.font_size = reader_font_size;
-                        inner.text_flow.font_color = reader_text_color;
-                        inner.text_flow.draw_text.color = reader_text_color;
-                        inner.text_flow.draw_selection.color = selection_color;
-                        inner.text_flow.text_style_normal.font_family = normal_family.clone();
-                        inner.text_flow.text_style_italic.font_family = italic_family.clone();
-                        inner.text_flow.text_style_bold.font_family = bold_family.clone();
-                        inner.text_flow.text_style_bold_italic.font_family =
-                            bold_italic_family.clone();
-                        inner.text_flow.text_style_normal.line_spacing = line_spacing;
-                        inner.text_flow.text_style_italic.line_spacing = line_spacing;
-                        inner.text_flow.text_style_bold.line_spacing = line_spacing;
-                        inner.text_flow.text_style_bold_italic.line_spacing = line_spacing;
-                        inner.text_flow.text_style_fixed.line_spacing = line_spacing;
+                    if let Some(code_text) = code_text {
+                        item.widget(cx, ids!(code_view)).set_text(cx, code_text);
+                    } else {
+                        let html = item.widget(cx, ids!(para_html));
+                        if let Some(mut inner) = html.borrow_mut::<Html>() {
+                            if inner.body.as_ref() != para {
+                                inner.set_text(cx, para);
+                            }
+                            inner.text_flow.selectable = !self.compact_layout;
+                            inner.text_flow.font_size = reader_font_size;
+                            inner.text_flow.font_color = reader_text_color;
+                            inner.text_flow.draw_text.color = reader_text_color;
+                            inner.text_flow.draw_selection.color = selection_color;
+                            inner.text_flow.text_style_normal.font_family = normal_family.clone();
+                            inner.text_flow.text_style_italic.font_family = italic_family.clone();
+                            inner.text_flow.text_style_bold.font_family = bold_family.clone();
+                            inner.text_flow.text_style_bold_italic.font_family =
+                                bold_italic_family.clone();
+                            inner.text_flow.text_style_normal.line_spacing = line_spacing;
+                            inner.text_flow.text_style_italic.line_spacing = line_spacing;
+                            inner.text_flow.text_style_bold.line_spacing = line_spacing;
+                            inner.text_flow.text_style_bold_italic.line_spacing = line_spacing;
+                            inner.text_flow.text_style_fixed.line_spacing = line_spacing;
+                        };
                     }
                     if let Some((start, end)) = selection_range {
                         if item_id < start.0 || item_id > end.0 {
@@ -6211,7 +6260,7 @@ impl App {
         self.close_note_composer(cx);
         self.chapter_idx = idx;
         CURRENT_CHAPTER.store(idx, std::sync::atomic::Ordering::Relaxed);
-        *PARAGRAPHS.write().unwrap() = chunks;
+        replace_paragraphs(chunks);
         self.ui
             .label(cx, ids!(title))
             .set_text(cx, &format!("《{}》", title));
@@ -6486,7 +6535,7 @@ impl App {
                 .and_then(|b| build_chapter_chunks(b, self.chapter_idx))
         };
         if let Some(chunks) = chunks {
-            *PARAGRAPHS.write().unwrap() = chunks;
+            replace_paragraphs(chunks);
         }
         self.ui.redraw(cx);
     }
@@ -8342,7 +8391,7 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(reload_button)).clicked(actions) {
             self.reload_count += 1;
-            *PARAGRAPHS.write().unwrap() = sample_chapter::build_paragraphs(PARA_COUNT);
+            replace_paragraphs(sample_chapter::build_paragraphs(PARA_COUNT));
             let status = if app_language() == AppLanguage::English {
                 format!("Rendered {} times", self.reload_count)
             } else {
@@ -8383,6 +8432,7 @@ impl AppMain for App {
             mod.readwise_theme_light = mod.themes.light{}
         });
         makepad_widgets::widgets_mod(vm);
+        makepad_code_editor::script_mod(vm);
         crate::ruby_word::script_mod(vm);
         crate::chapter_image::script_mod(vm);
         crate::mark_span::script_mod(vm);

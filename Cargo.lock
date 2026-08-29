@@ -989,6 +989,14 @@ version = "0.1.0"
 source = "git+https://github.com/makepad/makepad?branch=dev#4f9ce7a8bb3fd19e5c61dcf13edd2e6d4a04cefc"
 
 [[package]]
+name = "makepad-code-editor"
+version = "2.0.0"
+source = "git+https://github.com/makepad/makepad?branch=dev#4f9ce7a8bb3fd19e5c61dcf13edd2e6d4a04cefc"
+dependencies = [
+ "makepad-widgets",
+]
+
+[[package]]
 name = "makepad-derive-wasm-bridge"
 version = "1.0.0"
 source = "git+https://github.com/makepad/makepad?branch=dev#4f9ce7a8bb3fd19e5c61dcf13edd2e6d4a04cefc"
@@ -1745,6 +1753,7 @@ version = "0.1.0"
 dependencies = [
  "log 0.4.33",
  "makepad-ai",
+ "makepad-code-editor",
  "makepad-widgets",
  "readwise-core",
  "serde_json",

@@ -355,6 +355,9 @@ pub fn rendered_text(html: &str) -> String {
                 .collect::<String>()
                 .to_lowercase();
             i += gt_rel + 1;
+            if !tag.starts_with('/') && name == "br" {
+                out.push('\n');
+            }
             if !tag.starts_with('/') && (name == "ruby" || name == "mark") {
                 let close = format!("</{}>", name);
                 let Some(close_rel) = html[i..].find(&close) else {
@@ -587,6 +590,7 @@ mod tests {
         ];
         assert_eq!(rendered_text(&blocks[0]), "A & word.");
         assert_eq!(rendered_text(&blocks[1]), "Next line");
+        assert_eq!(rendered_text("<pre>a<br>  b</pre>"), "a\n  b");
         assert_eq!(
             rendered_text_for_range(&blocks, ((0, 4), (1, 4))),
             "word.\nNext"

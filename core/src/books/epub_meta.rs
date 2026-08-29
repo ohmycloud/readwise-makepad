@@ -298,6 +298,101 @@ pub fn split_blocks(html: &str) -> Vec<String> {
     blocks
 }
 
+/// 从一个顶层 `<pre>` 块中恢复供原生代码视图使用的纯文本。
+/// EPUB 常用 span 包裹语法 token，并用实体表示源码中的尖括号；这些
+/// 展示标记应被剥掉，但缩进、空格、显式换行和注释文本必须原样保留。
+pub fn code_block_text(html: &str) -> Option<String> {
+    let trimmed = html.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let pre_start = lower.find("<pre")?;
+    if !trimmed[..pre_start].trim().is_empty() {
+        return None;
+    }
+    let open_end = lower[pre_start..].find('>')? + pre_start;
+    let close_start = lower.rfind("</pre>")?;
+    if close_start <= open_end || !trimmed[close_start + 6..].trim().is_empty() {
+        return None;
+    }
+
+    fn decode_entity(entity: &str) -> Option<char> {
+        match entity {
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "amp" => Some('&'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            value if value.starts_with("#x") || value.starts_with("#X") => {
+                u32::from_str_radix(&value[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            value if value.starts_with('#') => {
+                value[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        }
+    }
+
+    let fragment = &trimmed[open_end + 1..close_start];
+    let mut text = String::with_capacity(fragment.len());
+    let mut skip_mark_metadata = false;
+    let mut i = 0;
+    while i < fragment.len() {
+        let rest = &fragment[i..];
+        if rest.starts_with('<') {
+            let Some(gt) = rest.find('>') else {
+                text.push_str(rest);
+                break;
+            };
+            let tag = &rest[1..gt];
+            let name = tag
+                .trim_start_matches('/')
+                .split(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !tag.starts_with('/') && name == "br" {
+                text.push('\n');
+            }
+            if tag.starts_with('/') && name == "mark" {
+                skip_mark_metadata = false;
+            }
+            i += gt + 1;
+            continue;
+        }
+        if rest.starts_with('&') {
+            if let Some(end) = rest.find(';').filter(|end| *end <= 12) {
+                if let Some(decoded) = decode_entity(&rest[1..end]) {
+                    if !skip_mark_metadata {
+                        text.push(decoded);
+                    }
+                    i += end + 1;
+                    continue;
+                }
+            }
+        }
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == crate::vocab::annotate::MARK_SEP {
+            skip_mark_metadata = true;
+        } else if !skip_mark_metadata {
+            text.push(ch);
+        }
+        i += ch.len_utf8();
+    }
+
+    let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if text.starts_with('\n') {
+        text.remove(0);
+    }
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    Some(text)
+}
+
 /// 取 <body> 内部内容；解析失败原样返回。
 fn extract_body(xhtml: &str) -> String {
     let lower = xhtml.to_lowercase();
@@ -342,6 +437,26 @@ mod tests {
                 "<blockquote><p>a</p><p>b</p></blockquote>".to_string(),
                 "<p>c</p>".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn code_block_text_preserves_source_layout_and_decodes_entities() {
+        let html = concat!(
+            "<pre class=\"language-rust\"><code>",
+            "<span class=\"kw\">fn</span> main() {\r\n",
+            "    <span class=\"comment\">// keep this comment</span><br>",
+            "    println!(&quot;answer: {}&quot;, 6 &lt;&lt; 1);\n",
+            "}</code></pre>"
+        );
+        assert_eq!(
+            code_block_text(html).as_deref(),
+            Some("fn main() {\n    // keep this comment\n    println!(\"answer: {}\", 6 << 1);\n}")
+        );
+        assert_eq!(code_block_text("<p>inline <code>x</code></p>"), None);
+        assert_eq!(
+            code_block_text("<pre><mark>let x = 1;\u{E001}blue</mark></pre>").as_deref(),
+            Some("let x = 1;")
         );
     }
 }
