@@ -45,6 +45,38 @@ impl ReaderTheme {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderBackground {
+    FollowTheme,
+    #[default]
+    Paper,
+    Sepia,
+    Sage,
+    Night,
+}
+
+impl ReaderBackground {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FollowTheme => "theme",
+            Self::Paper => "paper",
+            Self::Sepia => "sepia",
+            Self::Sage => "sage",
+            Self::Night => "night",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "theme" => Self::FollowTheme,
+            "sepia" => Self::Sepia,
+            "sage" => Self::Sage,
+            "night" => Self::Night,
+            _ => Self::Paper,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderFont {
     #[default]
     Standard,
@@ -113,6 +145,7 @@ impl ReaderSpacing {
 pub struct ReaderSettings {
     pub language: AppLanguage,
     pub theme: ReaderTheme,
+    pub background: ReaderBackground,
     pub font: ReaderFont,
     pub spacing: ReaderSpacing,
     pub font_size: Option<f32>,
@@ -131,6 +164,7 @@ impl Default for ReaderSettings {
         Self {
             language: AppLanguage::Chinese,
             theme: ReaderTheme::Dark,
+            background: ReaderBackground::Paper,
             font: ReaderFont::Standard,
             spacing: ReaderSpacing::Default,
             font_size: None,
@@ -196,6 +230,23 @@ mod tests {
         assert_eq!(ReaderTheme::Light.as_str(), "light");
         assert_eq!(ReaderTheme::from_str("light"), ReaderTheme::Light);
         assert_eq!(ReaderTheme::from_str("unknown"), ReaderTheme::Dark);
+    }
+
+    #[test]
+    fn reader_background_uses_stable_storage_values() {
+        for background in [
+            ReaderBackground::FollowTheme,
+            ReaderBackground::Paper,
+            ReaderBackground::Sepia,
+            ReaderBackground::Sage,
+            ReaderBackground::Night,
+        ] {
+            assert_eq!(ReaderBackground::from_str(background.as_str()), background);
+        }
+        assert_eq!(
+            ReaderBackground::from_str("unknown"),
+            ReaderBackground::Paper
+        );
     }
 
     #[test]

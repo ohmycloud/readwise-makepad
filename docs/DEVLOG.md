@@ -2,6 +2,12 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-29 — M8 阅读器纸张背景
+
+- 设置页新增独立于应用深浅主题的“阅读背景”：纸白、米黄、浅绿、夜间与跟随主题。新安装及尚未保存该键的旧数据默认使用纸白，解决正文只能透出应用灰底的问题。
+- 每种纸张色绑定经过配对的正文色；背景应用在正文列表外层，正文色则在 `ChapterList` 绑定每个 PortalList 可见段落时重新投影，避免滚动复用后局部恢复旧颜色。主题切换、ScriptReapply、窄屏侧栏切换和启动恢复仍走同一 `ReaderSettings` 状态链路。
+- 新增稳定存储值与损坏值回退测试，数据库使用 `reader.background` 与其他阅读设置在同一事务内保存。`cargo check --workspace --offline` 通过；完整测试在允许回环端口的环境 56/56 通过；桌面 App 真实启动无 Splash 解析或设置恢复错误。
+
 ## 2026-08-29 — M8 macOS 公证发布闭环（待凭据实跑）
 
 - `scripts/package_macos.sh` 新增可选 `READWISE_NOTARY_PROFILE`：Developer ID 签名并生成上传 ZIP 后，使用钥匙串中的 `notarytool` profile 提交且等待结果，再依次执行票据装订/验证、签名复验和 Gatekeeper `spctl` 评估，最后重新归档，确保交付 ZIP 中包含已装订的 `.app`。

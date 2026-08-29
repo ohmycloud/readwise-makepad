@@ -14,6 +14,7 @@ type AiSettings = readwise_core::ai::AiSettings;
 type AppLanguage = readwise_core::settings::AppLanguage;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
+type ReaderBackground = readwise_core::settings::ReaderBackground;
 type ReaderFont = readwise_core::settings::ReaderFont;
 type ReaderSpacing = readwise_core::settings::ReaderSpacing;
 type ReaderSettings = readwise_core::settings::ReaderSettings;
@@ -1094,6 +1095,10 @@ static GLOSS_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(true
 static READER_THEME: LazyLock<RwLock<ReaderTheme>> =
     LazyLock::new(|| RwLock::new(ReaderTheme::Dark));
 
+/// 阅读正文的独立纸张配色，不改变侧栏、设置页等应用级主题。
+static READER_BACKGROUND: LazyLock<RwLock<ReaderBackground>> =
+    LazyLock::new(|| RwLock::new(ReaderBackground::Paper));
+
 /// 应用界面语言；正文内容与书籍元数据保持原文。
 static APP_LANGUAGE: LazyLock<RwLock<AppLanguage>> =
     LazyLock::new(|| RwLock::new(AppLanguage::Chinese));
@@ -1121,6 +1126,18 @@ static READER_FONT: LazyLock<RwLock<ReaderFont>> =
 /// EPUB 正文行距；带注音段落始终比普通段落保留更多垂直空间。
 static READER_SPACING: LazyLock<RwLock<ReaderSpacing>> =
     LazyLock::new(|| RwLock::new(ReaderSpacing::Default));
+
+fn reader_palette(background: ReaderBackground, theme: ReaderTheme) -> (Vec4f, Vec4f) {
+    let (surface, text) = match background {
+        ReaderBackground::FollowTheme if theme == ReaderTheme::Light => (0xd9d9_d9ff, 0x3333_33ff),
+        ReaderBackground::FollowTheme => (0x4d4d_4dff, 0xd9d9_d9ff),
+        ReaderBackground::Paper => (0xf7f4_eaff, 0x2b29_25ff),
+        ReaderBackground::Sepia => (0xf2e3_c6ff, 0x3b30_25ff),
+        ReaderBackground::Sage => (0xe7ef_e3ff, 0x2734_2bff),
+        ReaderBackground::Night => (0x2025_2bff, 0xd8d4_caff),
+    };
+    (Vec4f::from_u32(surface), Vec4f::from_u32(text))
+}
 
 static READER_SETTINGS_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
 static READER_SETTINGS_SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -1754,6 +1771,7 @@ fn current_reader_settings() -> ReaderSettings {
     ReaderSettings {
         language: *APP_LANGUAGE.read().unwrap(),
         theme: *READER_THEME.read().unwrap(),
+        background: *READER_BACKGROUND.read().unwrap(),
         font: *READER_FONT.read().unwrap(),
         spacing: *READER_SPACING.read().unwrap(),
         font_size: *READER_FONT_SIZE.read().unwrap(),
@@ -2427,7 +2445,12 @@ script_mod! {
                                     draw_bg.color: theme.color_bg_app
                                     toc_list := mod.widgets.TocList{}
                                     }
-                                    chapter_list := mod.widgets.ChapterList{}
+                                    reader_surface := SolidView{
+                                        width: Fill height: Fill
+                                        new_batch: true
+                                        draw_bg.color: #xf7f4ea
+                                        chapter_list := mod.widgets.ChapterList{}
+                                    }
                                     note_panel := SolidView{
                                     visible: false
                                     width: 320 height: Fill
@@ -3010,6 +3033,17 @@ script_mod! {
                                 theme_label := Label{text: "外观主题"}
                                 theme_dark := RadioButtonTabFlat{text: "深色"}
                                 theme_light := RadioButtonTabFlat{text: "浅色"}
+                            }
+                            reader_background_row := View{
+                                width: Fill height: Fit
+                                flow: Flow.Right{wrap: true} spacing: 12
+                                align: Align{y: 0.5}
+                                reader_background_label := Label{text: "阅读背景"}
+                                reader_background_paper := RadioButtonTabFlat{text: "纸白"}
+                                reader_background_sepia := RadioButtonTabFlat{text: "米黄"}
+                                reader_background_sage := RadioButtonTabFlat{text: "浅绿"}
+                                reader_background_night := RadioButtonTabFlat{text: "夜间"}
+                                reader_background_theme := RadioButtonTabFlat{text: "跟随主题"}
                             }
                             font_family_row := View{
                                 width: Fill height: Fit
@@ -3694,6 +3728,10 @@ impl Widget for ChapterList {
         let paragraphs = PARAGRAPHS.read().unwrap();
         let reader_font = *READER_FONT.read().unwrap();
         let reader_spacing = *READER_SPACING.read().unwrap();
+        let (_, reader_text_color) = reader_palette(
+            *READER_BACKGROUND.read().unwrap(),
+            *READER_THEME.read().unwrap(),
+        );
         let reader_font_size = READER_FONT_SIZE
             .read()
             .unwrap()
@@ -3748,6 +3786,8 @@ impl Widget for ChapterList {
                         }
                         inner.text_flow.selectable = !self.compact_layout;
                         inner.text_flow.font_size = reader_font_size;
+                        inner.text_flow.font_color = reader_text_color;
+                        inner.text_flow.draw_text.color = reader_text_color;
                         inner.text_flow.draw_selection.color = selection_color;
                         inner.text_flow.text_style_normal.font_family = normal_family.clone();
                         inner.text_flow.text_style_italic.font_family = italic_family.clone();
@@ -4569,6 +4609,41 @@ impl App {
         );
     }
 
+    fn sync_reader_background_controls(&self, cx: &mut Cx, background: ReaderBackground) {
+        for (id, option) in [
+            (id!(reader_background_paper), ReaderBackground::Paper),
+            (id!(reader_background_sepia), ReaderBackground::Sepia),
+            (id!(reader_background_sage), ReaderBackground::Sage),
+            (id!(reader_background_night), ReaderBackground::Night),
+            (id!(reader_background_theme), ReaderBackground::FollowTheme),
+        ] {
+            self.ui
+                .radio_button(cx, &[id])
+                .set_active(cx, background == option, Animate::No);
+        }
+    }
+
+    fn apply_reader_background(&self, cx: &mut Cx, background: ReaderBackground) {
+        let (surface_color, _) = reader_palette(background, *READER_THEME.read().unwrap());
+        let mut surface = self.ui.widget(cx, ids!(reader_surface));
+        script_apply_eval!(cx, surface, {
+            draw_bg.color: #(surface_color)
+        });
+        self.ui.widget(cx, ids!(chapter_list)).redraw(cx);
+    }
+
+    fn set_reader_background(&mut self, cx: &mut Cx, background: ReaderBackground) {
+        if *READER_BACKGROUND.read().unwrap() == background {
+            self.sync_reader_background_controls(cx, background);
+            self.apply_reader_background(cx, background);
+            return;
+        }
+        *READER_BACKGROUND.write().unwrap() = background;
+        self.sync_reader_background_controls(cx, background);
+        self.apply_reader_background(cx, background);
+        self.persist_reader_settings(cx);
+    }
+
     fn sync_app_language_controls(&self, cx: &mut Cx, language: AppLanguage) {
         self.ui.radio_button(cx, ids!(language_chinese)).set_active(
             cx,
@@ -4714,6 +4789,12 @@ impl App {
         set_text!(theme_label, "appearance_theme");
         set_text!(theme_dark, "dark");
         set_text!(theme_light, "light");
+        set_text!(reader_background_label, "reader_background");
+        set_text!(reader_background_paper, "background_paper");
+        set_text!(reader_background_sepia, "background_sepia");
+        set_text!(reader_background_sage, "background_sage");
+        set_text!(reader_background_night, "background_night");
+        set_text!(reader_background_theme, "background_theme");
         set_text!(font_family_label, "body_font");
         set_text!(reader_font_standard, "standard");
         set_text!(reader_font_monospace, "monospace");
@@ -4855,6 +4936,7 @@ impl App {
         }
         *READER_THEME.write().unwrap() = theme;
         self.sync_theme_controls(cx, theme);
+        self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
         self.persist_reader_settings(cx);
         self.apply_runtime_theme(cx, theme);
     }
@@ -4995,7 +5077,7 @@ impl App {
             chapter_list.set_compact_layout(cx, self.compact_layout);
         }
         self.ui
-            .widget(cx, ids!(chapter_list))
+            .widget(cx, ids!(reader_surface))
             .set_visible(cx, !self.compact_layout || !panel_open);
         self.ui
             .widget(cx, ids!(toc_panel))
@@ -6343,6 +6425,7 @@ impl App {
         let theme_changed = *READER_THEME.read().unwrap() != settings.theme;
         *APP_LANGUAGE.write().unwrap() = settings.language;
         *READER_THEME.write().unwrap() = settings.theme;
+        *READER_BACKGROUND.write().unwrap() = settings.background;
         *READER_FONT.write().unwrap() = settings.font;
         *READER_SPACING.write().unwrap() = settings.spacing;
         *READER_FONT_SIZE.write().unwrap() = settings.font_size;
@@ -6371,6 +6454,8 @@ impl App {
             Animate::No,
         );
         self.sync_theme_controls(cx, settings.theme);
+        self.sync_reader_background_controls(cx, settings.background);
+        self.apply_reader_background(cx, settings.background);
         self.sync_app_language_controls(cx, settings.language);
         self.apply_ui_language(cx, settings.language);
         self.sync_reader_font_controls(cx, settings.font);
@@ -7876,6 +7961,31 @@ impl MatchEvent for App {
                     ReaderTheme::Dark
                 } else {
                     ReaderTheme::Light
+                },
+            );
+        }
+        if let Some(index) = self
+            .ui
+            .radio_button_set(
+                cx,
+                ids_array!(
+                    reader_background_paper,
+                    reader_background_sepia,
+                    reader_background_sage,
+                    reader_background_night,
+                    reader_background_theme
+                ),
+            )
+            .selected(cx, actions)
+        {
+            self.set_reader_background(
+                cx,
+                match index {
+                    1 => ReaderBackground::Sepia,
+                    2 => ReaderBackground::Sage,
+                    3 => ReaderBackground::Night,
+                    4 => ReaderBackground::FollowTheme,
+                    _ => ReaderBackground::Paper,
                 },
             );
         }

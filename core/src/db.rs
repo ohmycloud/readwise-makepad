@@ -348,6 +348,9 @@ impl Db {
                     "reader.theme" => {
                         settings.theme = crate::settings::ReaderTheme::from_str(&value)
                     }
+                    "reader.background" => {
+                        settings.background = crate::settings::ReaderBackground::from_str(&value)
+                    }
                     "reader.font" => settings.font = crate::settings::ReaderFont::from_str(&value),
                     "reader.spacing" => {
                         settings.spacing = crate::settings::ReaderSpacing::from_str(&value)
@@ -398,6 +401,7 @@ impl Db {
             let now = chrono::Utc::now().timestamp_millis();
             let language = settings.language.as_str();
             let theme = settings.theme.as_str();
+            let background = settings.background.as_str();
             let font = settings.font.as_str();
             let spacing = settings.spacing.as_str();
             let font_size = settings.font_size.map(|value| value.to_string()).unwrap_or_default();
@@ -412,6 +416,7 @@ impl Db {
             let values = [
                 ("reader.language", language),
                 ("reader.theme", theme),
+                ("reader.background", background),
                 ("reader.font", font),
                 ("reader.spacing", spacing),
                 ("reader.font_size", font_size.as_str()),
