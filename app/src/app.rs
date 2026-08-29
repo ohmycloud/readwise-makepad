@@ -1156,6 +1156,211 @@ fn reader_palette(background: ReaderBackground, theme: ReaderTheme) -> (Vec4f, V
     (Vec4f::from_u32(surface), Vec4f::from_u32(text))
 }
 
+#[derive(Clone, Copy)]
+struct ReaderScenePalette {
+    surface: Vec4f,
+    text: Vec4f,
+    field: Vec4f,
+    border: Vec4f,
+    muted: Vec4f,
+    accent: Vec4f,
+    hover: Vec4f,
+    pressed: Vec4f,
+}
+
+fn reader_scene_palette(background: ReaderBackground, theme: ReaderTheme) -> ReaderScenePalette {
+    let (surface, text) = reader_palette(background, theme);
+    let values = match background {
+        ReaderBackground::Paper => (
+            0xe9e4_d7ff,
+            0xd5cd_bdff,
+            0x716a_60ff,
+            0x805d_35ff,
+            0x2b29_2514,
+            0x2b29_2528,
+        ),
+        ReaderBackground::Sepia => (
+            0xe2cf_acff,
+            0xccb9_95ff,
+            0x7562_4eff,
+            0x8556_2fff,
+            0x3b30_2514,
+            0x3b30_2528,
+        ),
+        ReaderBackground::Sage => (
+            0xd3df_cfff,
+            0xbecd_b8ff,
+            0x6070_65ff,
+            0x3e68_50ff,
+            0x2734_2b14,
+            0x2734_2b28,
+        ),
+        ReaderBackground::Night => (
+            0x343b_43ff,
+            0x4650_5aff,
+            0x9a9b_99ff,
+            0xb7c9_a6ff,
+            0xffffff14,
+            0xffffff28,
+        ),
+        ReaderBackground::FollowTheme if theme == ReaderTheme::Light => (
+            0xc7c7_c7ff,
+            0xb9b9_b9ff,
+            0x6868_68ff,
+            0x365f_8dff,
+            0x3333_3314,
+            0x3333_3328,
+        ),
+        ReaderBackground::FollowTheme => (
+            0x5959_59ff,
+            0x6868_68ff,
+            0xaaaa_aaff,
+            0xb8c8_dcff,
+            0xffffff14,
+            0xffffff28,
+        ),
+    };
+    ReaderScenePalette {
+        surface,
+        text,
+        field: Vec4f::from_u32(values.0),
+        border: Vec4f::from_u32(values.1),
+        muted: Vec4f::from_u32(values.2),
+        accent: Vec4f::from_u32(values.3),
+        hover: Vec4f::from_u32(values.4),
+        pressed: Vec4f::from_u32(values.5),
+    }
+}
+
+fn navigation_palette_for_page(
+    page: AppPage,
+    background: ReaderBackground,
+    theme: ReaderTheme,
+) -> ReaderScenePalette {
+    if page == AppPage::Reader {
+        reader_scene_palette(background, theme)
+    } else {
+        reader_scene_palette(ReaderBackground::FollowTheme, theme)
+    }
+}
+
+fn apply_reader_button_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
+    let text = palette.text;
+    let field = palette.field;
+    let border = palette.border;
+    let hover = palette.hover;
+    let pressed = palette.pressed;
+    script_apply_eval!(cx, widget, {
+        draw_text +: {
+            color: #(text)
+            color_hover: #(text)
+            color_down: #(text)
+            color_focus: #(text)
+        }
+        draw_bg +: {
+            color: #(field)
+            color_hover: #(hover)
+            color_down: #(pressed)
+            color_focus: #(hover)
+            border_color: #(border)
+            border_color_hover: #(border)
+            border_color_down: #(border)
+            border_color_focus: #(border)
+        }
+    });
+}
+
+fn apply_reader_input_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
+    let text = palette.text;
+    let muted = palette.muted;
+    let field = palette.field;
+    let surface = palette.surface;
+    let border = palette.border;
+    script_apply_eval!(cx, widget, {
+        draw_bg +: {
+            color: #(field)
+            color_hover: #(field)
+            color_focus: #(surface)
+            color_down: #(field)
+            color_empty: #(field)
+            border_color: #(border)
+            border_color_hover: #(border)
+            border_color_focus: #(border)
+            border_color_down: #(border)
+            border_color_empty: #(border)
+        }
+        draw_text +: {
+            color: #(text)
+            color_hover: #(text)
+            color_focus: #(text)
+            color_down: #(text)
+            color_empty: #(muted)
+            color_empty_hover: #(muted)
+            color_empty_focus: #(muted)
+        }
+    });
+}
+
+fn apply_reader_surface_palette(cx: &mut Cx, mut widget: WidgetRef, color: Vec4f, border: Vec4f) {
+    script_apply_eval!(cx, widget, {
+        draw_bg +: {
+            color: #(color)
+            border_color: #(border)
+        }
+    });
+}
+
+fn apply_reader_label_palette(cx: &mut Cx, mut widget: WidgetRef, color: Vec4f) {
+    script_apply_eval!(cx, widget, {
+        draw_text.color: #(color)
+    });
+}
+
+#[cfg(test)]
+mod reader_scene_palette_tests {
+    use super::*;
+
+    #[test]
+    fn scene_surface_and_text_share_the_canonical_reader_palette() {
+        for theme in [ReaderTheme::Dark, ReaderTheme::Light] {
+            for background in [
+                ReaderBackground::FollowTheme,
+                ReaderBackground::Paper,
+                ReaderBackground::Sepia,
+                ReaderBackground::Sage,
+                ReaderBackground::Night,
+            ] {
+                let (surface, text) = reader_palette(background, theme);
+                let scene = reader_scene_palette(background, theme);
+                assert_eq!(scene.surface, surface);
+                assert_eq!(scene.text, text);
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_joins_reader_palette_only_on_the_reader_page() {
+        let reader = navigation_palette_for_page(
+            AppPage::Reader,
+            ReaderBackground::Sepia,
+            ReaderTheme::Dark,
+        );
+        let library = navigation_palette_for_page(
+            AppPage::Library,
+            ReaderBackground::Sepia,
+            ReaderTheme::Dark,
+        );
+        assert_eq!(
+            reader.surface,
+            reader_palette(ReaderBackground::Sepia, ReaderTheme::Dark).0
+        );
+        assert_eq!(
+            library.surface,
+            reader_palette(ReaderBackground::FollowTheme, ReaderTheme::Dark).0
+        );
+    }
+}
+
 static READER_SETTINGS_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
 static READER_SETTINGS_SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -2042,6 +2247,9 @@ script_mod! {
         width: Fill height: Fill
         active_bg: theme.color_bg_highlight_inline
         inactive_bg: theme.color_bg_app
+        text_color: theme.color_text
+        button_hover: theme.color_bg_highlight
+        button_pressed: theme.color_bg_highlight_inline
         list := PortalList{
             width: Fill height: Fill
             padding: Inset{ left: 8 right: 8 top: 8 bottom: 8 }
@@ -2385,6 +2593,9 @@ script_mod! {
             main_window := Window{
                 window.title: "ReadWise"
                 window.inner_size: vec2(1080, 720)
+                caption_bar +: {
+                    new_batch: true
+                }
                 body +: {
                     flow: Overlay
                     app_content := View{
@@ -2497,13 +2708,15 @@ script_mod! {
                             }
                         }
 
-                        page_reader := View{
+                        page_reader := SolidView{
                             width: Fill height: Fill
                             flow: Down
-                            header := View{
+                            draw_bg.color: #xf7f4ea
+                            header := SolidView{
                                 width: Fill height: Fit
                                 padding: 12 spacing: 12
                                 align: Align{ y: 0.5 }
+                                draw_bg.color: #xf0ecdf
                                 toc_btn := ButtonFlat{ text: "目录" }
                                 notes_btn := ButtonFlat{ text: "笔记" }
                                 reader_ai_btn := ButtonFlat{ text: "AI" }
@@ -2519,9 +2732,10 @@ script_mod! {
                                     draw_text.text_style.font_size: 9.5
                                 }
                             }
-                            reader_body := View{
+                            reader_body := SolidView{
                                 width: Fill height: Fill
                                 flow: Overlay
+                                draw_bg.color: #xf7f4ea
                                 reader_columns := View{
                                     width: Fill height: Fill
                                     flow: Right
@@ -2631,7 +2845,7 @@ script_mod! {
                                         draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
-                                    reader_chat_list := mod.widgets.ChatList{}
+                                    reader_chat_list := mod.widgets.ChatList{reader_style: true}
                                     reader_ai_composer := View{
                                         width: Fill height: Fit
                                         flow: Down spacing: 8
@@ -3965,6 +4179,12 @@ struct TocList {
     active_bg: Vec4f,
     #[live]
     inactive_bg: Vec4f,
+    #[live]
+    text_color: Vec4f,
+    #[live]
+    button_hover: Vec4f,
+    #[live]
+    button_pressed: Vec4f,
 }
 
 impl Widget for TocList {
@@ -3986,7 +4206,29 @@ impl Widget for TocList {
                     let item = list.item(cx, item_id, id!(TocItem));
                     let text = format!("{}. {}", item_id + 1, title);
                     let mut item_mut = item.clone();
-                    item.button(cx, ids!(toc_item_btn)).set_text(cx, &text);
+                    let mut button = item.widget(cx, ids!(toc_item_btn));
+                    button.set_text(cx, &text);
+                    let text_color = self.text_color;
+                    let button_hover = self.button_hover;
+                    let button_pressed = self.button_pressed;
+                    script_apply_eval!(cx, button, {
+                        draw_text +: {
+                            color: #(text_color)
+                            color_hover: #(text_color)
+                            color_down: #(text_color)
+                            color_focus: #(text_color)
+                        }
+                        draw_bg +: {
+                            color: #0000
+                            color_hover: #(button_hover)
+                            color_down: #(button_pressed)
+                            color_focus: #(button_hover)
+                            border_color: #0000
+                            border_color_hover: #0000
+                            border_color_down: #0000
+                            border_color_focus: #0000
+                        }
+                    });
                     if item_id == current {
                         let color = self.active_bg;
                         script_apply_eval!(cx, item_mut, {
@@ -4035,6 +4277,10 @@ impl Widget for NoteList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let projection = NOTES.read().unwrap();
         let language = *APP_LANGUAGE.read().unwrap();
+        let palette = reader_scene_palette(
+            *READER_BACKGROUND.read().unwrap(),
+            *READER_THEME.read().unwrap(),
+        );
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, projection.entries.len());
@@ -4058,6 +4304,13 @@ impl Widget for NoteList {
                         .set_text(cx, &preview_text(&note.content, 120));
                     item.widget(cx, ids!(note_delete_btn))
                         .set_text(cx, crate::i18n::text(language, "delete"));
+                    let note_title = item.widget(cx, ids!(note_title));
+                    let note_preview = item.widget(cx, ids!(note_preview));
+                    let note_delete = item.widget(cx, ids!(note_delete_btn));
+                    apply_reader_surface_palette(cx, item.clone(), palette.surface, palette.border);
+                    apply_reader_label_palette(cx, note_title, palette.text);
+                    apply_reader_label_palette(cx, note_preview, palette.muted);
+                    apply_reader_button_palette(cx, note_delete, palette);
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -4074,12 +4327,20 @@ impl Widget for NoteList {
 struct ChatList {
     #[deref]
     view: View,
+    #[live(false)]
+    reader_style: bool,
 }
 
 impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let data = CHAT_DATA.read().unwrap();
         let language = *APP_LANGUAGE.read().unwrap();
+        let reader_palette = self.reader_style.then(|| {
+            reader_scene_palette(
+                *READER_BACKGROUND.read().unwrap(),
+                *READER_THEME.read().unwrap(),
+            )
+        });
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 let message_count = data.messages.len();
@@ -4097,6 +4358,16 @@ impl Widget for ChatList {
                             &data.streaming_text
                         };
                         item.label(cx, ids!(message)).set_text(cx, text);
+                        if let Some(palette) = reader_palette {
+                            apply_reader_surface_palette(
+                                cx,
+                                item.clone(),
+                                palette.surface,
+                                palette.border,
+                            );
+                            let message_label = item.widget(cx, ids!(message));
+                            apply_reader_label_palette(cx, message_label, palette.text);
+                        }
                         item.draw_all_unscoped(cx);
                         continue;
                     }
@@ -4109,6 +4380,15 @@ impl Widget for ChatList {
                     };
                     let item = list.item(cx, item_id, template);
                     item.label(cx, ids!(message)).set_text(cx, &message.text);
+                    if let Some(palette) = reader_palette {
+                        let background = match message.role {
+                            ChatRole::User => palette.field,
+                            ChatRole::Assistant => palette.surface,
+                        };
+                        apply_reader_surface_palette(cx, item.clone(), background, palette.border);
+                        let message_label = item.widget(cx, ids!(message));
+                        apply_reader_label_palette(cx, message_label, palette.text);
+                    }
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -4517,6 +4797,59 @@ impl App {
             .set_active_page(cx, page.live_id());
         self.active_page = page;
         self.on_reader_page = page == AppPage::Reader;
+        if self.on_reader_page {
+            self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
+        } else {
+            self.apply_navigation_palette(cx, page);
+        }
+    }
+
+    fn apply_navigation_palette(&self, cx: &mut Cx, page: AppPage) {
+        let theme = *READER_THEME.read().unwrap();
+        let palette = navigation_palette_for_page(page, *READER_BACKGROUND.read().unwrap(), theme);
+
+        for id in [id!(sidebar), id!(mobile_safe_top), id!(mobile_nav)] {
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.surface,
+                palette.border,
+            );
+        }
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(main_window.caption_bar)),
+            palette.surface,
+            palette.surface,
+        );
+        apply_reader_label_palette(
+            cx,
+            self.ui
+                .widget(cx, ids!(main_window.caption_bar.caption_label.label)),
+            palette.text,
+        );
+        apply_reader_label_palette(cx, self.ui.widget(cx, ids!(app_title)), palette.text);
+        apply_reader_label_palette(cx, self.ui.widget(cx, ids!(db_status)), palette.muted);
+        for id in [
+            id!(nav_library),
+            id!(nav_reader),
+            id!(nav_chat),
+            id!(nav_skills),
+            id!(nav_vocab),
+            id!(nav_statistics),
+            id!(nav_settings),
+            id!(mobile_nav_library),
+            id!(mobile_nav_reader),
+            id!(mobile_nav_chat),
+            id!(mobile_nav_skills),
+            id!(mobile_nav_vocab),
+            id!(mobile_nav_statistics),
+            id!(mobile_nav_settings),
+        ] {
+            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
+        self.ui.widget(cx, ids!(sidebar)).redraw(cx);
+        self.ui.widget(cx, ids!(mobile_nav)).redraw(cx);
     }
 
     fn available_shelf_tags() -> Vec<String> {
@@ -4732,12 +5065,104 @@ impl App {
     }
 
     fn apply_reader_background(&self, cx: &mut Cx, background: ReaderBackground) {
-        let (surface_color, _) = reader_palette(background, *READER_THEME.read().unwrap());
-        let mut surface = self.ui.widget(cx, ids!(reader_surface));
-        script_apply_eval!(cx, surface, {
-            draw_bg.color: #(surface_color)
-        });
-        self.ui.widget(cx, ids!(chapter_list)).redraw(cx);
+        let palette = reader_scene_palette(background, *READER_THEME.read().unwrap());
+
+        for id in [id!(page_reader), id!(reader_body), id!(reader_surface)] {
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.surface,
+                palette.surface,
+            );
+        }
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(header)),
+            palette.surface,
+            palette.border,
+        );
+        for id in [id!(toc_panel), id!(note_panel), id!(reader_ai_panel)] {
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.surface,
+                palette.border,
+            );
+        }
+        for id in [id!(note_composer), id!(selection_popup), id!(word_card)] {
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.surface,
+                palette.border,
+            );
+        }
+
+        for id in [
+            id!(title),
+            id!(status),
+            id!(note_panel_title),
+            id!(note_quote),
+            id!(note_empty_title),
+            id!(reader_ai_title),
+            id!(card_word),
+        ] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
+        }
+        for id in [
+            id!(chapter_pos),
+            id!(note_hint),
+            id!(note_empty_hint),
+            id!(reader_chat_status),
+            id!(sel_hint),
+            id!(card_hint),
+        ] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
+        }
+        for id in [id!(note_quote_title), id!(card_gloss)] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.accent);
+        }
+
+        for id in [
+            id!(toc_btn),
+            id!(notes_btn),
+            id!(reader_ai_btn),
+            id!(note_close_btn),
+            id!(note_cancel_btn),
+            id!(note_save_btn),
+            id!(reader_ai_close),
+            id!(reader_chat_send),
+            id!(reader_chat_cancel),
+            id!(reader_chat_clear),
+            id!(copy_sel_btn),
+            id!(note_from_sel_btn),
+            id!(vocab_from_sel_btn),
+            id!(translate_sel_btn),
+            id!(ask_ai_sel_btn),
+            id!(speak_sel_btn),
+            id!(hl_btn),
+            id!(sel_close_btn),
+            id!(close_card_btn),
+            id!(add_vocab_btn),
+            id!(know_btn),
+        ] {
+            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
+        for id in [id!(note_extra), id!(reader_chat_input)] {
+            apply_reader_input_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
+
+        if let Some(mut toc) = self.ui.widget(cx, ids!(toc_list)).borrow_mut::<TocList>() {
+            toc.active_bg = palette.field;
+            toc.inactive_bg = palette.surface;
+            toc.text_color = palette.text;
+            toc.button_hover = palette.hover;
+            toc.button_pressed = palette.pressed;
+        }
+        if self.on_reader_page {
+            self.apply_navigation_palette(cx, AppPage::Reader);
+        }
+        self.ui.widget(cx, ids!(page_reader)).redraw(cx);
     }
 
     fn set_reader_background(&mut self, cx: &mut Cx, background: ReaderBackground) {
@@ -6771,8 +7196,9 @@ impl App {
 }
 
 impl MatchEvent for App {
-    fn handle_startup(&mut self, _cx: &mut Cx) {
+    fn handle_startup(&mut self, cx: &mut Cx) {
         self.app_in_foreground = true;
+        self.activate_page(cx, self.active_page);
     }
 
     fn handle_foreground(&mut self, cx: &mut Cx) {
