@@ -89,8 +89,8 @@ enum ReaderSwipeDirection {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum AppPage {
-    Library,
     #[default]
+    Library,
     Reader,
     Chat,
     Skills,
@@ -2317,7 +2317,7 @@ script_mod! {
                         }
                         pages := PageFlip{
                             width: Fill height: Fill
-                            active_page: @page_reader
+                            active_page: @page_library
 
                         page_library := View{
                             width: Fill height: Fill
@@ -2336,7 +2336,9 @@ script_mod! {
                                         draw_text.text_style.font_size: 18
                                     }
                                     import_epub_btn := ButtonFlat{
-                                        visible: false
+                                        // 平台能力在初始脚本对象中确定；不要依赖 Startup
+                                        // 再把静态 false 改回来，ScriptReapply 会覆盖它。
+                                        visible: #(cfg!(any(target_os = "ios", target_os = "macos")))
                                         text: "导入 EPUB"
                                     }
                                 }
@@ -4434,6 +4436,16 @@ impl App {
             cx,
             if is_filtered_empty {
                 tr("no_tag_matches_hint")
+            } else if cfg!(target_os = "ios") {
+                localized(
+                    "点击右上角“导入 EPUB”从“文件”中添加书籍",
+                    "Choose Import EPUB in the top-right corner to add books from Files",
+                )
+            } else if cfg!(target_os = "macos") {
+                localized(
+                    "点击右上角“导入 EPUB”，或把 EPUB 拖进窗口",
+                    "Choose Import EPUB in the top-right corner, or drop an EPUB here",
+                )
             } else {
                 tr("library_empty_hint")
             },
@@ -7375,6 +7387,12 @@ impl MatchEvent for App {
                             } else {
                                 format!("共 {items} 本 · 点击“导入 EPUB”从文件中添加")
                             }
+                        } else if cfg!(target_os = "macos")
+                            && app_language() == AppLanguage::English
+                        {
+                            format!("{items} books · Choose Import EPUB or drop an EPUB here")
+                        } else if cfg!(target_os = "macos") {
+                            format!("共 {items} 本 · 点击“导入 EPUB”或把 EPUB 拖进窗口")
                         } else if app_language() == AppLanguage::English {
                             format!("{items} books · Drop an EPUB or place it in the import folder")
                         } else {
@@ -7545,6 +7563,31 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(import_epub_btn)).clicked(actions) {
+            #[cfg(target_os = "macos")]
+            match crate::desktop_import::open_epub_picker(
+                localized("导入 EPUB", "Import EPUB"),
+                localized("导入", "Import"),
+            ) {
+                Ok(Some(paths)) => {
+                    self.ui.label(cx, ids!(library_hint)).set_text(
+                        cx,
+                        localized("正在导入所选 EPUB…", "Importing selected EPUB files…"),
+                    );
+                    spawn_import(paths, false);
+                }
+                Ok(None) => self
+                    .ui
+                    .label(cx, ids!(library_hint))
+                    .set_text(cx, localized("已取消导入", "Import cancelled")),
+                Err(error) => self.ui.label(cx, ids!(library_hint)).set_text(
+                    cx,
+                    &if app_language() == AppLanguage::English {
+                        format!("Could not open the file picker: {error}")
+                    } else {
+                        format!("无法打开文件选择器：{error}")
+                    },
+                ),
+            }
             #[cfg(target_os = "ios")]
             match crate::mobile_import::open_epub_picker() {
                 Ok(()) => self.ui.label(cx, ids!(library_hint)).set_text(
@@ -8357,9 +8400,6 @@ impl AppMain for App {
                     cx.display_context.screen_size,
                     cx.display_context.safe_area_insets,
                 );
-                self.ui
-                    .widget(cx, ids!(import_epub_btn))
-                    .set_visible(cx, cfg!(target_os = "ios"));
                 if cfg!(target_os = "ios") {
                     self.ui.label(cx, ids!(library_hint)).set_text(
                         cx,

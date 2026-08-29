@@ -1,5 +1,7 @@
 mod app;
 mod chapter_image;
+#[cfg(target_os = "macos")]
+mod desktop_import;
 mod i18n;
 mod mark_span;
 #[cfg(target_os = "ios")]

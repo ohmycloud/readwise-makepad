@@ -2,6 +2,13 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-29 — M8 macOS 原生 EPUB 选择器（待实测）
+
+- 补齐桌面书库只能拖放或使用投递箱的体验缺口：macOS 现在显示“导入 EPUB”按钮，点击后打开原生 `NSOpenPanel`，支持一次选择多本 EPUB，并复用现有后台导入、错误汇总和书架投影刷新链路。
+- 首轮把按钮在 DSL 中静态设为隐藏，再尝试于 `Event::Startup` 调用 `set_visible(true)`；用户实测按钮没有出现。按当前 Makepad 故障排查记录修正为在 `script_mod!` 初始对象中用 Rust 平台布尔插值决定可见性，避免 Startup 设置被脚本应用/重应用覆盖；本地启动读取到 widget 实际 `visible=true`，书库加载后绘制矩形为 75.72×22 px，确认没有被布局裁掉。同时把早期 demo 遗留的默认“阅读”页改为书库页，Rust `AppPage` 与 Splash `PageFlip` 初始状态保持一致，启动后可直接看到导入入口。
+- 当前 Makepad macOS `SelectFileDialog` 仍只有日志占位；实现直接复用框架已经链接的 Apple Objective-C runtime，不引入会冲突的第二套 AppKit/应用事件循环。iOS 继续使用已有 `UIDocumentPicker`，Windows/Linux 保持拖放与 import 目录。
+- macOS 选择的是用户原文件，因此导入成功后只保留应用数据目录内的副本，绝不清理源文件；iOS import 模式产生的应用私有临时副本仍按原语义清理。`cargo check --workspace --offline`、完整测试 55/55、iOS 交叉检查、桌面构建/启动和 `git diff --check` 均通过；Linux 交叉检查只因本机未安装 `aarch64-linux-gnu-gcc` 停在 SQLite C 编译器探测。待人工验证取消、中文路径、多选、重复书籍与源文件保留。
+
 ## 2026-08-29 — M8 书籍删除防误触（待实测）
 
 - 书架删除从卡片上的即时执行改为明确的二次确认，弹窗展示书名，并说明应用内阅读进度、笔记和高亮会一并删除，应用外的原始 EPUB 不受影响。
