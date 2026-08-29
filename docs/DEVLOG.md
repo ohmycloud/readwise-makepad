@@ -2,6 +2,14 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-29 — M8 macOS 发布包第一轮
+
+- 核对当前锁定的 `cargo-makepad` 源码而非沿用旧 CLI 经验：`desktop build` 能生成 macOS `.app` 并支持 codesign，但只有 app crate 同时提供 32/64/128 PNG 与 ICO 时才进入桌面资源和 bundle 后处理；默认 plist 还会把 Bundle ID 固定为 `dev.makepad.*`、版本固定为 `1.0.0`。
+- 从项目 1024px RGB 源图机械生成完整桌面 PNG 尺寸与多尺寸 ICO，放入 `app/resources`，Windows 链接资源、Linux desktop entry 和 macOS bundle 现在共用同一套产品图标；没有手工维护多份视觉源文件。
+- 新增 `scripts/package_macos.sh`：锁定依赖并离线构建 release，复制为 `ReadWise.app`，写入 `org.ohmycloud.readwise`、Cargo 版本、教育分类和高 DPI 标记，校验 plist/签名并输出版本化 ZIP。默认 ad-hoc 签名供本机验证；设置 `READWISE_CODESIGN_IDENTITY` 时改用 Developer ID、hardened runtime 与时间戳，凭据不入库。
+- 真实生成的 arm64 App 为 16MB、ZIP 为 6.2MB；plist、ad-hoc 签名、Designated Requirement 与归档目录均验证通过，通过 LaunchServices 启动 `.app` 成功。公开下载仍需 Apple Developer ID 公证/装订；这些操作需要外部证书和公证凭据，留到正式发布阶段。
+- README 已从 M0 demo 文案更新为当前 workspace 结构、macOS 打包/签名说明和现行 iOS 入口。
+
 ## 2026-08-29 — M8 性能第二轮：章节注音惰性缓存与启动基线
 
 - 打开 EPUB 的旧路径会在后台串行给整本书的所有章节注音，完成前 UI 收不到 `ReaderAction::Opened`；长书即使用户只读当前章，也会承担全书字符串扫描、HTML 重写和额外内存。现保留消毒后的原始章节，只为恢复章节立即生成注音，其余章节第一次访问时生成并缓存。

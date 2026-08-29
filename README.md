@@ -1,7 +1,7 @@
 # ReadWise (Makepad 重写版)
 
 用 [Makepad 2.0](https://zhanghandong.github.io/makepad-2.0-book/)（Splash DSL + 纯 Rust）重写的 ReadWise 阅读器。
-原 Tauri + React 版本保留在 `../readwise`，业务逻辑将逐步从那边的 Rust 代码迁移过来。
+原 Tauri + React 版本保留在 `../readwise`；当前项目的阅读、词汇、AI、统计和本地数据主链路均已迁移到 Rust + Makepad。
 
 - 里程碑规划：[docs/MILESTONES.md](docs/MILESTONES.md)
 - 开发日志：[docs/DEVLOG.md](docs/DEVLOG.md)
@@ -10,11 +10,11 @@
 
 ```
 readwise-makepad/
-├── app/          # Makepad UI 应用（当前为 M0 技术验证 demo）
-└── docs/         # 里程碑与开发日志
+├── app/          # Makepad UI 应用与平台资源
+├── core/         # SQLite、EPUB、词汇、笔记、AI 等纯 Rust 业务逻辑
+├── scripts/      # 可复现的数据生成与发布脚本
+└── docs/         # 里程碑、部署指南与开发日志
 ```
-
-后续将新增 `core/`（从 readwise 的 src-tauri 迁移的纯业务逻辑 crate）。
 
 ## 运行（桌面）
 
@@ -26,7 +26,31 @@ cargo run -p readwise-app --release  # 发布构建
 
 依赖 makepad dev 分支（git 依赖），首次构建会拉取并编译 makepad，耗时较长属正常。
 
-## 运行（iOS，M0 验证项）
+## macOS 应用包
+
+项目提供可复现的发布脚本：它通过 `cargo-makepad` 构建 release `.app`，写入 ReadWise 产品名、`org.ohmycloud.readwise` Bundle ID、Cargo 版本和应用分类，完成签名校验并生成 ZIP。
+
+```bash
+scripts/package_macos.sh
+```
+
+产物：
+
+```text
+target/dist/ReadWise.app
+target/dist/ReadWise-macOS-<version>.zip
+```
+
+默认使用 ad-hoc 签名，只适合本机测试。对外分发需使用 Apple Developer 的 Developer ID Application 证书：
+
+```bash
+READWISE_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+  scripts/package_macos.sh
+```
+
+脚本会启用 hardened runtime 和可信时间戳。公开下载前仍需用 `xcrun notarytool` 提交公证并用 `xcrun stapler` 装订；证书和公证凭据不存入仓库。
+
+## 运行（iOS）
 
 前置条件：完整版 Xcode（App Store 安装，打开一次接受协议，并在 Settings → Platforms 装好 iOS 支持）。
 
@@ -65,14 +89,6 @@ cargo makepad apple ios \
   run-device -p readwise-app --release
 ```
 
-## M0 验证清单（当前阶段）
+## 当前验证入口
 
-启动后应看到一个模拟 EPUB 章节，请逐项检查：
-
-1. 中文是否正常显示（若为方块/豆腐字，说明需要注册中文字体，反馈给 AI 处理）
-2. 标题层级、加粗斜体、引用、列表是否有排版区分
-3. `<ruby>` 注音是否渲染（预期大概率不支持，会退化成普通文本——这正是要确认的）
-4. 长文滚动是否流畅（40 段正文）
-5. 点击"重新渲染"按钮，右上角计数是否变化（事件链路验证）
-6. `--hot` 模式下改 `app/src/app.rs` 里 Splash 部分（如 title 文本）保存后是否即时生效
-7. iOS 模拟器/真机能否跑起来
+功能完成度与待验收项以 [docs/MILESTONES.md](docs/MILESTONES.md) 为准；iOS 真机签名、安装和常见故障见 [docs/ios-deploy-guide.md](docs/ios-deploy-guide.md)。应用数据默认保存在系统 Application Support 下的 `ReadWise` 目录。
