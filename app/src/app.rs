@@ -5,9 +5,10 @@ use makepad_ai::{
 };
 use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState};
 use makepad_widgets::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
+use std::time::Instant;
 
 type AiSettings = readwise_core::ai::AiSettings;
 type AppLanguage = readwise_core::settings::AppLanguage;
@@ -175,6 +176,15 @@ static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> =
 
 /// 全局数据库句柄：后台线程初始化后写入，各处只读使用。
 static DB: OnceLock<readwise_core::Db> = OnceLock::new();
+static APP_STARTED_AT: OnceLock<Instant> = OnceLock::new();
+static INITIAL_LIBRARY_READY_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn startup_elapsed_ms() -> Option<u128> {
+    APP_STARTED_AT
+        .get()
+        .map(Instant::elapsed)
+        .map(|d| d.as_millis())
+}
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 static LOCAL_AI_MANAGER: LazyLock<std::sync::Mutex<readwise_core::local_ai::LocalAiManager>> =
@@ -1057,11 +1067,13 @@ fn spawn_mark_known(lemma: String) {
             ::log::error!("标记已认识失败: {}", e);
             return;
         }
-        // 原地消注：内存里剥掉该词的 <ruby>，不重载不跳转
+        // 只处理已经访问并缓存的章节；未访问章节会从 known_words 直接跳过该词。
         if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
-            for ch in book.chapters.iter_mut() {
-                if ch.contains("<ruby") {
-                    *ch = readwise_core::vocab::annotate::remove_ruby_for_lemma(ch, &lemma);
+            book.known_words.insert(lemma.clone());
+            for chapter in book.glossed_chapters.iter_mut().flatten() {
+                if chapter.contains("<ruby") {
+                    *chapter =
+                        readwise_core::vocab::annotate::remove_ruby_for_lemma(chapter, &lemma);
                 }
             }
         }
@@ -1120,12 +1132,77 @@ const READER_FONT_MAX: f32 = 20.0;
 struct OpenBook {
     id: String,
     title: String,
-    /// 各章 body HTML（已消毒）。
+    /// 各章原始 body HTML（已消毒，不含运行时注音）。
     chapters: Vec<String>,
+    /// 按访问惰性生成的注音章节；关闭注音时仍直接使用原始章节。
+    glossed_chapters: Vec<Option<String>>,
+    glosses: HashMap<String, String>,
+    known_words: HashSet<String>,
     /// 各章标题（TOC 用）。
     chapter_titles: Vec<String>,
     /// 各章高亮（章下标 → 区间列表）。
     highlights: HashMap<usize, Vec<readwise_core::books::Highlight>>,
+}
+
+impl OpenBook {
+    fn chapter_html(&mut self, idx: usize, gloss_enabled: bool) -> Option<&str> {
+        let raw = self.chapters.get(idx)?;
+        if !gloss_enabled || self.glosses.is_empty() {
+            return Some(raw);
+        }
+        if self.glossed_chapters.get(idx)?.is_none() {
+            use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
+            let flat = flatten_lists(raw);
+            self.glossed_chapters[idx] =
+                Some(annotate_html(&flat, &self.glosses, &self.known_words));
+        }
+        self.glossed_chapters[idx].as_deref()
+    }
+}
+
+#[cfg(test)]
+mod lazy_gloss_tests {
+    use super::*;
+
+    fn book() -> OpenBook {
+        OpenBook {
+            id: "book".to_string(),
+            title: "Book".to_string(),
+            chapters: vec![
+                "<p>The solitude.</p>".to_string(),
+                "<p>A murmur.</p>".to_string(),
+            ],
+            glossed_chapters: vec![None, None],
+            glosses: HashMap::from([
+                ("solitude".to_string(), "孤独".to_string()),
+                ("murmur".to_string(), "低语".to_string()),
+            ]),
+            known_words: HashSet::new(),
+            chapter_titles: vec!["One".to_string(), "Two".to_string()],
+            highlights: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn glosses_only_the_requested_chapter_and_keeps_raw_html() {
+        let mut book = book();
+        let second = book.chapter_html(1, true).unwrap().to_string();
+        assert!(second.contains("<ruby>murmur"));
+        assert!(book.glossed_chapters[0].is_none());
+        assert!(book.glossed_chapters[1].is_some());
+
+        let raw_first = book.chapter_html(0, false).unwrap();
+        assert_eq!(raw_first, "<p>The solitude.</p>");
+        assert!(book.glossed_chapters[0].is_none());
+    }
+
+    #[test]
+    fn newly_known_words_are_skipped_by_uncached_chapters() {
+        let mut book = book();
+        book.known_words.insert("solitude".to_string());
+        let first = book.chapter_html(0, true).unwrap();
+        assert!(!first.contains("<ruby>solitude"));
+    }
 }
 
 /// 当前选区（块+字符区间，ChapterList 自跟踪写入，App 读）。
@@ -1264,6 +1341,8 @@ enum ReaderAction {
     Opened {
         resume_chapter: usize,
         gloss_count: usize,
+        parse_ms: u128,
+        initial_gloss_ms: u128,
     },
     OpenError(String),
 }
@@ -1326,6 +1405,7 @@ fn speak_text(text: String) {
 fn spawn_open_book(item: ShelfItem) {
     *CURRENT_ITEM.write().unwrap() = Some(item.clone());
     std::thread::spawn(move || {
+        let open_started = std::time::Instant::now();
         let infos = match readwise_core::books::epub_meta::load_chapters(std::path::Path::new(
             &item.file_path,
         )) {
@@ -1341,22 +1421,7 @@ fn spawn_open_book(item: ShelfItem) {
             chapter_titles.push(info.title);
             chapters.push(info.html);
         }
-        // 注音：总开关开启且有释义数据才注入（老项目 GlossAnnotator 的等价物）
-        let mut gloss_count = 0usize;
-        if *GLOSS_ENABLED.read().unwrap() {
-            if let Some(db) = DB.get() {
-                if let Ok((glosses, known)) = db.gloss_context(Some(&item.id)) {
-                    gloss_count = glosses.len();
-                    if !glosses.is_empty() {
-                        use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
-                        for ch in chapters.iter_mut() {
-                            let flat = flatten_lists(ch);
-                            *ch = annotate_html(&flat, &glosses, &known);
-                        }
-                    }
-                }
-            }
-        }
+        let parse_ms = open_started.elapsed().as_millis();
         let total = chapters.len();
         let resume = DB
             .get()
@@ -1368,23 +1433,39 @@ fn spawn_open_book(item: ShelfItem) {
             .get()
             .and_then(|db| db.get_highlights_by_chapter(&item.id).ok())
             .unwrap_or_default();
-        *CURRENT_BOOK.write().unwrap() = Some(OpenBook {
+        let (glosses, known_words) = DB
+            .get()
+            .and_then(|db| db.gloss_context(Some(&item.id)).ok())
+            .unwrap_or_default();
+        let gloss_count = glosses.len();
+        let mut book = OpenBook {
             id: item.id,
             title: item.title,
+            glossed_chapters: vec![None; chapters.len()],
             chapters,
             chapter_titles,
+            glosses,
+            known_words,
             highlights,
-        });
+        };
+        let gloss_started = std::time::Instant::now();
+        if *GLOSS_ENABLED.read().unwrap() {
+            let _ = book.chapter_html(resume, true);
+        }
+        let initial_gloss_ms = gloss_started.elapsed().as_millis();
+        *CURRENT_BOOK.write().unwrap() = Some(book);
         Cx::post_action(ReaderAction::Opened {
             resume_chapter: resume,
             gloss_count,
+            parse_ms,
+            initial_gloss_ms,
         });
     });
 }
 
 /// 章节 → PortalList 块（含高亮标记注入）。
-fn build_chapter_chunks(book: &OpenBook, idx: usize) -> Option<Vec<String>> {
-    let chapter = book.chapters.get(idx)?;
+fn build_chapter_chunks(book: &mut OpenBook, idx: usize) -> Option<Vec<String>> {
+    let chapter = book.chapter_html(idx, *GLOSS_ENABLED.read().unwrap())?;
     let mut chunks = readwise_core::books::epub_meta::split_blocks(chapter);
     if let Some(hls) = book.highlights.get(&idx) {
         let mut per_block: HashMap<usize, Vec<(usize, usize, &str)>> = HashMap::new();
@@ -5935,8 +6016,8 @@ impl App {
     /// 切换到指定章节：按 </p> 切块喂给 PortalList，更新标题/页码，保存进度，滚回顶部。
     fn set_chapter(&mut self, cx: &mut Cx, idx: usize) {
         let (id, title, total, chunks) = {
-            let guard = CURRENT_BOOK.read().unwrap();
-            let Some(book) = guard.as_ref() else { return };
+            let mut guard = CURRENT_BOOK.write().unwrap();
+            let Some(book) = guard.as_mut() else { return };
             if idx >= book.chapters.len() {
                 return;
             }
@@ -6203,15 +6284,6 @@ impl App {
         self.set_gloss_rows_visible(cx, settings.gloss_enabled);
         self.refresh_swatches(cx);
 
-        if !settings.gloss_enabled {
-            if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
-                for chapter in &mut book.chapters {
-                    if chapter.contains("<ruby") {
-                        *chapter = readwise_core::vocab::annotate::remove_all_ruby(chapter);
-                    }
-                }
-            }
-        }
         self.refresh_current_chapter(cx);
         if theme_changed {
             self.apply_runtime_theme(cx, settings.theme);
@@ -6229,9 +6301,9 @@ impl App {
     /// 用当前章内容重建 PortalList 块（保滚动位置：块数不变时 first_id 不动）。
     fn refresh_current_chapter(&mut self, cx: &mut Cx) {
         let chunks = {
-            let guard = CURRENT_BOOK.read().unwrap();
+            let mut guard = CURRENT_BOOK.write().unwrap();
             guard
-                .as_ref()
+                .as_mut()
                 .and_then(|b| build_chapter_chunks(b, self.chapter_idx))
         };
         if let Some(chunks) = chunks {
@@ -6334,33 +6406,11 @@ impl App {
         }
     }
 
-    /// 注音总开关切换：关→原地剥掉全部注音；开→重开当前书注音。
+    /// 注音总开关切换：保留原始章节，打开时只惰性生成当前章注音。
     fn toggle_gloss(&mut self, cx: &mut Cx, on: bool) {
         *GLOSS_ENABLED.write().unwrap() = on;
         self.set_gloss_rows_visible(cx, on);
-        if on {
-            let item = CURRENT_ITEM.read().unwrap().clone();
-            if let Some(item) = item {
-                self.ui.label(cx, ids!(title)).set_text(
-                    cx,
-                    &if app_language() == AppLanguage::English {
-                        format!("Adding glosses to “{}”…", item.title)
-                    } else {
-                        format!("《{}》注音中…", item.title)
-                    },
-                );
-                spawn_open_book(item);
-            }
-        } else {
-            if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
-                for ch in book.chapters.iter_mut() {
-                    if ch.contains("<ruby") {
-                        *ch = readwise_core::vocab::annotate::remove_all_ruby(ch);
-                    }
-                }
-            }
-            self.refresh_current_chapter(cx);
-        }
+        self.refresh_current_chapter(cx);
         self.ui.redraw(cx);
         self.persist_reader_settings(cx);
     }
@@ -6559,6 +6609,9 @@ impl MatchEvent for App {
                         known_count,
                         reader_settings,
                     } => {
+                        if let Some(elapsed) = startup_elapsed_ms() {
+                            ::log::info!("Startup: database and settings ready in {elapsed}ms");
+                        }
                         let status = if app_language() == AppLanguage::English {
                             format!(
                                 "Database ready\nVocabulary {} · Known {}",
@@ -7158,7 +7211,14 @@ impl MatchEvent for App {
                     ReaderAction::Opened {
                         resume_chapter,
                         gloss_count,
+                        parse_ms,
+                        initial_gloss_ms,
                     } => {
+                        ::log::info!(
+                            "Opened EPUB: parse={}ms, initial chapter gloss={}ms, lazy remaining chapters",
+                            parse_ms,
+                            initial_gloss_ms
+                        );
                         self.set_chapter(cx, *resume_chapter);
                         if *GLOSS_ENABLED.read().unwrap() && *gloss_count == 0 {
                             self.ui.label(cx, ids!(status)).set_text(
@@ -7199,6 +7259,11 @@ impl MatchEvent for App {
                         imported,
                         import_error,
                     } => {
+                        if !INITIAL_LIBRARY_READY_LOGGED.swap(true, Ordering::Relaxed) {
+                            if let Some(elapsed) = startup_elapsed_ms() {
+                                ::log::info!("Startup: library projection ready in {elapsed}ms");
+                            }
+                        }
                         self.refresh_shelf_projection(cx);
                         let hint = if let Some(error) = import_error {
                             if *imported > 0 {
@@ -8165,6 +8230,7 @@ impl AppMain for App {
         match event {
             Event::ScriptReapply => self.restore_after_script_reload(cx),
             Event::Startup => {
+                let _ = APP_STARTED_AT.set(Instant::now());
                 self.update_responsive_layout(
                     cx,
                     cx.display_context.screen_size,
