@@ -1,3 +1,4 @@
+use crate::chapter_image::ChapterImageAction;
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
 use makepad_ai::{
@@ -26,13 +27,21 @@ app_main!(App);
 
 const PARA_COUNT: usize = 200;
 const COMPACT_LAYOUT_BREAKPOINT: f64 = 720.0;
+const MOBILE_LANDSCAPE_COMPACT_HEIGHT: f64 = 600.0;
 const READER_SWIPE_MIN_DISTANCE: f64 = 64.0;
 const READER_SWIPE_MAX_DURATION: f64 = 0.9;
 const READER_SWIPE_AXIS_RATIO: f64 = 1.35;
 const READER_SWIPE_VERTICAL_CANCEL: f64 = 28.0;
 
+fn uses_compact_layout_for_platform(size: DVec2, is_mobile: bool) -> bool {
+    size.x > 0.0
+        && size.y > 0.0
+        && (size.x < COMPACT_LAYOUT_BREAKPOINT
+            || (is_mobile && size.y < MOBILE_LANDSCAPE_COMPACT_HEIGHT))
+}
+
 fn uses_compact_layout(size: DVec2) -> bool {
-    size.x > 0.0 && size.y > 0.0 && size.x < COMPACT_LAYOUT_BREAKPOINT
+    uses_compact_layout_for_platform(size, cfg!(any(target_os = "android", target_os = "ios")))
 }
 
 fn screen_orientation_changed(old_size: DVec2, new_size: DVec2) -> bool {
@@ -882,12 +891,23 @@ mod responsive_layout_tests {
     use super::*;
 
     #[test]
-    fn compact_layout_uses_phone_width_and_ignores_unknown_geometry() {
-        assert!(uses_compact_layout(dvec2(390.0, 844.0)));
-        assert!(uses_compact_layout(dvec2(719.0, 900.0)));
-        assert!(!uses_compact_layout(dvec2(720.0, 900.0)));
-        assert!(!uses_compact_layout(dvec2(1080.0, 720.0)));
-        assert!(!uses_compact_layout(dvec2(0.0, 0.0)));
+    fn compact_layout_keeps_mobile_phones_compact_in_both_orientations() {
+        assert!(uses_compact_layout_for_platform(dvec2(390.0, 844.0), true));
+        assert!(uses_compact_layout_for_platform(dvec2(844.0, 390.0), true));
+        assert!(uses_compact_layout_for_platform(dvec2(719.0, 900.0), true));
+        assert!(!uses_compact_layout_for_platform(
+            dvec2(768.0, 1024.0),
+            true
+        ));
+        assert!(!uses_compact_layout_for_platform(
+            dvec2(1133.0, 744.0),
+            true
+        ));
+        assert!(!uses_compact_layout_for_platform(
+            dvec2(844.0, 390.0),
+            false
+        ));
+        assert!(!uses_compact_layout_for_platform(dvec2(0.0, 0.0), true));
     }
 
     #[test]
@@ -1182,15 +1202,10 @@ fn spawn_mark_known(lemma: String) {
             ::log::error!("标记已认识失败: {}", e);
             return;
         }
-        // 只处理已经访问并缓存的章节；未访问章节会从 known_words 直接跳过该词。
+        // 只处理已经访问并缓存的章节块；未访问章节会从
+        // known_words 直接跳过该词。
         if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
-            book.known_words.insert(lemma.clone());
-            for chapter in book.glossed_chapters.iter_mut().flatten() {
-                if chapter.contains("<ruby") {
-                    *chapter =
-                        readwise_core::vocab::annotate::remove_ruby_for_lemma(chapter, &lemma);
-                }
-            }
+            book.mark_word_known(&lemma);
         }
         Cx::post_action(CardAction::MarkedKnown);
     });
@@ -1470,8 +1485,9 @@ struct OpenBook {
     title: String,
     /// 各章原始 body HTML（已消毒，不含运行时注音）。
     chapters: Vec<String>,
-    /// 按访问惰性生成的注音章节；关闭注音时仍直接使用原始章节。
-    glossed_chapters: Vec<Option<String>>,
+    /// 按访问惰性生成、已切块的注音章节；关闭注音时仍从原始章节投影。
+    /// 直接缓存 PortalList 所需的块，避免每次设置刷新或旋转恢复都重新 split_blocks。
+    glossed_chapter_chunks: Vec<Option<Vec<String>>>,
     glosses: HashMap<String, String>,
     known_words: HashSet<String>,
     /// 各章标题（TOC 用）。
@@ -1481,18 +1497,30 @@ struct OpenBook {
 }
 
 impl OpenBook {
-    fn chapter_html(&mut self, idx: usize, gloss_enabled: bool) -> Option<&str> {
+    fn chapter_chunks(&mut self, idx: usize, gloss_enabled: bool) -> Option<Vec<String>> {
         let raw = self.chapters.get(idx)?;
         if !gloss_enabled || self.glosses.is_empty() {
-            return Some(raw);
+            return Some(readwise_core::books::epub_meta::split_blocks(raw));
         }
-        if self.glossed_chapters.get(idx)?.is_none() {
+        if self.glossed_chapter_chunks.get(idx)?.is_none() {
             use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
             let flat = flatten_lists(raw);
-            self.glossed_chapters[idx] =
-                Some(annotate_html(&flat, &self.glosses, &self.known_words));
+            let glossed = annotate_html(&flat, &self.glosses, &self.known_words);
+            self.glossed_chapter_chunks[idx] =
+                Some(readwise_core::books::epub_meta::split_blocks(&glossed));
         }
-        self.glossed_chapters[idx].as_deref()
+        self.glossed_chapter_chunks[idx].clone()
+    }
+
+    fn mark_word_known(&mut self, lemma: &str) {
+        self.known_words.insert(lemma.to_string());
+        for chunks in self.glossed_chapter_chunks.iter_mut().flatten() {
+            for chunk in chunks {
+                if chunk.contains("<ruby") {
+                    *chunk = readwise_core::vocab::annotate::remove_ruby_for_lemma(chunk, lemma);
+                }
+            }
+        }
     }
 }
 
@@ -1508,7 +1536,7 @@ mod lazy_gloss_tests {
                 "<p>The solitude.</p>".to_string(),
                 "<p>A murmur.</p>".to_string(),
             ],
-            glossed_chapters: vec![None, None],
+            glossed_chapter_chunks: vec![None, None],
             glosses: HashMap::from([
                 ("solitude".to_string(), "孤独".to_string()),
                 ("murmur".to_string(), "低语".to_string()),
@@ -1522,22 +1550,66 @@ mod lazy_gloss_tests {
     #[test]
     fn glosses_only_the_requested_chapter_and_keeps_raw_html() {
         let mut book = book();
-        let second = book.chapter_html(1, true).unwrap().to_string();
+        let second = book.chapter_chunks(1, true).unwrap().join("");
         assert!(second.contains("<ruby>murmur"));
-        assert!(book.glossed_chapters[0].is_none());
-        assert!(book.glossed_chapters[1].is_some());
+        assert!(book.glossed_chapter_chunks[0].is_none());
+        assert!(book.glossed_chapter_chunks[1].is_some());
 
-        let raw_first = book.chapter_html(0, false).unwrap();
+        let raw_first = book.chapter_chunks(0, false).unwrap().join("");
         assert_eq!(raw_first, "<p>The solitude.</p>");
-        assert!(book.glossed_chapters[0].is_none());
+        assert!(book.glossed_chapter_chunks[0].is_none());
     }
 
     #[test]
     fn newly_known_words_are_skipped_by_uncached_chapters() {
         let mut book = book();
-        book.known_words.insert("solitude".to_string());
-        let first = book.chapter_html(0, true).unwrap();
+        book.mark_word_known("solitude");
+        let first = book.chapter_chunks(0, true).unwrap().join("");
         assert!(!first.contains("<ruby>solitude"));
+    }
+
+    #[test]
+    fn newly_known_words_are_removed_from_cached_chapter_chunks() {
+        let mut book = book();
+        assert!(book
+            .chapter_chunks(0, true)
+            .unwrap()
+            .join("")
+            .contains("<ruby>solitude"));
+
+        book.mark_word_known("solitude");
+
+        assert!(!book
+            .chapter_chunks(0, true)
+            .unwrap()
+            .join("")
+            .contains("<ruby>solitude"));
+    }
+
+    #[test]
+    fn cached_glossed_chunks_are_reused_without_exposing_mutable_cache_state() {
+        let mut book = book();
+        let mut first = book.chapter_chunks(0, true).unwrap();
+        first[0].clear();
+
+        let second = book.chapter_chunks(0, true).unwrap();
+        assert!(second[0].contains("<ruby>solitude"));
+        assert!(book.glossed_chapter_chunks[0].is_some());
+    }
+
+    #[test]
+    fn long_glossed_chapter_reuses_its_portal_block_projection() {
+        let mut book = book();
+        book.chapters[0] = (0..512)
+            .map(|idx| format!("<p>Paragraph {idx}: solitude.</p>"))
+            .collect();
+
+        let first = book.chapter_chunks(0, true).unwrap();
+        assert_eq!(first.len(), 512);
+        book.chapters[0] = "<p>Replacement content.</p>".to_string();
+
+        let second = book.chapter_chunks(0, true).unwrap();
+        assert_eq!(second, first);
     }
 }
 
@@ -1779,7 +1851,7 @@ fn spawn_open_book(item: ShelfItem) {
         let mut book = OpenBook {
             id: item.id,
             title: item.title,
-            glossed_chapters: vec![None; chapters.len()],
+            glossed_chapter_chunks: vec![None; chapters.len()],
             chapters,
             chapter_titles,
             glosses,
@@ -1788,7 +1860,7 @@ fn spawn_open_book(item: ShelfItem) {
         };
         let gloss_started = std::time::Instant::now();
         if *GLOSS_ENABLED.read().unwrap() {
-            let _ = book.chapter_html(resume, true);
+            let _ = book.chapter_chunks(resume, true);
         }
         let initial_gloss_ms = gloss_started.elapsed().as_millis();
         *CURRENT_BOOK.write().unwrap() = Some(book);
@@ -1803,8 +1875,7 @@ fn spawn_open_book(item: ShelfItem) {
 
 /// 章节 → PortalList 块（含高亮标记注入）。
 fn build_chapter_chunks(book: &mut OpenBook, idx: usize) -> Option<Vec<String>> {
-    let chapter = book.chapter_html(idx, *GLOSS_ENABLED.read().unwrap())?;
-    let mut chunks = readwise_core::books::epub_meta::split_blocks(chapter);
+    let mut chunks = book.chapter_chunks(idx, *GLOSS_ENABLED.read().unwrap())?;
     if let Some(hls) = book.highlights.get(&idx) {
         let mut per_block: HashMap<usize, Vec<(usize, usize, &str)>> = HashMap::new();
         for hl in hls {
@@ -3699,6 +3770,36 @@ script_mod! {
                         }
                     }
                     }
+                    reader_image_modal := Modal{
+                        content +: {
+                            width: Fill height: Fill
+                            image_viewer_card := RoundedView{
+                                width: Fill height: Fill
+                                new_batch: true
+                                flow: Down spacing: 10
+                                margin: Inset{left: 18 right: 18 top: 18 bottom: 18}
+                                padding: Inset{left: 12 right: 12 top: 10 bottom: 12}
+                                draw_bg.color: theme.color_bg_container
+                                draw_bg.border_radius: 10.0
+                                image_viewer_header := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 10
+                                    align: Align{y: 0.5}
+                                    image_viewer_info := Label{
+                                        width: Fill height: Fit
+                                        text: "原图"
+                                        draw_text.color: theme.color_label_inner
+                                        draw_text.text_style.font_size: 10
+                                    }
+                                    image_viewer_close := ButtonFlat{text: "关闭"}
+                                }
+                                image_viewer_image := Image{
+                                    width: Fill height: Fill
+                                    fit: ImageFit.Smallest
+                                }
+                            }
+                        }
+                    }
                     library_tag_modal := Modal{
                 content +: {
                     width: 360 height: Fit
@@ -5179,6 +5280,34 @@ impl App {
         self.ui.modal(cx, ids!(library_delete_modal)).open(cx);
     }
 
+    fn open_reader_image_viewer(&mut self, cx: &mut Cx, path: &str) {
+        self.clear_reader_selection(cx);
+        let image = self.ui.image(cx, ids!(image_viewer_image));
+        if let Err(error) = image.load_image_file_by_path(cx, std::path::Path::new(path)) {
+            ::log::error!("原图加载失败 {path}: {error:?}");
+            self.ui.label(cx, ids!(status)).set_text(
+                cx,
+                localized("原图加载失败", "Failed to load the original image"),
+            );
+            return;
+        }
+        let info = image
+            .size_in_pixels(cx)
+            .map(|(width, height)| {
+                if app_language() == AppLanguage::English {
+                    format!("Original image · {width} × {height} px")
+                } else {
+                    format!("原图 · {width} × {height} 像素")
+                }
+            })
+            .unwrap_or_else(|| localized("原图", "Original image").to_string());
+        self.ui
+            .label(cx, ids!(image_viewer_info))
+            .set_text(cx, &info);
+        self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
+        self.ui.modal(cx, ids!(reader_image_modal)).open(cx);
+    }
+
     fn cancel_delete_book_confirmation(&mut self, cx: &mut Cx) {
         self.pending_delete_book = None;
         self.ui.modal(cx, ids!(library_delete_modal)).close(cx);
@@ -5261,6 +5390,12 @@ impl App {
                 palette.border,
             );
         }
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(image_viewer_card)),
+            palette.surface,
+            palette.border,
+        );
 
         for id in [
             id!(title),
@@ -5270,6 +5405,7 @@ impl App {
             id!(note_empty_title),
             id!(reader_ai_title),
             id!(card_word),
+            id!(image_viewer_info),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
@@ -5309,6 +5445,7 @@ impl App {
             id!(close_card_btn),
             id!(add_vocab_btn),
             id!(know_btn),
+            id!(image_viewer_close),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
@@ -5399,6 +5536,7 @@ impl App {
         set_text!(library_delete_modal_title, "delete_book_title");
         set_text!(library_delete_cancel, "cancel");
         set_text!(library_delete_confirm, "delete_book_confirm");
+        set_text!(image_viewer_close, "close");
 
         set_text!(toc_btn, "contents");
         set_text!(notes_btn, "note");
@@ -8288,6 +8426,10 @@ impl MatchEvent for App {
             let Some(action) = action.as_widget_action() else {
                 continue;
             };
+            if let ChapterImageAction::Open(path) = action.cast() {
+                self.open_reader_image_viewer(cx, &path);
+                continue;
+            }
             if let HtmlLinkAction::Clicked { url, .. } = action.cast() {
                 if let Some(word) = url.strip_prefix("w:") {
                     let status = if app_language() == AppLanguage::English {
@@ -8356,6 +8498,17 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.confirm_delete_book(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(image_viewer_close))
+            .clicked(actions)
+            || self
+                .ui
+                .modal(cx, ids!(reader_image_modal))
+                .dismissed(actions)
+        {
+            self.ui.modal(cx, ids!(reader_image_modal)).close(cx);
         }
 
         let shelf_list = self

@@ -68,12 +68,40 @@ pub fn annotate_html(
     out
 }
 
-/// 把列表拍平成"• "段落。TextFlow 的列表项换行是硬编码零间距（begin_list_item
-/// 走 new_line_collapsed，无旋钮），注音在 li 里永远没有头顶空间；
-/// 段落路径的间距（paragraph_margin）可配置，所以注音章节渲染前统一转换。
+/// 把列表拍平成带文本标记的段落。TextFlow 的列表项换行是硬编码零间距
+/// （begin_list_item 走 new_line_collapsed，无旋钮），注音在 li 里永远没有头顶空间；
+/// 段落路径的间距（paragraph_margin）可配置。有序列表必须保留文本编号，
+/// 不能与无序列表一样全部降级成项目符号。
 pub fn flatten_lists(html: &str) -> String {
+    enum ListKind {
+        Unordered,
+        Ordered(i32),
+    }
+
+    fn ordered_start(tag: &str) -> i32 {
+        let lower = tag.to_ascii_lowercase();
+        let Some(start) = lower.find("start") else {
+            return 1;
+        };
+        let mut value = &tag[start + "start".len()..];
+        value = value.trim_start();
+        let Some(value) = value.strip_prefix('=') else {
+            return 1;
+        };
+        let value = value.trim_start();
+        let value = if let Some(rest) = value.strip_prefix(['"', '\'']) {
+            &rest[..rest.find(['"', '\'']).unwrap_or(rest.len())]
+        } else {
+            &value[..value
+                .find(|ch: char| ch.is_ascii_whitespace() || ch == '>')
+                .unwrap_or(value.len())]
+        };
+        value.parse().unwrap_or(1)
+    }
+
     let mut out = String::with_capacity(html.len());
     let mut li_depth: i32 = 0;
+    let mut list_stack = Vec::new();
     let mut i = 0;
     while i < html.len() {
         let rest = &html[i..];
@@ -97,10 +125,23 @@ pub fn flatten_lists(html: &str) -> String {
             .collect::<String>()
             .to_lowercase();
         match (name.as_str(), is_close) {
-            ("ul", _) | ("ol", _) => {}
+            ("ul", false) => list_stack.push(ListKind::Unordered),
+            ("ol", false) => {
+                list_stack.push(ListKind::Ordered(ordered_start(&html[tag_start..=tag_end])))
+            }
+            ("ul", true) | ("ol", true) => {
+                list_stack.pop();
+            }
             ("li", false) => {
                 li_depth += 1;
-                out.push_str("<p>• ");
+                out.push_str("<p>");
+                match list_stack.last_mut() {
+                    Some(ListKind::Ordered(next)) => {
+                        out.push_str(&format!("{}. ", *next));
+                        *next += 1;
+                    }
+                    _ => out.push_str("• "),
+                }
             }
             ("li", true) => {
                 li_depth = (li_depth - 1).max(0);
@@ -549,6 +590,12 @@ mod tests {
     fn flattens_lists_to_bullet_paragraphs() {
         let src = "<ul><li>alpha</li><li>beta <b>x</b></li></ul>";
         assert_eq!(flatten_lists(src), "<p>• alpha</p><p>• beta <b>x</b></p>");
+    }
+
+    #[test]
+    fn flattens_ordered_lists_to_crisp_text_numbers() {
+        let src = "<ol start=\"3\"><li>alpha</li><li>beta <b>x</b></li></ol>";
+        assert_eq!(flatten_lists(src), "<p>3. alpha</p><p>4. beta <b>x</b></p>");
     }
 
     #[test]

@@ -28,7 +28,10 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         doc.set_current_chapter(i);
-        let html = doc.get_current_str().map(|(s, _mime)| s).unwrap_or_default();
+        let html = doc
+            .get_current_str()
+            .map(|(s, _mime)| s)
+            .unwrap_or_default();
         let body = sanitize_for_reader(&extract_body(&html));
         if body.trim().is_empty() {
             continue;
@@ -44,7 +47,10 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
 }
 
 /// 把包内图片资源提取到书目录的 res/（幂等），返回 文件名 → 绝对路径。
-fn extract_images<R: Read + Seek>(doc: &mut EpubDoc<R>, epub_path: &Path) -> HashMap<String, String> {
+fn extract_images<R: Read + Seek>(
+    doc: &mut EpubDoc<R>,
+    epub_path: &Path,
+) -> HashMap<String, String> {
     let res_dir = epub_path.parent().unwrap_or(Path::new(".")).join("res");
     let items: Vec<(String, String)> = doc
         .resources
@@ -94,43 +100,147 @@ fn percent_decode(s: &str) -> String {
 
 /// 把 <img src="包内相对路径"> 改写为提取后的绝对路径（按文件名匹配）。
 fn rewrite_img_src(html: &str, images: &HashMap<String, String>) -> String {
-    if images.is_empty() || !html.contains("<img") {
+    if !html.to_ascii_lowercase().contains("<img") {
         return html.to_string();
     }
     let mut out = String::with_capacity(html.len());
+    let mut code_depth = 0_i32;
     let mut i = 0;
-    while let Some(pos) = html[i..].find("<img") {
+    while let Some(pos) = html[i..].find('<') {
         let tag_start = i + pos;
-        let Some(gt_rel) = html[tag_start..].find('>') else { break };
+        let Some(gt_rel) = html[tag_start..].find('>') else {
+            break;
+        };
         let tag_end = tag_start + gt_rel;
         out.push_str(&html[i..tag_start]);
         let tag = &html[tag_start..=tag_end];
-        out.push_str(&rewrite_one_img(tag, images));
+        let inner = &tag[1..tag.len() - 1];
+        let is_close = inner.trim_start().starts_with('/');
+        let name = inner
+            .trim_start()
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+
+        if name == "img" && !is_close {
+            out.push_str(&rewrite_one_img(tag, images, code_depth > 0));
+        } else {
+            out.push_str(tag);
+        }
+        if name == "code" || name == "pre" {
+            code_depth += if is_close { -1 } else { 1 };
+            code_depth = code_depth.max(0);
+        }
         i = tag_end + 1;
     }
     out.push_str(&html[i..]);
     out
 }
 
-fn rewrite_one_img(tag: &str, images: &HashMap<String, String>) -> String {
-    for quote in ['"', '\''] {
-        let needle = format!("src={}", quote);
-        if let Some(s) = tag.find(&needle) {
-            let val_start = s + needle.len();
-            if let Some(v_end_rel) = tag[val_start..].find(quote) {
-                let val = &tag[val_start..val_start + v_end_rel];
-                let name = percent_decode(val.rsplit('/').next().unwrap_or(val));
-                if let Some(abs) = images.get(&name) {
-                    return format!(
-                        "{}{}{}",
-                        &tag[..val_start],
-                        abs,
-                        &tag[val_start + v_end_rel..]
-                    );
-                }
-                return tag.to_string();
-            }
+fn quoted_attr_range(tag: &str, attr: &str) -> Option<(usize, usize)> {
+    let lower = tag.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let needle = attr.as_bytes();
+    let mut offset = 0;
+    while let Some(found) = lower[offset..].find(attr) {
+        let start = offset + found;
+        let boundary_before =
+            start == 0 || bytes[start - 1].is_ascii_whitespace() || bytes[start - 1] == b'<';
+        let mut cursor = start + needle.len();
+        if !boundary_before {
+            offset = cursor;
+            continue;
         }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            offset = cursor;
+            continue;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let quote = *bytes.get(cursor)?;
+        if quote != b'"' && quote != b'\'' {
+            offset = cursor + 1;
+            continue;
+        }
+        let value_start = cursor + 1;
+        let value_end = tag[value_start..].find(quote as char)? + value_start;
+        return Some((value_start, value_end));
+    }
+    None
+}
+
+fn quoted_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    let (start, end) = quoted_attr_range(tag, attr)?;
+    Some(&tag[start..end])
+}
+
+fn callout_label(tag: &str, src: &str) -> Option<String> {
+    fn clean(value: &str) -> Option<String> {
+        let value = value.trim();
+        let unwrapped = value
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .unwrap_or(value);
+        if !unwrapped.is_empty() && unwrapped.chars().all(|ch| ch.is_ascii_digit()) {
+            return Some(unwrapped.to_string());
+        }
+        if unwrapped.chars().count() == 1
+            && unwrapped
+                .chars()
+                .next()
+                .is_some_and(|ch| ('\u{2460}'..='\u{2473}').contains(&ch))
+        {
+            return Some(unwrapped.to_string());
+        }
+        None
+    }
+
+    if let Some(label) = quoted_attr(tag, "alt").and_then(clean) {
+        return Some(label);
+    }
+    if let Some(label) = quoted_attr(tag, "title").and_then(clean) {
+        return Some(label);
+    }
+
+    let filename = percent_decode(src.rsplit('/').next().unwrap_or(src));
+    let stem = filename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(&filename)
+        .to_ascii_lowercase();
+    if let Some(label) = clean(&stem) {
+        return Some(label);
+    }
+    for prefix in [
+        "callout-", "callout_", "callout", "number-", "number_", "num-",
+    ] {
+        if let Some(label) = stem.strip_prefix(prefix).and_then(clean) {
+            return Some(label);
+        }
+    }
+    None
+}
+
+fn rewrite_one_img(tag: &str, images: &HashMap<String, String>, in_code: bool) -> String {
+    let Some((val_start, val_end)) = quoted_attr_range(tag, "src") else {
+        return tag.to_string();
+    };
+    let val = &tag[val_start..val_end];
+    if in_code {
+        if let Some(label) = callout_label(tag, val) {
+            return format!("[{label}]");
+        }
+    }
+    let name = percent_decode(val.rsplit('/').next().unwrap_or(val));
+    if let Some(abs) = images.get(&name) {
+        return format!("{}{}{}", &tag[..val_start], abs, &tag[val_end..]);
     }
     tag.to_string()
 }
@@ -142,7 +252,9 @@ fn first_heading_text(html: &str) -> Option<String> {
         if let Some(start) = lower.find(tag) {
             let content_start = html[start..].find('>').map(|p| start + p + 1)?;
             let close = format!("</{}", &tag[1..]);
-            let end = lower[content_start..].find(&close).map(|p| content_start + p)?;
+            let end = lower[content_start..]
+                .find(&close)
+                .map(|p| content_start + p)?;
             let mut text = String::new();
             let mut in_tag = false;
             for c in html[content_start..end].chars() {
@@ -169,13 +281,44 @@ fn first_heading_text(html: &str) -> Option<String> {
 /// Makepad Html widget 认识的标签（不在此列的标签会被它连内容一起丢弃，
 /// 所以渲染前必须"去壳留瓤"）。
 const KEEP_TAGS: &[&str] = &[
-    "p", "h1", "h2", "h3", "h4", "h5", "h6", "b", "strong", "i", "em", "blockquote", "code",
-    "pre", "sub", "sup", "ul", "ol", "li", "u", "del", "s", "strike", "table", "thead", "tbody",
-    "tr", "th", "td", "br", "hr", "img",
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "b",
+    "strong",
+    "i",
+    "em",
+    "blockquote",
+    "code",
+    "pre",
+    "sub",
+    "sup",
+    "ul",
+    "ol",
+    "li",
+    "u",
+    "del",
+    "s",
+    "strike",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+    "br",
+    "hr",
+    "img",
 ];
 
 /// 这些标签连同内容一起丢（对阅读无意义或有害）。
-const DROP_TAGS: &[&str] = &["script", "style", "head", "svg", "math", "rt", "rp", "template"];
+const DROP_TAGS: &[&str] = &[
+    "script", "style", "head", "svg", "math", "rt", "rp", "template",
+];
 
 /// 面向 Html widget 的消毒：白名单标签保留原样；未知标签（div/section/span/a/figure…）
 /// 去掉标签本身、保留内部内容；DROP_TAGS 连内容删除；注释/声明剔除。
@@ -457,6 +600,48 @@ mod tests {
         assert_eq!(
             code_block_text("<pre><mark>let x = 1;\u{E001}blue</mark></pre>").as_deref(),
             Some("let x = 1;")
+        );
+    }
+
+    #[test]
+    fn code_callout_images_become_crisp_text_markers() {
+        let images = HashMap::from([
+            (
+                "callout1.png".to_string(),
+                "/book/res/callout1.png".to_string(),
+            ),
+            ("figure.png".to_string(), "/book/res/figure.png".to_string()),
+        ]);
+        let html = concat!(
+            "<pre><code>value = run() ",
+            "<img class=\"callout\" src=\"img/callout1.png\" alt=\"1\">",
+            "</code></pre>",
+            "<p><IMG SRC='img/figure.png' ALT='1'></p>"
+        );
+
+        let rewritten = rewrite_img_src(html, &images);
+
+        assert!(rewritten.contains("value = run() [1]"));
+        assert!(!rewritten.contains("/book/res/callout1.png"));
+        assert!(rewritten.contains("SRC='/book/res/figure.png'"));
+    }
+
+    #[test]
+    fn code_callout_filename_is_used_when_alt_is_missing() {
+        let images = HashMap::from([(
+            "number-23.png".to_string(),
+            "/book/res/number-23.png".to_string(),
+        )]);
+        assert_eq!(
+            rewrite_img_src("<pre><img src=\"icons/number-23.png\"></pre>", &images),
+            "<pre>[23]</pre>"
+        );
+        assert_eq!(
+            rewrite_img_src(
+                "<code><img src=\"missing.png\" alt=\"7\"></code>",
+                &HashMap::new()
+            ),
+            "<code>[7]</code>"
         );
     }
 }
