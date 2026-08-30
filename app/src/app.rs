@@ -248,6 +248,28 @@ fn replace_paragraphs(chunks: Vec<String>) {
     *PARAGRAPHS.write().unwrap() = chunks;
 }
 
+fn is_table_block(html: &str) -> bool {
+    let html = html.trim_start();
+    html.get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("<table"))
+        && html
+            .as_bytes()
+            .get(6)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'>' || *byte == b'/')
+}
+
+#[cfg(test)]
+mod table_block_tests {
+    use super::is_table_block;
+
+    #[test]
+    fn recognizes_only_top_level_table_blocks() {
+        assert!(is_table_block("  <TABLE class='data'><tr></tr></TABLE>"));
+        assert!(!is_table_block("<p>Table 1</p><table></table>"));
+        assert!(!is_table_block("<tableau>not a table</tableau>"));
+    }
+}
+
 /// 全局数据库句柄：后台线程初始化后写入，各处只读使用。
 static DB: OnceLock<readwise_core::Db> = OnceLock::new();
 /// Last database counts successfully projected to the UI. Hidden mobile
@@ -2742,6 +2764,42 @@ script_mod! {
                     mark := mod.widgets.MarkSpan{}
                 }
             }
+            TablePara := View{
+                width: Fill height: Fit
+                flow: Down
+                align: HCenter
+                margin: Inset{top: 8 bottom: 10}
+                para_html := Html{
+                    width: Fill{max: 960} height: Fit
+                    selectable: true
+                    a.color: theme.color_text
+                    a.hover_color: theme.color_text_hover
+                    a.pressed_color: theme.color_text_focus
+                    img := mod.widgets.ChapterImage{}
+                    mark := mod.widgets.MarkSpan{}
+                }
+            }
+            TableGlossPara := View{
+                width: Fill height: Fit
+                flow: Down
+                align: HCenter
+                margin: Inset{top: 8 bottom: 10}
+                para_html := Html{
+                    width: Fill{max: 960} height: Fit
+                    selectable: true
+                    padding: Inset{top: 22}
+                    text_style_normal.line_spacing: 2.2
+                    text_style_bold.line_spacing: 2.2
+                    text_style_italic.line_spacing: 2.2
+                    text_style_fixed.line_spacing: 2.2
+                    a.color: theme.color_text
+                    a.hover_color: theme.color_text_hover
+                    a.pressed_color: theme.color_text_focus
+                    ruby := mod.widgets.RubyWord{}
+                    img := mod.widgets.ChapterImage{}
+                    mark := mod.widgets.MarkSpan{}
+                }
+            }
             CodePaper := ReaderCodePara{
                 draw_bg +: {color: #f7f4ea border_color: #d8d1c2}
                 code_view := ReaderCodeViewLight{}
@@ -3988,6 +4046,23 @@ impl ChapterList {
             return;
         }
         self.compact_layout = compact_layout;
+        let reader_padding = if compact_layout {
+            Inset {
+                left: 12.0,
+                right: 12.0,
+                top: 8.0,
+                bottom: 24.0,
+            }
+        } else {
+            Inset {
+                left: 32.0,
+                right: 32.0,
+                top: 8.0,
+                bottom: 32.0,
+            }
+        };
+        let mut list_widget = self.view.widget(cx, ids!(list));
+        script_apply_eval!(cx, list_widget, {padding: #(reader_padding)});
         let list = self.view.portal_list(cx, ids!(list));
         if let Some(mut inner) = list.borrow_mut() {
             inner.selectable = !compact_layout;
@@ -4250,6 +4325,7 @@ impl Widget for ChapterList {
         let reader_background = *READER_BACKGROUND.read().unwrap();
         let reader_theme = *READER_THEME.read().unwrap();
         let (_, reader_text_color) = reader_palette(reader_background, reader_theme);
+        let reader_scene = reader_scene_palette(reader_background, reader_theme);
         let code_template = match reader_background {
             ReaderBackground::Paper => id!(CodePaper),
             ReaderBackground::Sepia => id!(CodeSepia),
@@ -4301,8 +4377,13 @@ impl Widget for ChapterList {
                     };
                     let code_text = code_blocks.get(item_id).and_then(Option::as_deref);
                     let has_gloss = para.contains("<ruby");
+                    let is_table = is_table_block(para);
                     let template = if code_text.is_some() {
                         code_template
+                    } else if is_table && has_gloss {
+                        id!(TableGlossPara)
+                    } else if is_table {
+                        id!(TablePara)
                     } else if has_gloss {
                         id!(GlossPara)
                     } else {
@@ -4327,6 +4408,8 @@ impl Widget for ChapterList {
                             inner.text_flow.font_color = reader_text_color;
                             inner.text_flow.draw_text.color = reader_text_color;
                             inner.text_flow.draw_selection.color = selection_color;
+                            inner.text_flow.draw_block.table_header_bg_color = reader_scene.field;
+                            inner.text_flow.draw_block.table_border_color = reader_scene.border;
                             inner.text_flow.text_style_normal.font_family = normal_family.clone();
                             inner.text_flow.text_style_italic.font_family = italic_family.clone();
                             inner.text_flow.text_style_bold.font_family = bold_family.clone();

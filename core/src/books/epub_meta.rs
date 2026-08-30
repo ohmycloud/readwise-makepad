@@ -320,9 +320,87 @@ const DROP_TAGS: &[&str] = &[
     "script", "style", "head", "svg", "math", "rt", "rp", "template",
 ];
 
+/// EPUB 表格标题通常写在 `<table><caption>…</caption>` 内。Makepad 的 Html
+/// 能绘制表格，却没有 caption 的块级布局；直接去掉 caption 标签会让标题文字
+/// 和第一行表格共用同一个文本流。这里先把标题提升到 table 前的独立段落，既保留
+/// 语义，也让后续 `split_blocks` 能把标题和表格分别交给 PortalList。
+fn hoist_table_captions(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len() + 32);
+    let mut cursor = 0;
+
+    while let Some(table_rel) = lower[cursor..].find("<table") {
+        let table_start = cursor + table_rel;
+        let name_end = table_start + "<table".len();
+        if lower
+            .as_bytes()
+            .get(name_end)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'>' && *byte != b'/')
+        {
+            out.push_str(&html[cursor..name_end]);
+            cursor = name_end;
+            continue;
+        }
+        let Some(open_end_rel) = lower[table_start..].find('>') else {
+            break;
+        };
+        let open_end = table_start + open_end_rel;
+        let Some(close_rel) = lower[open_end + 1..].find("</table>") else {
+            break;
+        };
+        let table_end = open_end + 1 + close_rel + "</table>".len();
+        let table_lower = &lower[open_end + 1..table_end];
+        let Some(caption_rel) = table_lower.find("<caption") else {
+            out.push_str(&html[cursor..table_end]);
+            cursor = table_end;
+            continue;
+        };
+        let caption_start = open_end + 1 + caption_rel;
+        let caption_name_end = caption_start + "<caption".len();
+        if lower
+            .as_bytes()
+            .get(caption_name_end)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'>' && *byte != b'/')
+        {
+            out.push_str(&html[cursor..table_end]);
+            cursor = table_end;
+            continue;
+        }
+        let Some(caption_open_end_rel) = lower[caption_start..table_end].find('>') else {
+            out.push_str(&html[cursor..table_end]);
+            cursor = table_end;
+            continue;
+        };
+        let caption_open_end = caption_start + caption_open_end_rel;
+        let Some(caption_close_rel) = lower[caption_open_end + 1..table_end].find("</caption>")
+        else {
+            out.push_str(&html[cursor..table_end]);
+            cursor = table_end;
+            continue;
+        };
+        let caption_close = caption_open_end + 1 + caption_close_rel;
+        let caption_end = caption_close + "</caption>".len();
+        let caption = html[caption_open_end + 1..caption_close].trim();
+
+        out.push_str(&html[cursor..table_start]);
+        if !caption.is_empty() {
+            out.push_str("<p><strong>");
+            out.push_str(caption);
+            out.push_str("</strong></p>");
+        }
+        out.push_str(&html[table_start..caption_start]);
+        out.push_str(&html[caption_end..table_end]);
+        cursor = table_end;
+    }
+    out.push_str(&html[cursor..]);
+    out
+}
+
 /// 面向 Html widget 的消毒：白名单标签保留原样；未知标签（div/section/span/a/figure…）
 /// 去掉标签本身、保留内部内容；DROP_TAGS 连内容删除；注释/声明剔除。
 pub fn sanitize_for_reader(html: &str) -> String {
+    let html = hoist_table_captions(html);
+    let html = html.as_str();
     let mut out = String::with_capacity(html.len());
     let lower = html.to_lowercase();
     let mut i = 0;
@@ -378,7 +456,13 @@ pub fn sanitize_for_reader(html: &str) -> String {
             continue;
         }
 
-        if KEEP_TAGS.contains(&name.as_str()) {
+        if name == "figcaption" {
+            if is_close {
+                out.push_str("</em></p>");
+            } else {
+                out.push_str("<p><em>");
+            }
+        } else if KEEP_TAGS.contains(&name.as_str()) {
             out.push_str(&html[lt..=gt]);
         }
         // 未知标签：不输出标签本身，内容自然流过（去壳留瓤）
@@ -417,6 +501,16 @@ pub fn split_blocks(html: &str) -> Vec<String> {
             .collect::<String>()
             .to_lowercase();
 
+        // A top-level table must start with a fresh layout turtle. EPUB figure/caption
+        // wrappers are removed by sanitization, so defensive splitting here also fixes
+        // malformed books that leave plain title text immediately before `<table>`.
+        if !is_close && name == "table" && depth == 0 {
+            let prefix = buf.trim();
+            if !prefix.is_empty() {
+                blocks.push(prefix.to_string());
+            }
+            buf.clear();
+        }
         buf.push_str(&html[lt..=gt]);
         if !VOID.contains(&name.as_str()) && !self_close && !name.is_empty() {
             depth += if is_close { -1 } else { 1 };
@@ -579,6 +673,53 @@ mod tests {
                 "<h2>T</h2>".to_string(),
                 "<blockquote><p>a</p><p>b</p></blockquote>".to_string(),
                 "<p>c</p>".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn table_caption_is_hoisted_and_table_gets_its_own_block() {
+        let src = concat!(
+            "<figure><table><caption>Table 1. Results</caption>",
+            "<thead><tr><th>Name</th><th>Score</th></tr></thead>",
+            "<tbody><tr><td>Ada</td><td>10</td></tr></tbody></table></figure>"
+        );
+        let sanitized = sanitize_for_reader(src);
+        assert_eq!(
+            split_blocks(&sanitized),
+            vec![
+                "<p><strong>Table 1. Results</strong></p>".to_string(),
+                concat!(
+                    "<table><thead><tr><th>Name</th><th>Score</th></tr></thead>",
+                    "<tbody><tr><td>Ada</td><td>10</td></tr></tbody></table>"
+                )
+                .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn figure_caption_is_a_separate_reading_paragraph() {
+        let sanitized = sanitize_for_reader(
+            "<figure><figcaption>Table 2. Details</figcaption><table><tr><td>x</td></tr></table></figure>",
+        );
+        assert_eq!(
+            split_blocks(&sanitized),
+            vec![
+                "<p><em>Table 2. Details</em></p>".to_string(),
+                "<table><tr><td>x</td></tr></table>".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn top_level_table_is_split_from_unwrapped_leading_text() {
+        assert_eq!(
+            split_blocks("Table 3<table><tr><td>x</td></tr></table>tail"),
+            vec![
+                "Table 3".to_string(),
+                "<table><tr><td>x</td></tr></table>".to_string(),
+                "tail".to_string(),
             ]
         );
     }

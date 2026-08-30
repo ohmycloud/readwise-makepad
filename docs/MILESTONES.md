@@ -57,7 +57,7 @@
 
 ## M3 阅读器核心 ✅ 2026-07-16
 
-- [x] 章节渲染管线：epub crate 取章 → extract_body → sanitize_for_reader（白名单/去壳留瓤）→ split_blocks 深度分块 → PortalList+Html；顶层 `pre/code` 使用只读 CodeView 保留缩进/换行/注释并重做常用语法着色，代码底色与深浅 token 跟随阅读纸张（待用户实测）
+- [x] 章节渲染管线：epub crate 取章 → extract_body → sanitize_for_reader（白名单/去壳留瓤）→ split_blocks 深度分块 → PortalList+Html；顶层 `pre/code` 使用只读 CodeView 保留缩进/换行/注释并重做常用语法着色；表格标题独立分块，表格按桌面/手机可用宽度居中换行完整展示（待真书复测）
 - [x] 目录抽屉（章内首标题提取 + 行背景高亮）、章节跳转
 - [x] 视口翻屏 + 快捷键（空格/PgUp/PgDn/←→/Shift 跨章/Home）、章内进度%、进度保存恢复
 - [x] 字号调节（设置页，8-20，标题等比缩放）；字体/行距/主题已在 M8 完成并统一持久化
