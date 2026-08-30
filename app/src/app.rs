@@ -2464,6 +2464,8 @@ script_mod! {
                 draw_bg.color: theme.color_bg_app
                 toc_item_btn := ButtonFlat{
                     width: Fill
+                    align: Align{x: 0.0 y: 0.5}
+                    label_walk: Walk{width: Fill height: Fit}
                     text: ""
                 }
             }

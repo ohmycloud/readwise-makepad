@@ -2,6 +2,12 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-30 — M3 阅读器目录恢复左对齐
+
+- 阅读器目录项复用了 `ButtonFlat`，同时把按钮宽度设为 `Fill`；Makepad 的 `ButtonFlat` 默认 `align: Center`，因此章节标题会在整行居中。这与 EPUB 表格的居中模板无关，是目录模板一直没有覆盖按钮默认布局。
+- 目录按钮现显式使用水平靠左、垂直居中，并让 label 占满按钮可用宽度；改动仅作用于目录项，不影响普通按钮和正文表格。
+- `cargo check --workspace --offline`、App 回归 29/29 与 `git diff --check` 通过；桌面 App 实际打开已导入 EPUB，无 Splash/Widget 运行时错误，Android arm64 release APK 重建成功。
+
 ## 2026-08-30 — M3 EPUB 表格标题与响应式居中
 
 - Makepad `Html` 已支持 `table`，但不提供 `caption/figcaption` 的块级布局；旧清洗管线去掉这些标签外壳后，标题文字会直接粘在表格前的同一个 TextFlow 块里，使表格从残留文本位置起排，看起来整体右移并损失可用宽度。
