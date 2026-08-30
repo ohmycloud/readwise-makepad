@@ -6,7 +6,7 @@ use makepad_ai::{
 use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
@@ -35,8 +35,22 @@ fn uses_compact_layout(size: DVec2) -> bool {
     size.x > 0.0 && size.y > 0.0 && size.x < COMPACT_LAYOUT_BREAKPOINT
 }
 
+fn screen_orientation_changed(old_size: DVec2, new_size: DVec2) -> bool {
+    if old_size.x <= 0.0 || old_size.y <= 0.0 || new_size.x <= 0.0 || new_size.y <= 0.0 {
+        return false;
+    }
+    (old_size.x > old_size.y) != (new_size.x > new_size.y)
+}
+
 fn should_show_mobile_nav(compact_layout: bool, virtual_keyboard_open: bool) -> bool {
     compact_layout && !virtual_keyboard_open
+}
+
+fn library_surface_visibility(visible_count: usize) -> (bool, bool) {
+    // Keep the data-owning PortalList mounted even when it is empty. If it is
+    // hidden, a responsive rebuild can leave it uninstantiated and later
+    // set_visible calls become no-ops until another user action finds it.
+    (visible_count == 0, true)
 }
 
 fn word_range_at(text: &str, char_index: usize) -> Option<(usize, usize)> {
@@ -111,6 +125,39 @@ impl AppPage {
             Self::Statistics => id!(page_statistics),
             Self::Settings => id!(page_settings),
         }
+    }
+
+    fn from_persisted(value: usize) -> Self {
+        match value {
+            1 => Self::Reader,
+            2 => Self::Chat,
+            3 => Self::Skills,
+            4 => Self::Vocab,
+            5 => Self::Statistics,
+            6 => Self::Settings,
+            _ => Self::Library,
+        }
+    }
+
+    fn persisted(self) -> usize {
+        match self {
+            Self::Library => 0,
+            Self::Reader => 1,
+            Self::Chat => 2,
+            Self::Skills => 3,
+            Self::Vocab => 4,
+            Self::Statistics => 5,
+            Self::Settings => 6,
+        }
+    }
+}
+
+fn restored_page_after_rebuild(value: usize, has_current_book: bool) -> AppPage {
+    let page = AppPage::from_persisted(value);
+    if page == AppPage::Reader && !has_current_book {
+        AppPage::Library
+    } else {
+        page
     }
 }
 
@@ -194,8 +241,16 @@ fn replace_paragraphs(chunks: Vec<String>) {
 
 /// 全局数据库句柄：后台线程初始化后写入，各处只读使用。
 static DB: OnceLock<readwise_core::Db> = OnceLock::new();
+/// Last database counts successfully projected to the UI. Hidden mobile
+/// subtrees can be instantiated only after a rotation, so their labels need a
+/// process-lifetime source of truth instead of falling back to DSL defaults.
+static DB_READY_COUNTS: LazyLock<RwLock<Option<(usize, usize)>>> =
+    LazyLock::new(|| RwLock::new(None));
 static APP_STARTED_AT: OnceLock<Instant> = OnceLock::new();
 static INITIAL_LIBRARY_READY_LOGGED: AtomicBool = AtomicBool::new(false);
+/// Process-lifetime navigation state. Android can rebuild Makepad's App while
+/// keeping the native process alive during an OEM configuration transition.
+static ACTIVE_PAGE: AtomicUsize = AtomicUsize::new(0);
 
 fn startup_elapsed_ms() -> Option<u128> {
     APP_STARTED_AT
@@ -836,11 +891,53 @@ mod responsive_layout_tests {
     }
 
     #[test]
+    fn mobile_rotation_is_distinct_from_same_orientation_resize() {
+        assert!(screen_orientation_changed(
+            dvec2(390.0, 844.0),
+            dvec2(844.0, 390.0)
+        ));
+        assert!(!screen_orientation_changed(
+            dvec2(390.0, 844.0),
+            dvec2(430.0, 932.0)
+        ));
+        assert!(!screen_orientation_changed(
+            dvec2(0.0, 0.0),
+            dvec2(844.0, 390.0)
+        ));
+    }
+
+    #[test]
+    fn library_portal_list_stays_mounted_behind_the_empty_state() {
+        assert_eq!(library_surface_visibility(0), (true, true));
+        assert_eq!(library_surface_visibility(3), (false, true));
+    }
+
+    #[test]
     fn mobile_navigation_stays_hidden_while_the_virtual_keyboard_is_open() {
         assert!(should_show_mobile_nav(true, false));
         assert!(!should_show_mobile_nav(true, true));
         assert!(!should_show_mobile_nav(false, false));
         assert!(!should_show_mobile_nav(false, true));
+    }
+
+    #[test]
+    fn same_process_rebuild_restores_navigation_without_showing_sample_reader() {
+        assert_eq!(
+            restored_page_after_rebuild(AppPage::Reader.persisted(), true),
+            AppPage::Reader
+        );
+        assert_eq!(
+            restored_page_after_rebuild(AppPage::Reader.persisted(), false),
+            AppPage::Library
+        );
+        assert_eq!(
+            restored_page_after_rebuild(AppPage::Vocab.persisted(), false),
+            AppPage::Vocab
+        );
+        assert_eq!(
+            restored_page_after_rebuild(usize::MAX, true),
+            AppPage::Library
+        );
     }
 
     #[test]
@@ -1573,6 +1670,8 @@ fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
 
 /// 当前章下标（App 写、TocList 读，做高亮）。
 static CURRENT_CHAPTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// First visible paragraph, used only to restore an Android same-process App rebuild.
+static CURRENT_READER_BLOCK: AtomicUsize = AtomicUsize::new(0);
 
 /// 打开书的结果（后台 → UI）。
 #[derive(Debug)]
@@ -1935,24 +2034,36 @@ enum DbAction {
 
 fn spawn_db_init(platform_data_dir: Option<std::path::PathBuf>) {
     std::thread::spawn(move || {
+        if let Some(db) = DB.get() {
+            Cx::post_action(db_ready_action(db));
+            return;
+        }
         let data_dir =
             readwise_core::paths::app_data_dir_from_platform(platform_data_dir.as_deref());
         match readwise_core::Db::open_in(data_dir) {
             Ok(db) => {
-                let entries = db.vocab_book_list().unwrap_or_default();
-                let known = db.get_known_words().unwrap_or_default();
-                let reader_settings = db.load_reader_settings().unwrap_or_default();
-                let action = DbAction::Ready {
-                    vocab_count: entries.len(),
-                    known_count: known.len(),
-                    reader_settings,
-                };
                 let _ = DB.set(db);
-                Cx::post_action(action);
+                if let Some(db) = DB.get() {
+                    Cx::post_action(db_ready_action(db));
+                } else {
+                    Cx::post_action(DbAction::Failed("数据库句柄初始化后不可用".to_string()));
+                }
             }
             Err(e) => Cx::post_action(DbAction::Failed(e)),
         }
     });
+}
+
+fn db_ready_action(db: &readwise_core::Db) -> DbAction {
+    let entries = db.vocab_book_list().unwrap_or_default();
+    let known = db.get_known_words().unwrap_or_default();
+    let reader_settings = db.load_reader_settings().unwrap_or_default();
+    *DB_READY_COUNTS.write().unwrap() = Some((entries.len(), known.len()));
+    DbAction::Ready {
+        vocab_count: entries.len(),
+        known_count: known.len(),
+        reader_settings,
+    }
 }
 
 #[derive(Debug)]
@@ -2654,7 +2765,7 @@ script_mod! {
                                     import_epub_btn := ButtonFlat{
                                         // 平台能力在初始脚本对象中确定；不要依赖 Startup
                                         // 再把静态 false 改回来，ScriptReapply 会覆盖它。
-                                        visible: #(cfg!(any(target_os = "ios", target_os = "macos")))
+                                        visible: #(cfg!(any(target_os = "android", target_os = "ios", target_os = "macos")))
                                         text: "导入 EPUB"
                                     }
                                 }
@@ -2690,7 +2801,10 @@ script_mod! {
                                 width: Fill height: Fill
                                 flow: Overlay
                                 library_empty := View{
-                                    visible: true
+                                    // The first real projection decides whether
+                                    // this overlay is needed. Avoid flashing a
+                                    // stale empty state after mobile rotation.
+                                    visible: false
                                     width: Fill height: Fill
                                     flow: Down spacing: 8
                                     align: Center
@@ -2704,7 +2818,9 @@ script_mod! {
                                         draw_text.text_style.font_size: 9
                                     }
                                 }
-                                book_shelf := mod.widgets.BookShelf{visible: false}
+                                // Keep the PortalList mounted; it reads the
+                                // centralized shelf projection in draw_walk.
+                                book_shelf := mod.widgets.BookShelf{}
                             }
                         }
 
@@ -4775,6 +4891,10 @@ pub struct App {
     compact_layout: bool,
     #[rust]
     responsive_layout_initialized: bool,
+    /// A responsive transition can recreate hidden widget subtrees during the
+    /// next Draw. Project state only after that draw has instantiated them.
+    #[rust]
+    pending_ui_projection_after_draw: bool,
     #[rust]
     virtual_keyboard_open: bool,
     #[rust]
@@ -4791,11 +4911,54 @@ pub struct App {
 }
 
 impl App {
+    fn project_db_ready_status(&self, cx: &mut Cx, vocab_count: usize, known_count: usize) {
+        let status = if app_language() == AppLanguage::English {
+            format!(
+                "Database ready\nVocabulary {} · Known {}",
+                vocab_count, known_count
+            )
+        } else {
+            format!(
+                "数据库就绪\n生词本 {} · 已认识 {}",
+                vocab_count, known_count
+            )
+        };
+        self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
+        let summary = if app_language() == AppLanguage::English {
+            format!("{vocab_count} words; loading list…")
+        } else {
+            format!("共 {vocab_count} 词，正在加载列表…")
+        };
+        self.ui
+            .label(cx, ids!(vocab_summary))
+            .set_text(cx, &summary);
+    }
+
+    /// Mobile rotation can instantiate subtrees that were hidden in the other
+    /// responsive mode. Re-project business state after a complete Draw so DSL
+    /// placeholder values cannot win and WidgetRef setters cannot hit an empty
+    /// reference.
+    fn restore_projected_ui_after_draw(&mut self, cx: &mut Cx) {
+        self.activate_page(cx, self.active_page);
+        if let Some((vocab_count, known_count)) = *DB_READY_COUNTS.read().unwrap() {
+            self.project_db_ready_status(cx, vocab_count, known_count);
+        }
+        self.refresh_shelf_projection(cx);
+        let shelf_count = SHELF.read().unwrap().len();
+        let visible_count = SHELF_VISIBLE.read().unwrap().entries.len();
+        ::log::info!(
+            "Responsive projection after draw: shelf={shelf_count}, visible={visible_count}, page={:?}",
+            self.active_page
+        );
+        self.ui.redraw(cx);
+    }
+
     fn activate_page(&mut self, cx: &mut Cx, page: AppPage) {
         self.ui
             .page_flip(cx, ids!(pages))
             .set_active_page(cx, page.live_id());
         self.active_page = page;
+        ACTIVE_PAGE.store(page.persisted(), Ordering::Relaxed);
         self.on_reader_page = page == AppPage::Reader;
         if self.on_reader_page {
             self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
@@ -4917,10 +5080,10 @@ impl App {
             cx,
             if is_filtered_empty {
                 tr("no_tag_matches_hint")
-            } else if cfg!(target_os = "ios") {
+            } else if cfg!(any(target_os = "android", target_os = "ios")) {
                 localized(
-                    "点击右上角“导入 EPUB”从“文件”中添加书籍",
-                    "Choose Import EPUB in the top-right corner to add books from Files",
+                    "点击右上角“导入 EPUB”从系统文件选择器中添加书籍",
+                    "Choose Import EPUB in the top-right corner to add books from the system picker",
                 )
             } else if cfg!(target_os = "macos") {
                 localized(
@@ -4931,12 +5094,13 @@ impl App {
                 tr("library_empty_hint")
             },
         );
+        let (show_empty, show_shelf) = library_surface_visibility(visible_count);
         self.ui
             .widget(cx, ids!(library_empty))
-            .set_visible(cx, visible_count == 0);
+            .set_visible(cx, show_empty);
         self.ui
             .widget(cx, ids!(book_shelf))
-            .set_visible(cx, visible_count > 0);
+            .set_visible(cx, show_shelf);
         self.ui.widget(cx, ids!(book_shelf)).redraw(cx);
         self.ui.widget(cx, ids!(page_library)).redraw(cx);
     }
@@ -5645,15 +5809,15 @@ impl App {
         cx: &mut Cx,
         size: DVec2,
         safe_area_insets: SafeAreaInsets,
-    ) {
+    ) -> bool {
         if size.x <= 0.0 || size.y <= 0.0 {
-            return;
+            return false;
         }
         let compact = uses_compact_layout(size);
         let layout_changed = !self.responsive_layout_initialized || compact != self.compact_layout;
         let safe_area_changed = safe_area_insets != self.safe_area_insets;
         if !layout_changed && !safe_area_changed {
-            return;
+            return false;
         }
 
         self.responsive_layout_initialized = true;
@@ -5680,6 +5844,7 @@ impl App {
         script_apply_eval!(cx, mobile_nav, {padding: #(mobile_nav_padding)});
         self.sync_reader_panel_layout(cx);
         self.ui.redraw(cx);
+        true
     }
 
     fn format_reading_duration(seconds: i64) -> String {
@@ -6744,6 +6909,7 @@ impl App {
         self.close_note_composer(cx);
         self.chapter_idx = idx;
         CURRENT_CHAPTER.store(idx, std::sync::atomic::Ordering::Relaxed);
+        CURRENT_READER_BLOCK.store(0, Ordering::Relaxed);
         replace_paragraphs(chunks);
         self.ui
             .label(cx, ids!(title))
@@ -6759,6 +6925,26 @@ impl App {
         self.ui.redraw(cx);
     }
 
+    /// Re-project the process-lifetime reader state into a freshly-created
+    /// widget tree. This is the fallback for Android vendors that recreate the
+    /// Activity despite the manifest configuration-change declaration.
+    fn restore_reader_after_rebuild(&mut self, cx: &mut Cx) {
+        if CURRENT_BOOK.read().unwrap().is_none() {
+            return;
+        }
+        let chapter = CURRENT_CHAPTER.load(Ordering::Relaxed);
+        let first_block = CURRENT_READER_BLOCK.load(Ordering::Relaxed);
+        self.set_chapter(cx, chapter);
+        let max_block = PARAGRAPHS.read().unwrap().len().saturating_sub(1);
+        let restored_block = first_block.min(max_block);
+        self.ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list))
+            .set_first_id_and_scroll(restored_block, 0.0);
+        CURRENT_READER_BLOCK.store(restored_block, Ordering::Relaxed);
+        self.update_progress_label(cx);
+    }
+
     /// 章内进度标签：`第x/y章 · z%`（z 按已读到的块估算）。
     fn update_progress_label(&mut self, cx: &mut Cx) {
         let total_ch = {
@@ -6770,6 +6956,7 @@ impl App {
             .ui
             .widget(cx, ids!(chapter_list))
             .portal_list(cx, ids!(list));
+        CURRENT_READER_BLOCK.store(list.first_id(), Ordering::Relaxed);
         let blocks = PARAGRAPHS.read().unwrap().len().max(1);
         let read_to = (list.first_id() + list.visible_items()).min(blocks);
         let pct = read_to * 100 / blocks;
@@ -7198,7 +7385,17 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.app_in_foreground = true;
-        self.activate_page(cx, self.active_page);
+        let has_current_book = CURRENT_BOOK.read().unwrap().is_some();
+        let page =
+            restored_page_after_rebuild(ACTIVE_PAGE.load(Ordering::Relaxed), has_current_book);
+        self.activate_page(cx, page);
+        self.refresh_shelf_projection(cx);
+        if has_current_book {
+            self.restore_reader_after_rebuild(cx);
+            if page == AppPage::Reader {
+                self.start_reading_timer(cx);
+            }
+        }
     }
 
     fn handle_foreground(&mut self, cx: &mut Cx) {
@@ -7315,6 +7512,36 @@ impl MatchEvent for App {
                 }
                 continue;
             }
+            #[cfg(target_os = "android")]
+            if let Some(import_action) =
+                action.downcast_ref::<crate::android_import::AndroidImportAction>()
+            {
+                match import_action {
+                    crate::android_import::AndroidImportAction::Picked(paths) => {
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            localized("正在导入所选 EPUB…", "Importing selected EPUB files…"),
+                        );
+                        spawn_import(paths.clone(), true);
+                    }
+                    crate::android_import::AndroidImportAction::Cancelled => {
+                        self.ui
+                            .label(cx, ids!(library_hint))
+                            .set_text(cx, localized("已取消导入", "Import cancelled"));
+                    }
+                    crate::android_import::AndroidImportAction::Error(error) => {
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Import failed: {error}")
+                            } else {
+                                format!("导入失败：{error}")
+                            },
+                        );
+                    }
+                }
+                continue;
+            }
             if let Some(db_action) = action.downcast_ref::<DbAction>() {
                 match db_action {
                     DbAction::Ready {
@@ -7325,26 +7552,7 @@ impl MatchEvent for App {
                         if let Some(elapsed) = startup_elapsed_ms() {
                             ::log::info!("Startup: database and settings ready in {elapsed}ms");
                         }
-                        let status = if app_language() == AppLanguage::English {
-                            format!(
-                                "Database ready\nVocabulary {} · Known {}",
-                                vocab_count, known_count
-                            )
-                        } else {
-                            format!(
-                                "数据库就绪\n生词本 {} · 已认识 {}",
-                                vocab_count, known_count
-                            )
-                        };
-                        self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
-                        let summary = if app_language() == AppLanguage::English {
-                            format!("{vocab_count} words; loading list…")
-                        } else {
-                            format!("共 {vocab_count} 词，正在加载列表…")
-                        };
-                        self.ui
-                            .label(cx, ids!(vocab_summary))
-                            .set_text(cx, &summary);
+                        self.project_db_ready_status(cx, *vocab_count, *known_count);
                         self.apply_reader_settings(cx, reader_settings.clone());
                         self.ui.label(cx, ids!(settings_hint)).set_text(
                             cx,
@@ -8000,7 +8208,7 @@ impl MatchEvent for App {
                             } else {
                                 format!("共 {items} 本（本次新增 {imported} 本）")
                             }
-                        } else if cfg!(target_os = "ios") {
+                        } else if cfg!(any(target_os = "android", target_os = "ios")) {
                             if app_language() == AppLanguage::English {
                                 format!("{items} books · Choose Import EPUB to add files")
                             } else {
@@ -8222,6 +8430,24 @@ impl MatchEvent for App {
                     },
                 ),
             }
+            #[cfg(target_os = "android")]
+            match crate::android_import::open_epub_picker() {
+                Ok(()) => self.ui.label(cx, ids!(library_hint)).set_text(
+                    cx,
+                    localized(
+                        "请从系统文件选择器中选择 EPUB…",
+                        "Select EPUB files in the system picker…",
+                    ),
+                ),
+                Err(error) => self.ui.label(cx, ids!(library_hint)).set_text(
+                    cx,
+                    &if app_language() == AppLanguage::English {
+                        format!("Could not open the file picker: {error}")
+                    } else {
+                        format!("无法打开文件选择器：{error}")
+                    },
+                ),
+            }
         }
         let skill_list = self
             .ui
@@ -8303,6 +8529,12 @@ impl MatchEvent for App {
                 self.stop_reading_timer(cx, false);
             }
             self.activate_page(cx, AppPage::Library);
+            // The library page or its PortalList may only be instantiated when
+            // entering it after a mobile responsive transition.
+            self.refresh_shelf_projection(cx);
+            if cfg!(any(target_os = "android", target_os = "ios")) {
+                self.pending_ui_projection_after_draw = true;
+            }
         }
         if self.ui.button(cx, ids!(nav_reader)).clicked(actions)
             || self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions)
@@ -9045,12 +9277,12 @@ impl AppMain for App {
                     cx.display_context.screen_size,
                     cx.display_context.safe_area_insets,
                 );
-                if cfg!(target_os = "ios") {
+                if cfg!(any(target_os = "android", target_os = "ios")) {
                     self.ui.label(cx, ids!(library_hint)).set_text(
                         cx,
                         localized(
-                            "点击“导入 EPUB”，从“文件”App 中选择书籍。",
-                            "Choose Import EPUB to select books from Files.",
+                            "点击“导入 EPUB”，从系统文件选择器中选择书籍。",
+                            "Choose Import EPUB to select books from the system picker.",
                         ),
                     );
                     self.ui.label(cx, ids!(library_empty_hint)).set_text(
@@ -9063,11 +9295,23 @@ impl AppMain for App {
                 }
                 spawn_db_init(cx.get_data_dir().map(std::path::PathBuf::from));
             }
-            Event::WindowGeomChange(event) => self.update_responsive_layout(
-                cx,
-                event.new_geom.inner_size,
-                event.new_geom.safe_area_insets,
-            ),
+            Event::WindowGeomChange(event) => {
+                let responsive_changed = self.update_responsive_layout(
+                    cx,
+                    event.new_geom.inner_size,
+                    event.new_geom.safe_area_insets,
+                );
+                let restore_mobile_geometry = cfg!(any(target_os = "android", target_os = "ios"))
+                    && (responsive_changed
+                        || screen_orientation_changed(
+                            event.old_geom.inner_size,
+                            event.new_geom.inner_size,
+                        ));
+                if restore_mobile_geometry {
+                    self.pending_ui_projection_after_draw = true;
+                    self.ui.redraw(cx);
+                }
+            }
             Event::VirtualKeyboard(event) => self.handle_virtual_keyboard(cx, event),
             Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
             // 滚轮/触控板滚动后刷新章内百分比
@@ -9102,6 +9346,10 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if matches!(event, Event::Draw(_)) && self.pending_ui_projection_after_draw {
+            self.pending_ui_projection_after_draw = false;
+            self.restore_projected_ui_after_draw(cx);
+        }
         if let Some(direction) = reader_swipe {
             let selection_is_clear =
                 SEL_RANGE.read().unwrap().is_none() && SELECTED_TEXT.read().unwrap().is_empty();

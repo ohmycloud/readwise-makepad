@@ -2,6 +2,24 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-08-30 — Android 横竖屏状态保持（待真机复测）
+
+- 用户真机复测发现，旋转到横屏后书架和当前阅读状态丢失，界面回到样例文章并停留在“数据库初始化中”。根因是部分 Android 设备在旋转时除了 `orientation|screenSize` 还会报告密度、屏幕布局、最小屏幕尺寸或 UI mode 变更；原清单没有声明处理这些变更，Activity 可能被重建。
+- Android 清单现完整接管影响窗口排版的配置变更，正常旋转只投递 `WindowGeomChange` 并重算响应式布局，不再销毁 Makepad 运行时。
+- 同时增加防御性恢复：如果 OEM 仍重建应用界面树，新 App 会立即从进程内状态重投影书架、当前页、当前书籍、章节与可见段落；数据库已就绪时直接发送现有快照，不重复打开 SQLite。阅读页在没有真实当前书籍时强制回到书库，避免把内置样例误当用户内容。
+- 第二轮真机复测表明数据未丢失：点击“全部标签”即可恢复书籍。这定位到从紧凑布局切换到横屏布局时，原先隐藏的 Makepad 子树才初次实例化，因而暂时显示 DSL 中的“数据库初始化中/书架空”默认值。现在会先让 Window 完成几何事件与控件实例化，再从集中状态重投影数据库就绪信息、当前页、书架数据、筛选摘要与空状态显隐；进入书库也会主动执行同一投影。
+- 第三轮复测说明几何事件结束时投影仍然太早：`BookShelf` 原本在 DSL 中默认隐藏，而 `WidgetRef::set_visible` 对尚未实例化的引用会直接无效。现将数据所有者 `BookShelf/PortalList` 始终挂载，其 `draw_walk` 每帧从 `SHELF_VISIBLE` 读取真实数据；“书架空”只作为独立覆盖层。旋转时等完成第一次 Draw、确保子树实例化后再投影状态并请求第二帧，不再依赖标签点击产生的延后 action。
+- 测试 APK 的 Android `versionCode` 从 1 提升到 2，避免手机文件管理器或安装器对同文件名、同版本包产生缓存/辨识混淆；覆盖安装保留原有沙箱数据。
+- Android 书架加载后的提示文案同步改为“从系统文件选择器导入”，不再显示桌面端拖放指引。
+- `cargo check --workspace --offline`、`git diff --check` 与完整回归测试 62/62 通过；桌面实际启动无 Splash/PortalList 运行时错误；新 arm64 release APK 待 Android 真机再次验收往返横竖屏。
+
+## 2026-08-30 — M7 Android EPUB 系统选择器（真机通过）
+
+- 用户真机安装后没有看到“导入 EPUB”，直接原因是按钮的 Splash 静态显隐条件只包含 macOS/iOS，Android 点击处理也没有平台分支。现在 Android 与 iOS/macOS 一样在书库右上角显示入口，空状态和进度/取消/错误文案也走同一条状态投影。
+- 实现 Android Storage Access Framework 多选：系统 `ACTION_OPEN_DOCUMENT` 返回 content URI 后，应用 Activity 把文件流复制到私有 cache，JNI 回调用 `Cx::post_action` 投递给 Makepad UI，再复用现有后台 EPUB 解析、数据库入库和书架刷新链路；成功后清理 cache 副本。不申请存储、媒体或“访问全部文件”权限。
+- 当前锁定 Makepad 的 `MakepadActivity` 已出现 `onActivityResult` 预留位，但 `cargo-makepad` 仍只编译固定 Java 源与自动生成的空子类，没有应用级 Java 注入出口。因此打包脚本先生成标准类，再编译仓库内的 `MakepadApp` 子类并让第二次打包复用该 class；不修改 Cargo 缓存中的 Makepad 源码，也不复制整份框架 Activity。
+- 真实 arm64 release APK 重建成功；`javap`/DEX 检查确认 `openEpubPicker` 与 `onActivityResult` 存在，`llvm-nm` 确认 Rust 动态库导出匹配的 JNI 符号。Android 真机导入主链路已通过用户验证；本轮加入横竖屏修复后，完整回归测试 60/60 通过。
+
 ## 2026-08-29 — M3 阅读场景视觉统一（待实测）
 
 - 根因是阅读背景之前只投影到 `reader_surface` 和正文颜色，标题栏、目录、笔记、阅读 AI、输入框、选区菜单与词卡仍使用 Makepad 应用级灰色 theme token，两个并行主题域把阅读页割裂成灰色 UI 和纸张正文。

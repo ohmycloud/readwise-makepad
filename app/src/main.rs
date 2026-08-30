@@ -1,3 +1,5 @@
+#[cfg(target_os = "android")]
+mod android_import;
 mod app;
 mod chapter_image;
 #[cfg(target_os = "macos")]

@@ -1753,7 +1753,9 @@ version = "0.1.0"
 dependencies = [
  "log 0.4.33",
  "makepad-ai",
+ "makepad-android-state",
  "makepad-code-editor",
+ "makepad-jni-sys",
  "makepad-widgets",
  "readwise-core",
  "serde_json",

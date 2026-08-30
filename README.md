@@ -168,7 +168,7 @@ scripts/package_android.sh
 target/dist/ReadWise-android-aarch64-<版本>.apk
 ```
 
-应用使用 `org.ohmycloud.readwise` 包名、Cargo 版本、API 26 最低版本和 API 35 目标版本。Android 清单只申请 AI/API 通信必需的网络与网络状态权限，不申请相机、麦克风、定位、蓝牙、存储或查询全部应用权限。
+应用使用 `org.ohmycloud.readwise` 包名、Cargo 版本、API 26 最低版本和 API 35 目标版本。Android 清单只申请 AI/API 通信必需的网络与网络状态权限，不申请相机、麦克风、定位、蓝牙、存储或查询全部应用权限。“导入 EPUB”使用 Android 系统文档选择器的单次授权，选中的文件会先复制到应用私有缓存，无需全局存储权限。
 
 如需额外生成 Play Store AAB，提供发布 keystore 和密码。密码通过环境变量传递，不写入命令行或仓库；key alias 默认从 `cargo makepad android keystore-create` 生成的 `.makepad` sidecar 读取：
 

@@ -11,7 +11,7 @@
 | macOS 桌面 | ✅ 已验证 |
 | iOS（iPhone） | ✅ 已验证（真机 + 模拟器） |
 | Windows / Linux 桌面 | 🟡 原生打包脚本已实现，待对应主机实跑与 UI 补测（Windows 窗口装饰小差异待处理） |
-| Android | 🟡 arm64 release APK 已真实构建并校验，待真机安装与交互补测 |
+| Android | 🟡 arm64 release APK 已真实构建并安装，EPUB 系统选择器已通过真机验证，横竖屏状态保持待复测 |
 | **Web (wasm)** | ❌ **明确不做**。Makepad 框架支持 wasm，但 readwise-core 的 sqlx + SQLite + tokio 在浏览器沙箱跑不了（无文件系统/原生线程）。支持 Web 需为 wasm 单独做数据层（IndexedDB/OPFS sqlite-wasm）或改远程架构，违背本地优先设计，不纳入路线图。 |
 
 ## 总体策略
@@ -95,10 +95,10 @@
 
 ## M7 移动端适配
 
-- [ ] cargo-makepad 打包 iOS（真机）/ Android（Android arm64 release APK、产品包名/版本、最小权限清单、五档图标、开发签名校验及可选 Play Store AAB 流程已完成；待 Android 真机安装，iOS 分发仍待凭据/上游归档出口）
+- [ ] cargo-makepad 打包 iOS（真机）/ Android（Android arm64 release APK、产品包名/版本、最小权限清单、五档图标、开发签名校验及可选 Play Store AAB 流程已完成，APK 已真机安装；iOS 分发仍待凭据/上游归档出口）
 - [ ] 触摸交互：横向翻屏、长按选词后拖动扩选已实现（区分纵向滚动/长按/多指）；虚拟键盘显示时隐藏移动底栏并禁用翻屏手势；上述交互均待真机专项验收
 - [ ] 响应式布局：手机上侧栏折叠、单栏阅读（窄屏底栏、阅读面板单栏与安全区已实现，待真机验收）
-- [ ] 移动端文件导入、数据目录、生命周期（iOS Files 多选导入、原生沙箱目录与后台/恢复计时已实现，待真机验收；Android 系统选择器受当前 Makepad Activity 未转发 `onActivityResult` 限制，待上游扩展点或框架升级）
+- [ ] 移动端文件导入、数据目录、生命周期（iOS Files 多选导入、Android SAF 多选导入、原生沙箱目录与后台/恢复计时已实现；Android 使用应用级 Activity/JNI 桥接弥补当前 `cargo-makepad` 未注入 Java 插件的缺口，SAF 导入已通过真机验证，横竖屏状态保持修复待复测）
 
 验收：iPhone 真机安装，完成一次完整的"导入→阅读→查词→AI 问答"流程。
 
