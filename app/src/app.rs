@@ -1242,11 +1242,12 @@ static SELECTION_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(0)
 /// 生词注音总开关（关闭 = 原样显示文章）。
 static GLOSS_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(true));
 
-/// 当前 Makepad 主题。script_mod 重跑时从这里选择官方深色/浅色 token。
+/// 当前 Makepad 明暗偏好。“跟随主题”背景直接使用它，其余阅读背景会选择
+/// 对应的场景主题，并保留相同的控件明暗语义。
 static READER_THEME: LazyLock<RwLock<ReaderTheme>> =
     LazyLock::new(|| RwLock::new(ReaderTheme::Dark));
 
-/// 阅读正文的独立纸张配色，不改变侧栏、设置页等应用级主题。
+/// 全应用场景背景：正文、导航、窗口标题栏和其余功能页共享同一纸张配色。
 static READER_BACKGROUND: LazyLock<RwLock<ReaderBackground>> =
     LazyLock::new(|| RwLock::new(ReaderBackground::Paper));
 
@@ -1367,15 +1368,11 @@ fn reader_scene_palette(background: ReaderBackground, theme: ReaderTheme) -> Rea
 }
 
 fn navigation_palette_for_page(
-    page: AppPage,
+    _page: AppPage,
     background: ReaderBackground,
     theme: ReaderTheme,
 ) -> ReaderScenePalette {
-    if page == AppPage::Reader {
-        reader_scene_palette(background, theme)
-    } else {
-        reader_scene_palette(ReaderBackground::FollowTheme, theme)
-    }
+    reader_scene_palette(background, theme)
 }
 
 fn apply_reader_button_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
@@ -1473,25 +1470,23 @@ mod reader_scene_palette_tests {
     }
 
     #[test]
-    fn navigation_joins_reader_palette_only_on_the_reader_page() {
-        let reader = navigation_palette_for_page(
-            AppPage::Reader,
-            ReaderBackground::Sepia,
-            ReaderTheme::Dark,
-        );
-        let library = navigation_palette_for_page(
+    fn every_page_uses_the_same_scene_palette() {
+        let expected = reader_palette(ReaderBackground::Sepia, ReaderTheme::Dark).0;
+        for page in [
             AppPage::Library,
-            ReaderBackground::Sepia,
-            ReaderTheme::Dark,
-        );
-        assert_eq!(
-            reader.surface,
-            reader_palette(ReaderBackground::Sepia, ReaderTheme::Dark).0
-        );
-        assert_eq!(
-            library.surface,
-            reader_palette(ReaderBackground::FollowTheme, ReaderTheme::Dark).0
-        );
+            AppPage::Reader,
+            AppPage::Chat,
+            AppPage::Skills,
+            AppPage::Vocab,
+            AppPage::Statistics,
+            AppPage::Settings,
+        ] {
+            assert_eq!(
+                navigation_palette_for_page(page, ReaderBackground::Sepia, ReaderTheme::Dark)
+                    .surface,
+                expected
+            );
+        }
     }
 }
 
@@ -2865,9 +2860,11 @@ script_mod! {
                             draw_text.text_style.font_size: 8.5
                         }
                     }
-                    main_column := View{
+                    main_column := SolidView{
                         width: Fill height: Fill
+                        new_batch: true
                         flow: Down
+                        draw_bg.color: theme.color_bg_app
                         mobile_safe_top := SolidView{
                             visible: false
                             width: Fill height: 0
@@ -5146,11 +5143,7 @@ impl App {
         self.active_page = page;
         ACTIVE_PAGE.store(page.persisted(), Ordering::Relaxed);
         self.on_reader_page = page == AppPage::Reader;
-        if self.on_reader_page {
-            self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
-        } else {
-            self.apply_navigation_palette(cx, page);
-        }
+        self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
     }
 
     fn apply_navigation_palette(&self, cx: &mut Cx, page: AppPage) {
@@ -5445,7 +5438,12 @@ impl App {
     fn apply_reader_background(&self, cx: &mut Cx, background: ReaderBackground) {
         let palette = reader_scene_palette(background, *READER_THEME.read().unwrap());
 
-        for id in [id!(page_reader), id!(reader_body), id!(reader_surface)] {
+        for id in [
+            id!(main_column),
+            id!(page_reader),
+            id!(reader_body),
+            id!(reader_surface),
+        ] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),
@@ -5545,9 +5543,8 @@ impl App {
             toc.button_hover = palette.hover;
             toc.button_pressed = palette.pressed;
         }
-        if self.on_reader_page {
-            self.apply_navigation_palette(cx, AppPage::Reader);
-        }
+        self.apply_navigation_palette(cx, self.active_page);
+        self.ui.widget(cx, ids!(main_column)).redraw(cx);
         self.ui.widget(cx, ids!(page_reader)).redraw(cx);
     }
 
@@ -5561,6 +5558,7 @@ impl App {
         self.sync_reader_background_controls(cx, background);
         self.apply_reader_background(cx, background);
         self.persist_reader_settings(cx);
+        self.apply_runtime_theme(cx, *READER_THEME.read().unwrap());
     }
 
     fn sync_app_language_controls(&self, cx: &mut Cx, language: AppLanguage) {
@@ -5861,16 +5859,9 @@ impl App {
         self.apply_runtime_theme(cx, theme);
     }
 
-    fn apply_runtime_theme(&mut self, cx: &mut Cx, theme: ReaderTheme) {
-        if theme == ReaderTheme::Light {
-            script_eval!(cx, {
-                mod.theme.splat(mod.readwise_theme_light)
-            });
-        } else {
-            script_eval!(cx, {
-                mod.theme.splat(mod.readwise_theme_dark)
-            });
-        }
+    fn apply_runtime_theme(&mut self, cx: &mut Cx, _theme: ReaderTheme) {
+        // script_mod 会依据 READER_BACKGROUND + READER_THEME 重建完整场景主题。
+        // 不能只改页面底色，否则模板化卡片、输入框和按钮仍会保留灰色 token。
         self.pending_theme_reapply = true;
         cx.request_script_reapply();
     }
@@ -7365,7 +7356,8 @@ impl App {
         use crate::ruby_word::*;
 
         let settings = settings.normalized();
-        let theme_changed = *READER_THEME.read().unwrap() != settings.theme;
+        let scene_changed = *READER_THEME.read().unwrap() != settings.theme
+            || *READER_BACKGROUND.read().unwrap() != settings.background;
         *APP_LANGUAGE.write().unwrap() = settings.language;
         *READER_THEME.write().unwrap() = settings.theme;
         *READER_BACKGROUND.write().unwrap() = settings.background;
@@ -7407,7 +7399,7 @@ impl App {
         self.refresh_swatches(cx);
 
         self.refresh_current_chapter(cx);
-        if theme_changed {
+        if scene_changed {
             self.apply_runtime_theme(cx, settings.theme);
         }
     }
@@ -9373,18 +9365,194 @@ impl AppMain for App {
                 color_chart_vocab: #x397F70
             }
         });
-        if *READER_THEME.read().unwrap() == ReaderTheme::Light {
-            script_eval!(vm, {
-                mod.theme = mod.themes.light
-            });
+        let background = *READER_BACKGROUND.read().unwrap();
+        let theme = *READER_THEME.read().unwrap();
+        let palette = reader_scene_palette(background, theme);
+        let surface = palette.surface;
+        let text = palette.text;
+        let field = palette.field;
+        let border = palette.border;
+        let muted = palette.muted;
+        let accent = palette.accent;
+        let hover = palette.hover;
+        let pressed = palette.pressed;
+        let uses_dark_controls = background == ReaderBackground::Night
+            || (background == ReaderBackground::FollowTheme && theme == ReaderTheme::Dark);
+        let chart_vocab = if uses_dark_controls {
+            Vec4f::from_u32(0x7fb2_a6ff)
         } else {
-            script_eval!(vm, {
-                mod.theme = mod.themes.dark
-            });
-        }
+            Vec4f::from_u32(0x397f_70ff)
+        };
+
         script_eval!(vm, {
             mod.readwise_theme_dark = mod.themes.dark{}
             mod.readwise_theme_light = mod.themes.light{}
+        });
+        if uses_dark_controls {
+            script_eval!(vm, {
+                mod.readwise_theme_scene = mod.readwise_theme_dark{}
+            });
+        } else {
+            script_eval!(vm, {
+                mod.readwise_theme_scene = mod.readwise_theme_light{}
+            });
+        }
+        script_eval!(vm, {
+            // 阅读背景是整个应用场景的单一颜色来源。这里覆盖组件模板实际
+            // 消费的 token，保证所有页面、卡片和控件在 ScriptReapply 后
+            // 仍与正文使用同一纸张配色，而不会退回官方主题的中性灰。
+            mod.readwise_theme_scene = mod.readwise_theme_scene{
+                color_bg_app: #(surface)
+                color_fg_app: #(surface)
+                color_app_caption_bar: #(surface)
+                color_bg_container: #(field)
+                color_bg_even: #(field)
+                color_bg_odd: #(field)
+                color_bg_highlight: #(hover)
+                color_bg_unfocussed: #(hover)
+                color_bg_highlight_inline: #(field)
+                color_highlight: #(accent)
+
+                color_text: #(text)
+                color_text_val: #(muted)
+                color_text_hl: #(text)
+                color_text_hover: #(text)
+                color_text_focus: #(text)
+                color_text_down: #(text)
+                color_text_disabled: #(muted)
+                color_text_placeholder: #(muted)
+                color_text_placeholder_hover: #(muted)
+                color_text_meta: #(muted)
+                color_text_cursor: #(accent)
+
+                color_label_inner: #(text)
+                color_label_inner_down: #(text)
+                color_label_inner_drag: #(text)
+                color_label_inner_hover: #(text)
+                color_label_inner_focus: #(text)
+                color_label_inner_active: #(text)
+                color_label_inner_inactive: #(muted)
+                color_label_inner_disabled: #(muted)
+                color_label_outer: #(text)
+                color_label_outer_off: #(muted)
+                color_label_outer_down: #(text)
+                color_label_outer_drag: #(text)
+                color_label_outer_hover: #(text)
+                color_label_outer_focus: #(text)
+                color_label_outer_active: #(text)
+                color_label_outer_active_focus: #(text)
+                color_label_outer_disabled: #(muted)
+
+                color_bevel: #(border)
+                color_bevel_hover: #(border)
+                color_bevel_focus: #(accent)
+                color_bevel_active: #(border)
+                color_bevel_empty: #(border)
+                color_bevel_down: #(border)
+                color_bevel_drag: #(border)
+                color_bevel_disabled: #(border)
+                color_bevel_inset_1: #(border)
+                color_bevel_inset_1_hover: #(border)
+                color_bevel_inset_1_focus: #(accent)
+                color_bevel_inset_1_active: #(border)
+                color_bevel_inset_1_empty: #(border)
+                color_bevel_inset_1_down: #(border)
+                color_bevel_inset_1_drag: #(border)
+                color_bevel_inset_1_disabled: #(border)
+                color_bevel_inset_2: #(border)
+                color_bevel_inset_2_hover: #(border)
+                color_bevel_inset_2_focus: #(accent)
+                color_bevel_inset_2_active: #(border)
+                color_bevel_inset_2_empty: #(border)
+                color_bevel_inset_2_down: #(border)
+                color_bevel_inset_2_drag: #(border)
+                color_bevel_inset_2_disabled: #(border)
+                color_bevel_outset_1: #(border)
+                color_bevel_outset_1_hover: #(border)
+                color_bevel_outset_1_focus: #(accent)
+                color_bevel_outset_1_active: #(border)
+                color_bevel_outset_1_down: #(border)
+                color_bevel_outset_1_drag: #(border)
+                color_bevel_outset_1_disabled: #(border)
+                color_bevel_outset_2: #(border)
+                color_bevel_outset_2_hover: #(border)
+                color_bevel_outset_2_focus: #(accent)
+                color_bevel_outset_2_active: #(border)
+                color_bevel_outset_2_down: #(border)
+                color_bevel_outset_2_drag: #(border)
+                color_bevel_outset_2_disabled: #(border)
+
+                color_inset: #(field)
+                color_inset_hover: #(field)
+                color_inset_down: #(pressed)
+                color_inset_active: #(field)
+                color_inset_focus: #(surface)
+                color_inset_drag: #(field)
+                color_inset_disabled: #(field)
+                color_inset_empty: #(field)
+                color_inset_1: #(field)
+                color_inset_1_hover: #(field)
+                color_inset_1_down: #(pressed)
+                color_inset_1_active: #(field)
+                color_inset_1_focus: #(surface)
+                color_inset_1_drag: #(field)
+                color_inset_1_disabled: #(field)
+                color_inset_1_empty: #(field)
+                color_inset_2: #(field)
+                color_inset_2_hover: #(field)
+                color_inset_2_down: #(pressed)
+                color_inset_2_active: #(field)
+                color_inset_2_focus: #(surface)
+                color_inset_2_drag: #(field)
+                color_inset_2_disabled: #(field)
+                color_inset_2_empty: #(field)
+
+                color_outset: #(field)
+                color_outset_hover: #(hover)
+                color_outset_down: #(pressed)
+                color_outset_active: #(field)
+                color_outset_focus: #(field)
+                color_outset_drag: #(hover)
+                color_outset_disabled: #(field)
+                color_outset_inactive: #(field)
+                color_outset_1: #(field)
+                color_outset_1_hover: #(hover)
+                color_outset_1_down: #(pressed)
+                color_outset_1_active: #(field)
+                color_outset_1_focus: #(field)
+                color_outset_1_drag: #(hover)
+                color_outset_1_disabled: #(field)
+                color_outset_2: #(field)
+                color_outset_2_hover: #(hover)
+                color_outset_2_down: #(pressed)
+                color_outset_2_active: #(field)
+                color_outset_2_focus: #(field)
+                color_outset_2_drag: #(hover)
+                color_outset_2_disabled: #(field)
+
+                color_icon: #(muted)
+                color_icon_inactive: #(muted)
+                color_icon_active: #(text)
+                color_icon_disabled: #(muted)
+                color_mark: #(accent)
+                color_mark_empty: #(field)
+                color_mark_off: #(muted)
+                color_mark_hover: #(accent)
+                color_mark_active: #(accent)
+                color_mark_active_hover: #(accent)
+                color_mark_focus: #(accent)
+                color_mark_down: #(accent)
+                color_mark_disabled: #(muted)
+                color_selection: #(hover)
+                color_selection_hover: #(hover)
+                color_selection_down: #(pressed)
+                color_selection_focus: #(pressed)
+
+                color_chart_grid: #(border)
+                color_chart_reading: #(accent)
+                color_chart_vocab: #(chart_vocab)
+            }
+            mod.theme = mod.readwise_theme_scene
         });
         makepad_widgets::widgets_mod(vm);
         makepad_code_editor::script_mod(vm);
