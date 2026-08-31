@@ -1665,6 +1665,23 @@ mod reader_scene_palette_tests {
     }
 
     #[test]
+    fn floating_field_surface_is_distinct_from_reader_page() {
+        for theme in [ReaderTheme::Dark, ReaderTheme::Light] {
+            for background in [
+                ReaderBackground::FollowTheme,
+                ReaderBackground::Paper,
+                ReaderBackground::Sepia,
+                ReaderBackground::Sage,
+                ReaderBackground::Night,
+            ] {
+                let scene = reader_scene_palette(background, theme);
+                assert_ne!(scene.field, scene.surface);
+                assert_ne!(scene.border, scene.surface);
+            }
+        }
+    }
+
+    #[test]
     fn every_page_uses_the_same_scene_palette() {
         let expected = reader_palette(ReaderBackground::Sepia, ReaderTheme::Dark).0;
         for page in [
@@ -1848,7 +1865,7 @@ enum SelAction {
 const SELECTION_POPUP_MAX_WIDTH: f64 = 520.0;
 const SELECTION_POPUP_SIDE_INSET: f64 = 12.0;
 const SELECTION_POPUP_GAP: f64 = 10.0;
-const SELECTION_POPUP_ESTIMATED_HEIGHT: f64 = 76.0;
+const SELECTION_POPUP_ESTIMATED_HEIGHT: f64 = 56.0;
 
 fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) -> (DVec2, f64) {
     let horizontal_inset = SELECTION_POPUP_SIDE_INSET.min(viewport.size.x.max(0.0) * 0.25);
@@ -3788,6 +3805,7 @@ script_mod! {
                                             sel_close_btn := ButtonFlatter{text: "关闭"}
                                         }
                                         sel_hint := Label{
+                                            visible: false
                                             width: Fill
                                             text: ""
                                             draw_text.color: theme.color_label_inner_inactive
@@ -6318,12 +6336,7 @@ impl App {
                 palette.border,
             );
         }
-        for id in [
-            id!(note_composer),
-            id!(selection_popup),
-            id!(word_card),
-            id!(indicator_bg),
-        ] {
+        for id in [id!(note_composer), id!(word_card), id!(indicator_bg)] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),
@@ -6331,6 +6344,14 @@ impl App {
                 palette.border,
             );
         }
+        // 选区菜单是临时浮层，不能与正文共用 surface；按钮再回到 surface，
+        // 形成“正文 → field 浮层 → surface 操作”的稳定层级。
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(selection_popup)),
+            palette.field,
+            palette.border,
+        );
         apply_reader_surface_palette(
             cx,
             self.ui.widget(cx, ids!(image_viewer_card)),
@@ -6377,6 +6398,18 @@ impl App {
             id!(reader_chat_send),
             id!(reader_chat_cancel),
             id!(reader_chat_clear),
+            id!(close_card_btn),
+            id!(add_vocab_btn),
+            id!(know_btn),
+            id!(image_viewer_close),
+        ] {
+            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
+        let popup_button_palette = ReaderScenePalette {
+            field: palette.surface,
+            ..palette
+        };
+        for id in [
             id!(copy_sel_btn),
             id!(note_from_sel_btn),
             id!(vocab_from_sel_btn),
@@ -6385,12 +6418,8 @@ impl App {
             id!(speak_sel_btn),
             id!(hl_btn),
             id!(sel_close_btn),
-            id!(close_card_btn),
-            id!(add_vocab_btn),
-            id!(know_btn),
-            id!(image_viewer_close),
         ] {
-            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
+            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), popup_button_palette);
         }
         for id in [id!(note_extra), id!(reader_chat_input)] {
             apply_reader_input_palette(cx, self.ui.widget(cx, &[id]), palette);
@@ -8482,6 +8511,16 @@ impl App {
             .set_text(cx, crate::i18n::text(app_language(), key));
     }
 
+    fn set_selection_hint(&mut self, cx: &mut Cx, text: &str) {
+        let hint = self.ui.widget(cx, ids!(sel_hint));
+        hint.set_visible(cx, !text.is_empty());
+        hint.set_text(cx, text);
+        if self.selection_popup_anchor.is_some() {
+            self.pending_selection_popup_layout = true;
+        }
+        hint.redraw(cx);
+    }
+
     /// 将工具条锚定在选区手势结束处，并严格限制在正文视口内。
     /// 第一次使用估算高度立即显示；完成一帧布局后再用真实高度校正一次。
     fn position_selection_popup(&self, cx: &mut Cx, use_measured_height: bool) -> bool {
@@ -9361,7 +9400,7 @@ impl MatchEvent for App {
                             localized("生词本里已有这个词", "This word is already in Vocabulary")
                         };
                         self.ui.label(cx, ids!(card_hint)).set_text(cx, hint);
-                        self.ui.label(cx, ids!(sel_hint)).set_text(cx, hint);
+                        self.set_selection_hint(cx, hint);
                         if *added {
                             spawn_load_vocab();
                         }
@@ -9388,22 +9427,7 @@ impl MatchEvent for App {
                         self.position_selection_popup(cx, false);
                         self.pending_selection_popup_layout = true;
                         self.update_highlight_action_label(cx);
-                        let text = SELECTED_TEXT.read().unwrap();
-                        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                        let preview: String = compact.chars().take(72).collect();
-                        let suffix = if compact.chars().count() > 72 {
-                            "…"
-                        } else {
-                            ""
-                        };
-                        self.ui.label(cx, ids!(sel_hint)).set_text(
-                            cx,
-                            &if app_language() == AppLanguage::English {
-                                format!("Selected: {preview}{suffix}")
-                            } else {
-                                format!("已选择：{preview}{suffix}")
-                            },
-                        );
+                        self.set_selection_hint(cx, "");
                     }
                     SelAction::Hide => {
                         self.selection_popup_anchor = None;
@@ -9445,14 +9469,12 @@ impl MatchEvent for App {
                         self.refresh_current_chapter(cx);
                     }
                     HlAction::Error(error) => {
-                        self.ui.label(cx, ids!(sel_hint)).set_text(
-                            cx,
-                            &if app_language() == AppLanguage::English {
-                                format!("Highlight operation failed: {error}")
-                            } else {
-                                format!("高亮操作失败：{error}")
-                            },
-                        );
+                        let message = if app_language() == AppLanguage::English {
+                            format!("Highlight operation failed: {error}")
+                        } else {
+                            format!("高亮操作失败：{error}")
+                        };
+                        self.set_selection_hint(cx, &message);
                     }
                 }
                 continue;
@@ -10258,14 +10280,10 @@ impl MatchEvent for App {
             if let (Some(range), Some(book_id)) = (range, book_id) {
                 let ids = self.selected_highlight_ids();
                 if ids.is_empty() {
-                    self.ui
-                        .label(cx, ids!(sel_hint))
-                        .set_text(cx, localized("正在添加高亮…", "Adding highlight…"));
+                    self.set_selection_hint(cx, localized("正在添加高亮…", "Adding highlight…"));
                     spawn_add_highlight(book_id, self.chapter_idx, range);
                 } else {
-                    self.ui
-                        .label(cx, ids!(sel_hint))
-                        .set_text(cx, localized("正在删除高亮…", "Removing highlight…"));
+                    self.set_selection_hint(cx, localized("正在删除高亮…", "Removing highlight…"));
                     spawn_delete_highlights(book_id, self.chapter_idx, ids);
                 }
             }
@@ -10277,9 +10295,7 @@ impl MatchEvent for App {
             let text = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !text.is_empty() {
                 cx.copy_to_clipboard(&text);
-                self.ui
-                    .label(cx, ids!(sel_hint))
-                    .set_text(cx, localized("已复制到剪贴板 ✓", "Copied ✓"));
+                self.set_selection_hint(cx, localized("已复制到剪贴板 ✓", "Copied ✓"));
             }
         }
         if self
@@ -10291,12 +10307,10 @@ impl MatchEvent for App {
             if let Some(word) = selected_single_word(&selected) {
                 let lemma = readwise_core::vocab::lemma::lemmatize(&word);
                 let book_id = CURRENT_ITEM.read().unwrap().as_ref().map(|i| i.id.clone());
-                self.ui
-                    .label(cx, ids!(sel_hint))
-                    .set_text(cx, localized("加入中…", "Adding…"));
+                self.set_selection_hint(cx, localized("加入中…", "Adding…"));
                 spawn_add_vocab(lemma, word, String::new(), book_id);
             } else {
-                self.ui.label(cx, ids!(sel_hint)).set_text(
+                self.set_selection_hint(
                     cx,
                     localized(
                         "加入生词仅支持选择一个英文单词",
@@ -10313,7 +10327,7 @@ impl MatchEvent for App {
                     percent_encode_query(&text)
                 );
                 cx.open_url(&url, OpenUrlInPlace::No);
-                self.ui.label(cx, ids!(sel_hint)).set_text(
+                self.set_selection_hint(
                     cx,
                     localized("已在浏览器中打开翻译", "Translation opened in the browser"),
                 );
@@ -10344,9 +10358,7 @@ impl MatchEvent for App {
             let text = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !text.is_empty() {
                 speak_text(text);
-                self.ui
-                    .label(cx, ids!(sel_hint))
-                    .set_text(cx, localized("正在发音…", "Speaking…"));
+                self.set_selection_hint(cx, localized("正在发音…", "Speaking…"));
             }
         }
         if self.ui.button(cx, ids!(sel_close_btn)).clicked(actions) {
