@@ -253,8 +253,9 @@ fn annotate_text(
     out.push_str(&text[last..]);
 }
 
-/// 把绘制字符区间 [start, end) 包成 <mark> 段（高亮渲染用）。
-/// 计数规则与 TextFlow 绘制一致：标签不计、实体计 1、<ruby> 内只计词部（SEP 前）。
+/// 把 TextFlow UTF-8 字节区间 [start, end) 包成 <mark> 段（高亮渲染用）。
+/// 计数规则与 TextFlow 选区一致：标签不计、实体按解码后文本字节数计、
+/// <ruby> 内只计词部（SEP 前）。
 /// 跨标签的区间按文本节点拆成多个 <mark> 段。
 pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
     if ranges.is_empty() {
@@ -262,7 +263,7 @@ pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
     }
     let covered = |pos: usize| ranges.iter().any(|(s, e)| pos >= *s && pos < *e);
     let mut out = String::with_capacity(html.len() + 64);
-    let mut char_pos: usize = 0;
+    let mut text_pos: usize = 0;
     let mut in_mark = false;
     let mut i = 0;
 
@@ -297,11 +298,11 @@ pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
                     let content = &rrest[..close_rel];
                     // ruby 词部按整词判定（不拆分高亮段）
                     let word = content.split(RUBY_SEP).next().unwrap_or(content);
-                    let wlen = word.chars().count();
-                    if wlen > 0 && covered(char_pos) {
+                    let word_len = word.len();
+                    if word_len > 0 && covered(text_pos) {
                         // 整词高亮：mark 包不进 ruby 内部（widget 吃整段文本），跳过内部标记
                     }
-                    char_pos += wlen;
+                    text_pos += word_len;
                     out.push_str(content);
                     i += close_rel;
                 }
@@ -316,21 +317,21 @@ pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
                 .filter(|p| *p <= 10)
                 .map(|p| p + 1)
                 .unwrap_or(1);
-            if covered(char_pos) && !in_mark {
+            if covered(text_pos) && !in_mark {
                 out.push_str("<mark>");
                 in_mark = true;
-            } else if !covered(char_pos) {
+            } else if !covered(text_pos) {
                 close_mark(&mut out, &mut in_mark);
             }
             out.push_str(&rest[..end]);
-            char_pos += 1;
+            text_pos += decode_html_entity(&rest[..end]).len();
             i += end;
             continue;
         }
         let text_end = rest.find(['<', '&']).unwrap_or(rest.len());
         for (off, c) in rest[..text_end].char_indices() {
             let _ = off;
-            if covered(char_pos) {
+            if covered(text_pos) {
                 if !in_mark {
                     out.push_str("<mark>");
                     in_mark = true;
@@ -339,7 +340,7 @@ pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
                 close_mark(&mut out, &mut in_mark);
             }
             out.push(c);
-            char_pos += 1;
+            text_pos += c.len_utf8();
         }
         i += text_end;
     }
@@ -351,37 +352,37 @@ pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
 /// 颜色属性成为创建时快照。MarkSpan 每帧通过 MARK_SEP 同时收到正文与颜色。
 pub const MARK_SEP: char = '\u{E001}';
 
-/// 返回 Html/TextFlow 实际参与选择的纯文本。
-///
-/// 普通标签不计字符；实体计一个字符；自定义 ruby/mark widget 的私有编码只保留
-/// 用户看到的词或正文。它与高亮注入使用同一套字符空间，供跨 PortalList 项选择
-/// 在列表回收了离屏 widget 后仍能稳定取得完整文本。
-pub fn rendered_text(html: &str) -> String {
-    fn entity_text(entity: &str) -> String {
-        match entity {
-            "&amp;" => "&".to_string(),
-            "&lt;" => "<".to_string(),
-            "&gt;" => ">".to_string(),
-            "&quot;" => "\"".to_string(),
-            "&apos;" | "&#39;" => "'".to_string(),
-            "&nbsp;" => "\u{a0}".to_string(),
-            _ if entity.starts_with("&#x") && entity.ends_with(';') => {
-                u32::from_str_radix(&entity[3..entity.len() - 1], 16)
-                    .ok()
-                    .and_then(char::from_u32)
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "�".to_string())
-            }
-            _ if entity.starts_with("&#") && entity.ends_with(';') => entity[2..entity.len() - 1]
-                .parse::<u32>()
+fn decode_html_entity(entity: &str) -> String {
+    match entity {
+        "&amp;" => "&".to_string(),
+        "&lt;" => "<".to_string(),
+        "&gt;" => ">".to_string(),
+        "&quot;" => "\"".to_string(),
+        "&apos;" | "&#39;" => "'".to_string(),
+        "&nbsp;" => "\u{a0}".to_string(),
+        _ if entity.starts_with("&#x") && entity.ends_with(';') => {
+            u32::from_str_radix(&entity[3..entity.len() - 1], 16)
                 .ok()
                 .and_then(char::from_u32)
                 .map(|c| c.to_string())
-                .unwrap_or_else(|| "�".to_string()),
-            _ => "�".to_string(),
+                .unwrap_or_else(|| "�".to_string())
         }
+        _ if entity.starts_with("&#") && entity.ends_with(';') => entity[2..entity.len() - 1]
+            .parse::<u32>()
+            .ok()
+            .and_then(char::from_u32)
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "�".to_string()),
+        _ => "�".to_string(),
     }
+}
 
+/// 返回 Html/TextFlow 实际参与选择的纯文本。
+///
+/// 普通标签不计入；实体解码后计入；自定义 ruby/mark widget 的私有编码只保留
+/// 用户看到的词或正文。它与高亮注入使用同一套 UTF-8 字节空间，供跨 PortalList 项选择
+/// 在列表回收了离屏 widget 后仍能稳定取得完整文本。
+pub fn rendered_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut i = 0usize;
     while i < html.len() {
@@ -421,7 +422,7 @@ pub fn rendered_text(html: &str) -> String {
                 .filter(|p| *p <= 10)
                 .map(|p| p + 1)
                 .unwrap_or(1);
-            out.push_str(&entity_text(&rest[..end]));
+            out.push_str(&decode_html_entity(&rest[..end]));
             i += end;
             continue;
         }
@@ -432,7 +433,7 @@ pub fn rendered_text(html: &str) -> String {
     out
 }
 
-/// 从若干 Html 块中按 TextFlow 字符下标导出跨块选区。
+/// 从若干 Html 块中按 TextFlow UTF-8 字节下标导出跨块选区。
 pub fn rendered_text_for_range(
     blocks: &[String],
     range: ((usize, usize), (usize, usize)),
@@ -449,7 +450,7 @@ pub fn rendered_text_for_range(
         .skip(start_block)
     {
         let text = rendered_text(block);
-        let len = text.chars().count();
+        let len = text.len();
         let from = if block_id == start_block {
             start_char.min(len)
         } else {
@@ -466,7 +467,15 @@ pub fn rendered_text_for_range(
         if !out.is_empty() {
             out.push('\n');
         }
-        out.extend(text.chars().skip(from).take(to - from));
+        let mut from = from;
+        while from > 0 && !text.is_char_boundary(from) {
+            from -= 1;
+        }
+        let mut to = to;
+        while to > from && !text.is_char_boundary(to) {
+            to -= 1;
+        }
+        out.push_str(&text[from..to]);
     }
     out
 }
@@ -482,7 +491,7 @@ pub fn inject_colored_marks(html: &str, ranges: &[(usize, usize, &str)]) -> Stri
             .map(|(_, _, color)| *color)
     };
     let mut out = String::with_capacity(html.len() + 96);
-    let mut char_pos = 0usize;
+    let mut text_pos = 0usize;
     let mut active_color: Option<&str> = None;
     let mut i = 0usize;
 
@@ -524,14 +533,14 @@ pub fn inject_colored_marks(html: &str, ranges: &[(usize, usize, &str)]) -> Stri
                 if let Some(close_rel) = rrest.find("</ruby>") {
                     let content = &rrest[..close_rel];
                     let word = content.split(RUBY_SEP).next().unwrap_or(content);
-                    let word_len = word.chars().count();
-                    let color = (0..word_len).find_map(|offset| color_at(char_pos + offset));
+                    let word_len = word.len();
+                    let color = (0..word_len).find_map(|offset| color_at(text_pos + offset));
                     out.push_str(content);
                     if let Some(color) = color {
                         out.push(MARK_SEP);
                         out.push_str(color);
                     }
-                    char_pos += word_len;
+                    text_pos += word_len;
                     i += close_rel;
                 }
                 continue;
@@ -545,17 +554,17 @@ pub fn inject_colored_marks(html: &str, ranges: &[(usize, usize, &str)]) -> Stri
                 .filter(|p| *p <= 10)
                 .map(|p| p + 1)
                 .unwrap_or(1);
-            transition(&mut out, &mut active_color, color_at(char_pos));
+            transition(&mut out, &mut active_color, color_at(text_pos));
             out.push_str(&rest[..end]);
-            char_pos += 1;
+            text_pos += decode_html_entity(&rest[..end]).len();
             i += end;
             continue;
         }
         let text_end = rest.find(['<', '&']).unwrap_or(rest.len());
         for c in rest[..text_end].chars() {
-            transition(&mut out, &mut active_color, color_at(char_pos));
+            transition(&mut out, &mut active_color, color_at(text_pos));
             out.push(c);
-            char_pos += 1;
+            text_pos += c.len_utf8();
         }
         i += text_end;
     }
@@ -627,6 +636,12 @@ mod tests {
         );
         let ruby = inject_colored_marks("a<ruby>word\u{E000}释义</ruby>z", &[(2, 3, "blue")]);
         assert_eq!(ruby, "a<ruby>word\u{E000}释义\u{E001}blue</ruby>z");
+
+        // TextFlow cursors are UTF-8 byte offsets: the em dash occupies [1, 4).
+        let unicode = inject_colored_marks("A—B", &[(1, 4, "yellow")]);
+        assert_eq!(unicode, "A<mark>—\u{E001}yellow</mark>B");
+        let entity = inject_colored_marks("A&#x2014;B", &[(1, 4, "yellow")]);
+        assert_eq!(entity, "A<mark>&#x2014;\u{E001}yellow</mark>B");
     }
 
     #[test]
@@ -641,6 +656,11 @@ mod tests {
         assert_eq!(
             rendered_text_for_range(&blocks, ((0, 4), (1, 4))),
             "word.\nNext"
+        );
+        let unicode_blocks = vec!["<p>A—B</p>".to_string()];
+        assert_eq!(
+            rendered_text_for_range(&unicode_blocks, ((0, 1), (0, 4))),
+            "—"
         );
     }
 

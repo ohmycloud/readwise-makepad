@@ -243,7 +243,7 @@ pub async fn delete_book(pool: &SqlitePool, data_dir: &Path, id: &str) -> Result
     Ok(())
 }
 
-/// 高亮区间（块下标 + 块内字符下标，字符按 TextFlow 实际绘制文本计）。
+/// 高亮区间（块下标 + 块内 UTF-8 字节下标，与 TextFlow 选区 API 一致）。
 #[derive(Debug, Clone)]
 pub struct Highlight {
     pub id: String,

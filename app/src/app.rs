@@ -145,12 +145,16 @@ fn reader_last_page_start(block_count: usize, blocks_per_page: usize) -> usize {
     (last / span) * span
 }
 
-fn word_range_at(text: &str, char_index: usize) -> Option<(usize, usize)> {
+fn word_range_at(text: &str, byte_index: usize) -> Option<(usize, usize)> {
     let chars = text.chars().collect::<Vec<_>>();
     if chars.is_empty() {
         return None;
     }
-    let index = char_index.min(chars.len() - 1);
+    let mut byte_index = byte_index.min(text.len().saturating_sub(1));
+    while byte_index > 0 && !text.is_char_boundary(byte_index) {
+        byte_index -= 1;
+    }
+    let index = text[..byte_index].chars().count();
     let selected = chars[index];
     if selected.is_whitespace() {
         return None;
@@ -162,7 +166,7 @@ fn word_range_at(text: &str, char_index: usize) -> Option<(usize, usize)> {
         )
     };
     if is_cjk(selected) {
-        return Some((index, index + 1));
+        return Some((byte_index, byte_index + selected.len_utf8()));
     }
     let is_word_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '\'' | '’' | '-');
     if !is_word_char(selected) {
@@ -176,6 +180,16 @@ fn word_range_at(text: &str, char_index: usize) -> Option<(usize, usize)> {
     while end < chars.len() && is_word_char(chars[end]) {
         end += 1;
     }
+    let start = text
+        .char_indices()
+        .nth(start)
+        .map(|(offset, _)| offset)
+        .unwrap_or(text.len());
+    let end = text
+        .char_indices()
+        .nth(end)
+        .map(|(offset, _)| offset)
+        .unwrap_or(text.len());
     Some((start, end))
 }
 
@@ -1069,7 +1083,8 @@ mod responsive_layout_tests {
     fn long_press_selects_a_word_or_one_cjk_character() {
         assert_eq!(word_range_at("read wise", 2), Some((0, 4)));
         assert_eq!(word_range_at("can't stop", 3), Some((0, 5)));
-        assert_eq!(word_range_at("阅读", 1), Some((1, 2)));
+        assert_eq!(word_range_at("阅读", 3), Some((3, 6)));
+        assert_eq!(word_range_at("A—can’t", 7), Some((4, 11)));
         assert_eq!(word_range_at("read wise", 4), None);
     }
 
@@ -1812,7 +1827,7 @@ mod lazy_gloss_tests {
     }
 }
 
-/// 当前选区（块+字符区间，ChapterList 自跟踪写入，App 读）。
+/// 当前选区（块 + TextFlow UTF-8 字节区间，ChapterList 写入，App 读）。
 type TextPoint = (usize, usize);
 type TextRange = (TextPoint, TextPoint);
 static SEL_RANGE: LazyLock<RwLock<Option<TextRange>>> = LazyLock::new(|| RwLock::new(None));
@@ -4744,17 +4759,13 @@ impl ChapterList {
             .read()
             .unwrap()
             .get(id)
-            .map(|block| {
-                readwise_core::vocab::annotate::rendered_text(block)
-                    .chars()
-                    .count()
-            })
+            .map(|block| readwise_core::vocab::annotate::rendered_text(block).len())
             .unwrap_or(0);
-        let char_idx = self
+        let text_offset = self
             .sel_anchor
             .map(|anchor| if id >= anchor.0 { len } else { 0 })
             .unwrap_or(0);
-        self.set_cursor((id, char_idx));
+        self.set_cursor((id, text_offset));
         self.apply_visible_selection(cx);
     }
 
@@ -4834,7 +4845,7 @@ impl ChapterList {
                 if !list.area().rect(cx).contains(event.abs) {
                     return;
                 }
-                let Some((block_id, char_index)) = self.hit_block_char(cx, event.abs) else {
+                let Some((block_id, text_offset)) = self.hit_block_char(cx, event.abs) else {
                     return;
                 };
                 let Some((start, end)) =
@@ -4844,7 +4855,7 @@ impl ChapterList {
                         .get(block_id)
                         .and_then(|paragraph| {
                             let text = readwise_core::vocab::annotate::rendered_text(paragraph);
-                            word_range_at(&text, char_index)
+                            word_range_at(&text, text_offset)
                         })
                 else {
                     return;

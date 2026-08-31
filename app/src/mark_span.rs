@@ -37,6 +37,31 @@ pub fn hl_color(slot: usize) -> Vec4f {
 /// 槽位 → 存库颜色名（book_notes.color）。
 pub const HL_COLOR_NAMES: &[&str] = &["yellow", "teal", "blue", "orange"];
 
+/// Draw an inline run through TextFlow's built-in background path. Temporarily
+/// enabling the inline-code branch is intentional: that branch lays out each
+/// wrapped row first, emits its background before the glyph batch, and still
+/// participates in TextFlow selection. Zero padding/margin keeps ordinary
+/// reader typography unchanged.
+pub(crate) fn draw_text_with_background(
+    tf: &mut TextFlow,
+    cx: &mut Cx2d,
+    text: &str,
+    color: Vec4f,
+) {
+    let old_color = tf.draw_block.code_color;
+    let old_padding = tf.inline_code_padding;
+    let old_margin = tf.inline_code_margin;
+    tf.draw_block.code_color = color;
+    tf.inline_code_padding = Inset::default();
+    tf.inline_code_margin = Inset::default();
+    tf.inline_code.push();
+    tf.draw_text(cx, text);
+    tf.inline_code.pop();
+    tf.draw_block.code_color = old_color;
+    tf.inline_code_padding = old_padding;
+    tf.inline_code_margin = old_margin;
+}
+
 script_mod! {
     use mod.prelude.widgets.*
 
@@ -55,8 +80,6 @@ pub struct MarkSpan {
     source: ScriptObjectRef,
     #[rust]
     area: Area,
-    #[live]
-    draw_fill: DrawColor,
     #[rust]
     drawn_areas: Vec<Area>,
     #[rust]
@@ -78,7 +101,11 @@ impl WidgetNode for MarkSpan {
         self.area
     }
     fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
+        if self.drawn_areas.is_empty() {
+            self.area.redraw(cx);
+        } else {
+            self.drawn_areas.iter().for_each(|area| area.redraw(cx));
+        }
     }
     fn point_hits_area(&self, _cx: &Cx, _point: DVec2) -> bool {
         false
@@ -111,13 +138,8 @@ impl Widget for MarkSpan {
         let Some(tf) = scope.data.get_mut::<TextFlow>() else {
             return DrawStep::done();
         };
-        self.draw_fill.color = hl_color(self.color_slot);
-        for area in self.drawn_areas.clone() {
-            let rect = area.rect(cx);
-            self.draw_fill.draw_abs(cx, rect);
-        }
         tf.areas_tracker.push_tracker();
-        tf.draw_text(cx, &self.text);
+        draw_text_with_background(tf, cx, &self.text, hl_color(self.color_slot));
         let (start, end) = tf.areas_tracker.pop_tracker();
         if self.drawn_areas.len() == end - start {
             for i in 0..end - start {

@@ -130,7 +130,11 @@ impl WidgetNode for RubyWord {
         self.area
     }
     fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
+        if self.drawn_areas.is_empty() {
+            self.area.redraw(cx);
+        } else {
+            self.drawn_areas.iter().for_each(|area| area.redraw(cx));
+        }
     }
     /// 命中区域 = 词的各行绘制段（PortalList 的选区/点击仲裁靠它自报：
     /// 按在注音词上→点词，按在普通文本→列表接管拖选）。
@@ -147,7 +151,7 @@ impl Widget for RubyWord {
             Some((text, color)) => (text, Some(color)),
             None => (v, None),
         };
-        self.highlight_slot = highlight.map(|color| match color {
+        let highlight_slot = highlight.map(|color| match color {
             "teal" | "green" => 1,
             "blue" => 2,
             "orange" | "red" | "violet" => 3,
@@ -155,14 +159,16 @@ impl Widget for RubyWord {
         });
         // 正式管线：内文 = 词 + RUBY_SEP + 释义（随文本每帧刷新，widget 复用不串位）；
         // 无分隔符时保留创建时从 t 属性读的释义（M0 demo 兼容）。
-        match v.split_once(readwise_core::vocab::annotate::RUBY_SEP) {
-            Some((word, gloss)) => {
-                self.word = word.to_string();
-                self.gloss = gloss.to_string();
-            }
-            None => self.word = v.to_string(),
+        let (word, gloss) = match v.split_once(readwise_core::vocab::annotate::RUBY_SEP) {
+            Some((word, gloss)) => (word.to_string(), gloss.to_string()),
+            None => (v.to_string(), self.gloss.clone()),
+        };
+        if self.word != word || self.gloss != gloss || self.highlight_slot != highlight_slot {
+            self.word = word;
+            self.gloss = gloss;
+            self.highlight_slot = highlight_slot;
+            self.redraw(cx);
         }
-        self.redraw(cx);
     }
 
     fn text(&self) -> String {
@@ -174,26 +180,6 @@ impl Widget for RubyWord {
             return DrawStep::done();
         };
 
-        if let Some(slot) = self.highlight_slot {
-            self.draw_fill.color = crate::mark_span::hl_color(slot);
-            for area in self.drawn_areas.clone() {
-                self.draw_fill.draw_abs(cx, area.rect(cx));
-            }
-        }
-
-        // 注音词背景：用上一帧的区域先铺底（首帧无区域，下一帧补上）
-        if let Some((r, g, b, a)) = *WORD_BG.read().unwrap() {
-            self.draw_fill.color = Vec4f {
-                x: r,
-                y: g,
-                z: b,
-                w: a,
-            };
-            for area in self.drawn_areas.clone() {
-                self.draw_fill.draw_abs(cx, area.rect(cx));
-            }
-        }
-
         let word_color = *WORD_COLOR.read().unwrap();
         if let Some((r, g, b)) = word_color {
             tf.font_colors.push(Vec4f {
@@ -204,7 +190,22 @@ impl Widget for RubyWord {
             });
         }
         tf.areas_tracker.push_tracker();
-        tf.draw_text(cx, &self.word);
+        let word_background = self
+            .highlight_slot
+            .map(crate::mark_span::hl_color)
+            .or_else(|| {
+                WORD_BG.read().unwrap().map(|(r, g, b, a)| Vec4f {
+                    x: r,
+                    y: g,
+                    z: b,
+                    w: a,
+                })
+            });
+        if let Some(background) = word_background {
+            crate::mark_span::draw_text_with_background(tf, cx, &self.word, background);
+        } else {
+            tf.draw_text(cx, &self.word);
+        }
         let (start, end) = tf.areas_tracker.pop_tracker();
         if word_color.is_some() {
             tf.font_colors.pop();
