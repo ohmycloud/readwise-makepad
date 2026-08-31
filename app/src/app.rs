@@ -87,6 +87,53 @@ fn shelf_grid_book_index(
     (index < book_count).then_some(index)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReaderPageSummary {
+    current: usize,
+    total: usize,
+    pages_left_in_chapter: usize,
+}
+
+/// EPUB 是可重排内容，没有出版物固有的 PDF 页码。这里以当前视口一次稳定翻过的
+/// 段落数作为页宽，为每章建立同一套虚拟页；页码与翻页目标因此始终一致。
+fn reader_page_summary(
+    chapter_block_counts: &[usize],
+    chapter: usize,
+    first_block: usize,
+    blocks_per_page: usize,
+) -> Option<ReaderPageSummary> {
+    if chapter_block_counts.is_empty()
+        || chapter >= chapter_block_counts.len()
+        || chapter_block_counts.contains(&0)
+    {
+        return None;
+    }
+    let span = blocks_per_page.max(1);
+    let chapter_pages = |blocks: usize| blocks.div_ceil(span).max(1);
+    let pages_before = chapter_block_counts[..chapter]
+        .iter()
+        .copied()
+        .map(chapter_pages)
+        .sum::<usize>();
+    let pages_in_chapter = chapter_pages(chapter_block_counts[chapter]);
+    let page_in_chapter = (first_block / span).min(pages_in_chapter.saturating_sub(1));
+    Some(ReaderPageSummary {
+        current: pages_before + page_in_chapter + 1,
+        total: chapter_block_counts
+            .iter()
+            .copied()
+            .map(chapter_pages)
+            .sum(),
+        pages_left_in_chapter: pages_in_chapter.saturating_sub(page_in_chapter + 1),
+    })
+}
+
+fn reader_last_page_start(block_count: usize, blocks_per_page: usize) -> usize {
+    let last = block_count.saturating_sub(1);
+    let span = blocks_per_page.max(1);
+    (last / span) * span
+}
+
 fn word_range_at(text: &str, char_index: usize) -> Option<(usize, usize)> {
     let chars = text.chars().collect::<Vec<_>>();
     if chars.is_empty() {
@@ -1212,6 +1259,45 @@ mod shelf_filter_tests {
     }
 }
 
+#[cfg(test)]
+mod reader_pagination_tests {
+    use super::*;
+
+    #[test]
+    fn pagination_maps_chapters_to_one_global_page_sequence() {
+        let counts = [10, 5, 13];
+        assert_eq!(
+            reader_page_summary(&counts, 1, 3, 4),
+            Some(ReaderPageSummary {
+                current: 4,
+                total: 9,
+                pages_left_in_chapter: 1,
+            })
+        );
+        assert_eq!(
+            reader_page_summary(&counts, 2, 12, 4),
+            Some(ReaderPageSummary {
+                current: 9,
+                total: 9,
+                pages_left_in_chapter: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn pagination_waits_until_every_chapter_count_is_known() {
+        assert_eq!(reader_page_summary(&[10, 0, 8], 0, 0, 4), None);
+        assert_eq!(reader_page_summary(&[], 0, 0, 4), None);
+    }
+
+    #[test]
+    fn previous_chapter_opens_on_its_last_page_boundary() {
+        assert_eq!(reader_last_page_start(13, 4), 12);
+        assert_eq!(reader_last_page_start(12, 4), 8);
+        assert_eq!(reader_last_page_start(0, 4), 0);
+    }
+}
+
 /// 当前打开的书（后台线程写入，UI 读）。
 static CURRENT_BOOK: LazyLock<RwLock<Option<OpenBook>>> = LazyLock::new(|| RwLock::new(None));
 
@@ -1816,6 +1902,50 @@ enum ReaderAction {
         initial_gloss_ms: u128,
     },
     OpenError(String),
+}
+
+#[derive(Debug)]
+enum ReaderPaginationAction {
+    Ready {
+        book_id: String,
+        chapter_block_counts: Vec<usize>,
+    },
+}
+
+/// 全书分块统计移到后台，避免为了总页数阻塞打开首章。每次只克隆一个章节，
+/// 不额外复制整本 EPUB；切书后旧任务会通过 book_id 自行退出。
+fn spawn_build_reader_pagination(book_id: String) {
+    std::thread::spawn(move || {
+        let chapter_count = {
+            let guard = CURRENT_BOOK.read().unwrap();
+            let Some(book) = guard.as_ref().filter(|book| book.id == book_id) else {
+                return;
+            };
+            book.chapters.len()
+        };
+        let mut chapter_block_counts = Vec::with_capacity(chapter_count);
+        for chapter in 0..chapter_count {
+            let html = {
+                let guard = CURRENT_BOOK.read().unwrap();
+                let Some(book) = guard.as_ref().filter(|book| book.id == book_id) else {
+                    return;
+                };
+                let Some(html) = book.chapters.get(chapter) else {
+                    return;
+                };
+                html.clone()
+            };
+            chapter_block_counts.push(
+                readwise_core::books::epub_meta::split_blocks(&html)
+                    .len()
+                    .max(1),
+            );
+        }
+        Cx::post_action(ReaderPaginationAction::Ready {
+            book_id,
+            chapter_block_counts,
+        });
+    });
 }
 
 /// 持久化的阅读位置。旧版本只保存章节号；v2 额外保存首个可见段落及其滚动偏移。
@@ -2951,6 +3081,25 @@ script_mod! {
         draw_bar.color: theme.color_chart_reading
     }
 
+    mod.widgets.ReaderPageIndicatorBase = #(ReaderPageIndicator::register_widget(vm))
+    mod.widgets.ReaderPageIndicator = set_type_default() do mod.widgets.ReaderPageIndicatorBase{
+        width: Fit height: Fit
+        cursor: MouseCursor.Hand
+        indicator_bg := RoundedView{
+            width: Fit height: 25
+            new_batch: true
+            padding: Inset{left: 9 right: 9 top: 4 bottom: 4}
+            draw_bg.color: #0000
+            draw_bg.border_radius: 8.0
+            page_text := Label{
+                width: Fit height: Fit
+                text: "—"
+                draw_text.color: theme.color_label_inner_inactive
+                draw_text.text_style.font_size: 9
+            }
+        }
+    }
+
     let ReaderCodeView = mod.widgets.CodeView{
         editor +: {
             width: Fill
@@ -3009,7 +3158,7 @@ script_mod! {
         list := PortalList{
             width: Fill height: Fill
             selectable: true
-            padding: Inset{ left: 32 right: 32 top: 8 bottom: 32 }
+            padding: Inset{ left: 32 right: 32 top: 8 bottom: 8 }
             spacing: 6
             scroll_bar: ScrollBar{}
             Para := View{
@@ -3282,8 +3431,29 @@ script_mod! {
                                     reader_surface := SolidView{
                                         width: Fill height: Fill
                                         new_batch: true
+                                        flow: Down
                                         draw_bg.color: #xf7f4ea
                                         chapter_list := mod.widgets.ChapterList{}
+                                        reader_footer := View{
+                                            width: Fill height: 30
+                                            flow: Overlay
+                                            reader_page_center_layer := View{
+                                                width: Fill height: Fill
+                                                align: Center
+                                                reader_page_indicator := mod.widgets.ReaderPageIndicator{}
+                                            }
+                                            reader_page_right_layer := View{
+                                                width: Fill height: Fill
+                                                align: Align{x: 1.0 y: 0.5}
+                                                padding: Inset{right: 18}
+                                                reader_pages_left := Label{
+                                                    width: Fit height: Fit
+                                                    text: ""
+                                                    draw_text.color: theme.color_label_inner_inactive
+                                                    draw_text.text_style.font_size: 8.5
+                                                }
+                                            }
+                                        }
                                     }
                                     note_panel := SolidView{
                                     visible: false
@@ -4222,6 +4392,58 @@ script_mod! {
     }
 }
 
+#[derive(Script, ScriptHook, Widget)]
+struct ReaderPageIndicator {
+    #[deref]
+    view: View,
+    #[rust]
+    current: usize,
+    #[rust]
+    total: usize,
+    #[rust]
+    hovered: bool,
+}
+
+impl ReaderPageIndicator {
+    fn refresh_text(&self, cx: &mut Cx) {
+        let text = if self.total == 0 {
+            "—".to_string()
+        } else if self.hovered {
+            format!("{} of {}", self.current, self.total)
+        } else {
+            self.current.to_string()
+        };
+        self.view.label(cx, ids!(page_text)).set_text(cx, &text);
+    }
+
+    fn set_pages(&mut self, cx: &mut Cx, current: usize, total: usize) {
+        self.current = current.min(total).max(usize::from(total > 0));
+        self.total = total;
+        self.refresh_text(cx);
+    }
+}
+
+impl Widget for ReaderPageIndicator {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+        match event.hits(cx, self.view.area()) {
+            Hit::FingerHoverIn(_) if !self.hovered => {
+                self.hovered = true;
+                self.refresh_text(cx);
+            }
+            Hit::FingerHoverOut(_) if self.hovered => {
+                self.hovered = false;
+                self.refresh_text(cx);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 轻量 GPU 柱状图。矩形由 Makepad 的 DrawColor shader 批量绘制，
 /// 数据和坐标仍在 Rust 侧保持可测试、可更新。
 #[derive(Script, ScriptHook, Widget)]
@@ -4339,14 +4561,14 @@ impl ChapterList {
                 left: 12.0,
                 right: 12.0,
                 top: 8.0,
-                bottom: 24.0,
+                bottom: 8.0,
             }
         } else {
             Inset {
                 left: 32.0,
                 right: 32.0,
                 top: 8.0,
-                bottom: 32.0,
+                bottom: 8.0,
             }
         };
         let mut list_widget = self.view.widget(cx, ids!(list));
@@ -5429,6 +5651,12 @@ pub struct App {
     #[rust]
     chapter_idx: usize,
     #[rust]
+    reader_chapter_block_counts: Vec<usize>,
+    #[rust]
+    reader_page_span: usize,
+    #[rust]
+    pending_reader_pagination_layout: bool,
+    #[rust]
     on_reader_page: bool,
     #[rust]
     active_page: AppPage,
@@ -5883,7 +6111,12 @@ impl App {
                 palette.border,
             );
         }
-        for id in [id!(note_composer), id!(selection_popup), id!(word_card)] {
+        for id in [
+            id!(note_composer),
+            id!(selection_popup),
+            id!(word_card),
+            id!(indicator_bg),
+        ] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),
@@ -5912,6 +6145,8 @@ impl App {
         }
         for id in [
             id!(chapter_pos),
+            id!(page_text),
+            id!(reader_pages_left),
             id!(note_hint),
             id!(note_empty_hint),
             id!(reader_chat_status),
@@ -6398,7 +6633,7 @@ impl App {
         self.ui.redraw(cx);
     }
 
-    fn sync_reader_panel_layout(&self, cx: &mut Cx) {
+    fn sync_reader_panel_layout(&mut self, cx: &mut Cx) {
         let panel_open = self.toc_open || self.note_open || self.reader_ai_open;
         if let Some(mut chapter_list) = self
             .ui
@@ -6436,6 +6671,7 @@ impl App {
             script_apply_eval!(cx, reader_ai_panel, {width: 360});
             script_apply_eval!(cx, selection_popup, {width: 520});
         }
+        self.invalidate_reader_pagination_layout(cx);
     }
 
     fn update_responsive_layout(
@@ -7594,7 +7830,12 @@ impl App {
                 chunks,
             )
         };
-        let restored_block = block.min(chunks.len().saturating_sub(1));
+        let chapter_blocks = chunks.len().max(1);
+        let restored_block = if block == usize::MAX {
+            reader_last_page_start(chunks.len(), self.reader_page_span)
+        } else {
+            block.min(chunks.len().saturating_sub(1))
+        };
         let restored_scroll = if scroll.is_finite() { scroll } else { 0.0 };
         self.clear_reader_selection(cx);
         self.close_note_composer(cx);
@@ -7603,6 +7844,12 @@ impl App {
         CURRENT_READER_BLOCK.store(restored_block, Ordering::Relaxed);
         CURRENT_READER_SCROLL_BITS.store(restored_scroll.to_bits(), Ordering::Relaxed);
         replace_paragraphs(chunks);
+        if self.reader_chapter_block_counts.len() != total {
+            self.reader_chapter_block_counts = vec![0; total];
+        }
+        self.reader_chapter_block_counts[idx] = chapter_blocks;
+        self.reader_page_span = 0;
+        self.pending_reader_pagination_layout = true;
         self.ui
             .label(cx, ids!(title))
             .set_text(cx, &format!("《{}》", title));
@@ -7624,6 +7871,7 @@ impl App {
                 },
             });
         }
+        self.update_reader_page_footer(cx);
         self.ui.redraw(cx);
     }
 
@@ -7645,6 +7893,73 @@ impl App {
         self.update_progress_label(cx);
     }
 
+    fn update_reader_page_footer(&mut self, cx: &mut Cx) {
+        let first_block = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list))
+            .first_id();
+        let summary = (self.reader_page_span > 0)
+            .then(|| {
+                reader_page_summary(
+                    &self.reader_chapter_block_counts,
+                    self.chapter_idx,
+                    first_block,
+                    self.reader_page_span,
+                )
+            })
+            .flatten();
+        if let Some(mut indicator) = self
+            .ui
+            .widget(cx, ids!(reader_page_indicator))
+            .borrow_mut::<ReaderPageIndicator>()
+        {
+            match summary {
+                Some(summary) => indicator.set_pages(cx, summary.current, summary.total),
+                None => indicator.set_pages(cx, 0, 0),
+            }
+        }
+        let pages_left = match summary {
+            Some(summary) if app_language() == AppLanguage::English => {
+                if summary.pages_left_in_chapter == 1 {
+                    "1 page left in chapter".to_string()
+                } else {
+                    format!("{} pages left in chapter", summary.pages_left_in_chapter)
+                }
+            }
+            Some(summary) => format!("本章还剩 {} 页", summary.pages_left_in_chapter),
+            None if app_language() == AppLanguage::English => "Calculating pages…".to_string(),
+            None => "正在计算页码…".to_string(),
+        };
+        self.ui
+            .label(cx, ids!(reader_pages_left))
+            .set_text(cx, &pages_left);
+    }
+
+    fn invalidate_reader_pagination_layout(&mut self, cx: &mut Cx) {
+        self.pending_reader_pagination_layout = true;
+        self.ui.redraw(cx);
+    }
+
+    /// 必须在一次完整 Draw 后读取 PortalList 的真实可见项目数；提前读取会得到旧布局，
+    /// 导致字号或横竖屏变化后页码与翻页步长不一致。
+    fn resolve_reader_pagination_layout_after_draw(&mut self, cx: &mut Cx) {
+        if !self.pending_reader_pagination_layout || CURRENT_BOOK.read().unwrap().is_none() {
+            return;
+        }
+        let visible = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list))
+            .visible_items();
+        if visible == 0 {
+            return;
+        }
+        self.reader_page_span = visible.saturating_sub(1).max(1);
+        self.pending_reader_pagination_layout = false;
+        self.update_reader_page_footer(cx);
+    }
+
     /// 章内进度标签：`第x/y章 · z%`（z 按已读到的块估算）。
     fn update_progress_label(&mut self, cx: &mut Cx) {
         let total_ch = {
@@ -7663,6 +7978,7 @@ impl App {
         let pct = read_to * 100 / blocks;
         let text = format!("{}/{} · {}%", self.chapter_idx + 1, total_ch, pct);
         self.ui.label(cx, ids!(chapter_pos)).set_text(cx, &text);
+        self.update_reader_page_footer(cx);
     }
 
     /// 视口翻屏；到底/到顶时跨章。
@@ -7677,7 +7993,11 @@ impl App {
         let total = PARAGRAPHS.read().unwrap().len();
         let first = list.first_id();
         let vis = list.visible_items().max(1);
-        let step = vis.saturating_sub(1).max(1);
+        let step = if self.reader_page_span > 0 {
+            self.reader_page_span
+        } else {
+            vis.saturating_sub(1).max(1)
+        };
         if down {
             if first + vis >= total {
                 let idx = self.chapter_idx + 1;
@@ -7689,7 +8009,7 @@ impl App {
         } else if first == 0 {
             if self.chapter_idx > 0 {
                 let idx = self.chapter_idx - 1;
-                self.set_chapter(cx, idx);
+                self.set_chapter_at(cx, idx, usize::MAX, 0.0, true);
             }
         } else {
             list.set_first_id_and_scroll(first.saturating_sub(step), 0.0);
@@ -7748,6 +8068,7 @@ impl App {
         self.ui
             .label(cx, ids!(font_size_label))
             .set_text(cx, &format!("{:.0}", new_size));
+        self.invalidate_reader_pagination_layout(cx);
         self.ui.redraw(cx);
         self.persist_reader_settings(cx);
     }
@@ -7913,8 +8234,13 @@ impl App {
                 .and_then(|b| build_chapter_chunks(b, self.chapter_idx))
         };
         if let Some(chunks) = chunks {
+            let chapter_blocks = chunks.len().max(1);
             replace_paragraphs(chunks);
+            if let Some(count) = self.reader_chapter_block_counts.get_mut(self.chapter_idx) {
+                *count = chapter_blocks;
+            }
         }
+        self.invalidate_reader_pagination_layout(cx);
         self.ui.redraw(cx);
     }
 
@@ -8863,6 +9189,8 @@ impl MatchEvent for App {
                             parse_ms,
                             initial_gloss_ms
                         );
+                        self.reader_chapter_block_counts.clear();
+                        self.reader_page_span = 0;
                         self.set_chapter_at(cx, resume.chapter, resume.block, resume.scroll, false);
                         self.update_progress_label(cx);
                         if *GLOSS_ENABLED.read().unwrap() && *gloss_count == 0 {
@@ -8880,7 +9208,8 @@ impl MatchEvent for App {
                             .as_ref()
                             .map(|book| book.id.clone())
                         {
-                            spawn_load_notes(book_id);
+                            spawn_load_notes(book_id.clone());
+                            spawn_build_reader_pagination(book_id);
                         }
                         self.start_reading_timer(cx);
                     }
@@ -8893,6 +9222,30 @@ impl MatchEvent for App {
                                 format!("打开失败: {e}")
                             },
                         );
+                    }
+                }
+                continue;
+            }
+            if let Some(pagination) = action.downcast_ref::<ReaderPaginationAction>() {
+                match pagination {
+                    ReaderPaginationAction::Ready {
+                        book_id,
+                        chapter_block_counts,
+                    } => {
+                        let is_current = CURRENT_BOOK
+                            .read()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|book| book.id == *book_id);
+                        if is_current {
+                            self.reader_chapter_block_counts = chapter_block_counts.clone();
+                            if let Some(count) =
+                                self.reader_chapter_block_counts.get_mut(self.chapter_idx)
+                            {
+                                *count = PARAGRAPHS.read().unwrap().len().max(1);
+                            }
+                            self.update_reader_page_footer(cx);
+                        }
                     }
                 }
                 continue;
@@ -10238,6 +10591,9 @@ impl AppMain for App {
                 spawn_db_init(cx.get_data_dir().map(std::path::PathBuf::from));
             }
             Event::WindowGeomChange(event) => {
+                if CURRENT_BOOK.read().unwrap().is_some() {
+                    self.pending_reader_pagination_layout = true;
+                }
                 let responsive_changed = self.update_responsive_layout(
                     cx,
                     event.new_geom.inner_size,
@@ -10282,9 +10638,12 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
-        if matches!(event, Event::Draw(_)) && self.pending_ui_projection_after_draw {
-            self.pending_ui_projection_after_draw = false;
-            self.restore_projected_ui_after_draw(cx);
+        if matches!(event, Event::Draw(_)) {
+            if self.pending_ui_projection_after_draw {
+                self.pending_ui_projection_after_draw = false;
+                self.restore_projected_ui_after_draw(cx);
+            }
+            self.resolve_reader_pagination_layout_after_draw(cx);
         }
         if let Some(direction) = reader_swipe {
             let selection_is_clear =
