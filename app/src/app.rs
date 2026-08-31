@@ -87,6 +87,17 @@ fn shelf_grid_book_index(
     (index < book_count).then_some(index)
 }
 
+fn shelf_cover_needs_load(
+    loaded_covers: &HashMap<WidgetUid, Option<String>>,
+    card_uid: WidgetUid,
+    cover_path: &Option<String>,
+) -> bool {
+    // An empty ref cannot be cached safely. A real UID identifies the actual
+    // PortalList card instance that owns the image texture, not merely the
+    // book currently projected into that card.
+    card_uid == WidgetUid(0) || loaded_covers.get(&card_uid) != Some(cover_path)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ReaderPageSummary {
     current: usize,
@@ -1256,6 +1267,49 @@ mod shelf_filter_tests {
         assert_eq!(shelf_grid_row_count(7, 3), 3);
         assert_eq!(shelf_grid_book_index(2, 0, 3, 7), Some(6));
         assert_eq!(shelf_grid_book_index(2, 1, 3, 7), None);
+    }
+
+    #[test]
+    fn filtered_shelf_projection_has_no_entries_after_the_matching_books() {
+        let all = vec![
+            book("rust-1", &["Rust"]),
+            book("other-1", &["Design"]),
+            book("rust-2", &["rust"]),
+            book("other-2", &["Fiction"]),
+            book("other-3", &["History"]),
+        ];
+        let mut projection = ListProjection::default();
+        projection.replace(shelf_items_for_tag(&all, Some("Rust")));
+
+        assert_eq!(projection.entries.len(), 2);
+        assert_eq!(
+            projection.entry_for_item_id(0).map(|book| &*book.id),
+            Some("rust-1")
+        );
+        assert_eq!(
+            projection.entry_for_item_id(1).map(|book| &*book.id),
+            Some("rust-2")
+        );
+        for stale_item_id in 2..5 {
+            assert!(projection.entry_for_item_id(stale_item_id).is_none());
+        }
+    }
+
+    #[test]
+    fn cover_cache_is_scoped_to_the_portal_card_instance() {
+        let cover = Some("/covers/rust.png".to_string());
+        let first_card = WidgetUid(7);
+        let replacement_card = WidgetUid(8);
+        let mut loaded = HashMap::new();
+        loaded.insert(first_card, cover.clone());
+
+        assert!(!shelf_cover_needs_load(&loaded, first_card, &cover));
+        assert!(shelf_cover_needs_load(&loaded, replacement_card, &cover));
+        assert!(shelf_cover_needs_load(
+            &loaded,
+            first_card,
+            &Some("/covers/other.png".to_string())
+        ));
     }
 }
 
@@ -5408,9 +5462,10 @@ impl Widget for VocabList {
 struct BookShelf {
     #[deref]
     view: View,
-    /// item_id → 已加载的封面路径（PortalList 复用 item，路径变了才重载）。
+    /// 卡片 WidgetUid → 已加载的封面路径。纹理属于组件实例，不能只按
+    /// book_index 缓存：窗口重排可能用一个新卡片实例展示同一本书。
     #[rust]
-    loaded_covers: HashMap<usize, Option<String>>,
+    loaded_covers: HashMap<WidgetUid, Option<String>>,
     #[rust]
     projection_revision: usize,
     #[rust]
@@ -5426,7 +5481,6 @@ impl BookShelf {
         &mut self,
         cx: &mut Cx2d,
         card: &WidgetRef,
-        book_index: usize,
         book: &ShelfItem,
         language: AppLanguage,
     ) {
@@ -5467,7 +5521,8 @@ impl BookShelf {
         card.widget(cx, ids!(del_btn))
             .set_text(cx, crate::i18n::text(language, "delete"));
 
-        if self.loaded_covers.get(&book_index) != Some(&book.cover_path) {
+        let card_uid = card.widget_uid();
+        if shelf_cover_needs_load(&self.loaded_covers, card_uid, &book.cover_path) {
             let img = card.image(cx, ids!(cover_img));
             match &book.cover_path {
                 Some(path) => {
@@ -5479,8 +5534,9 @@ impl BookShelf {
                 }
                 None => img.set_texture(cx, None),
             }
-            self.loaded_covers
-                .insert(book_index, book.cover_path.clone());
+            if card_uid != WidgetUid(0) {
+                self.loaded_covers.insert(card_uid, book.cover_path.clone());
+            }
         }
     }
 
@@ -5533,6 +5589,13 @@ impl Widget for BookShelf {
                     id!(Card)
                 };
                 while let Some(item_id) = list.next_visible_item(cx) {
+                    // PortalList deliberately probes beyond range_end until a pass
+                    // draws nothing. Never instantiate that sentinel: doing so gives
+                    // it the template's height and turns stale filtered rows into
+                    // visible empty cards.
+                    if item_id >= item_count {
+                        continue;
+                    }
                     let item = list.item(cx, item_id, template);
                     if view_mode == LibraryViewMode::Grid {
                         for (column, cell_id) in [
@@ -5561,14 +5624,13 @@ impl Widget for BookShelf {
                                 self.bind_book_card(
                                     cx,
                                     &card,
-                                    book_index,
                                     &shelf.entries[book_index],
                                     language,
                                 );
                             }
                         }
                     } else if let Some(book) = shelf.entry_for_item_id(item_id) {
-                        self.bind_book_card(cx, &item, item_id, book, language);
+                        self.bind_book_card(cx, &item, book, language);
                     }
                     item.draw_all_unscoped(cx);
                 }
