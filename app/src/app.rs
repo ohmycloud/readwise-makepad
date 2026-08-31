@@ -1929,6 +1929,8 @@ fn spawn_delete_note(book_id: String, note_id: String) {
 #[derive(Debug)]
 enum HlAction {
     Saved(readwise_core::books::Highlight, usize),
+    Deleted { chapter: usize, ids: Vec<String> },
+    Error(String),
 }
 
 fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
@@ -1949,7 +1951,17 @@ fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
                 };
                 Cx::post_action(HlAction::Saved(hl, chapter));
             }
-            Err(e) => ::log::error!("{}", e),
+            Err(e) => Cx::post_action(HlAction::Error(e)),
+        }
+    });
+}
+
+fn spawn_delete_highlights(book_id: String, chapter: usize, ids: Vec<String>) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        match db.delete_highlights(&book_id, &ids) {
+            Ok(_) => Cx::post_action(HlAction::Deleted { chapter, ids }),
+            Err(error) => Cx::post_action(HlAction::Error(error)),
         }
     });
 }
@@ -2251,6 +2263,53 @@ fn build_chapter_chunks(book: &mut OpenBook, idx: usize) -> Option<Vec<String>> 
         }
     }
     Some(chunks)
+}
+
+fn overlapping_highlight_ids(
+    highlights: &[readwise_core::books::Highlight],
+    range: TextRange,
+) -> Vec<String> {
+    let (selection_start, selection_end) = range;
+    highlights
+        .iter()
+        .filter(|highlight| {
+            let highlight_start = (highlight.start_block, highlight.start_char);
+            let highlight_end = (highlight.end_block, highlight.end_char);
+            highlight_start < selection_end && selection_start < highlight_end
+        })
+        .map(|highlight| highlight.id.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod highlight_overlap_tests {
+    use super::*;
+
+    fn highlight(id: &str, start: TextPoint, end: TextPoint) -> readwise_core::books::Highlight {
+        readwise_core::books::Highlight {
+            id: id.to_string(),
+            start_block: start.0,
+            start_char: start.1,
+            end_block: end.0,
+            end_char: end.1,
+            color: "yellow".to_string(),
+        }
+    }
+
+    #[test]
+    fn selection_deletes_every_intersecting_highlight_but_not_touching_neighbors() {
+        let highlights = vec![
+            highlight("before", (2, 0), (2, 4)),
+            highlight("first", (2, 4), (2, 12)),
+            highlight("cross", (2, 10), (3, 8)),
+            highlight("after", (3, 8), (3, 20)),
+        ];
+        assert_eq!(
+            overlapping_highlight_ids(&highlights, ((2, 6), (3, 8))),
+            vec!["first".to_string(), "cross".to_string()]
+        );
+        assert!(overlapping_highlight_ids(&highlights, ((4, 0), (4, 3))).is_empty());
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -6373,7 +6432,14 @@ impl App {
         set_text!(translate_sel_btn, "translate");
         set_text!(ask_ai_sel_btn, "ask_ai");
         set_text!(speak_sel_btn, "speak");
-        set_text!(hl_btn, "highlight");
+        let highlight_key = if self.selected_highlight_ids().is_empty() {
+            "highlight"
+        } else {
+            "remove_highlight"
+        };
+        self.ui
+            .widget(cx, ids!(hl_btn))
+            .set_text(cx, crate::i18n::text(language, highlight_key));
         set_text!(sel_close_btn, "close");
         set_text!(close_card_btn, "close");
         set_text!(add_vocab_btn, "add_vocabulary");
@@ -8317,6 +8383,30 @@ impl App {
         self.ui.redraw(cx);
     }
 
+    fn selected_highlight_ids(&self) -> Vec<String> {
+        let Some(range) = *SEL_RANGE.read().unwrap() else {
+            return Vec::new();
+        };
+        CURRENT_BOOK
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|book| book.highlights.get(&self.chapter_idx))
+            .map(|highlights| overlapping_highlight_ids(highlights, range))
+            .unwrap_or_default()
+    }
+
+    fn update_highlight_action_label(&self, cx: &mut Cx) {
+        let key = if self.selected_highlight_ids().is_empty() {
+            "highlight"
+        } else {
+            "remove_highlight"
+        };
+        self.ui
+            .widget(cx, ids!(hl_btn))
+            .set_text(cx, crate::i18n::text(app_language(), key));
+    }
+
     fn clear_reader_selection(&mut self, cx: &mut Cx) {
         *SEL_RANGE.write().unwrap() = None;
         SELECTED_TEXT.write().unwrap().clear();
@@ -9172,6 +9262,7 @@ impl MatchEvent for App {
                 let show = matches!(sel, SelAction::Show);
                 self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, show);
                 if show {
+                    self.update_highlight_action_label(cx);
                     let text = SELECTED_TEXT.read().unwrap();
                     let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
                     let preview: String = compact.chars().take(72).collect();
@@ -9192,15 +9283,47 @@ impl MatchEvent for App {
                 self.ui.redraw(cx);
                 continue;
             }
-            if let Some(HlAction::Saved(hl, chapter)) = action.downcast_ref::<HlAction>() {
-                if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
-                    book.highlights
-                        .entry(*chapter)
-                        .or_default()
-                        .push(hl.clone());
+            if let Some(highlight_action) = action.downcast_ref::<HlAction>() {
+                match highlight_action {
+                    HlAction::Saved(hl, chapter) => {
+                        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+                            book.highlights
+                                .entry(*chapter)
+                                .or_default()
+                                .push(hl.clone());
+                        }
+                        self.clear_reader_selection(cx);
+                        self.refresh_current_chapter(cx);
+                    }
+                    HlAction::Deleted { chapter, ids } => {
+                        let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+                        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+                            let remove_chapter = if let Some(highlights) =
+                                book.highlights.get_mut(chapter)
+                            {
+                                highlights.retain(|highlight| !ids.contains(highlight.id.as_str()));
+                                highlights.is_empty()
+                            } else {
+                                false
+                            };
+                            if remove_chapter {
+                                book.highlights.remove(chapter);
+                            }
+                        }
+                        self.clear_reader_selection(cx);
+                        self.refresh_current_chapter(cx);
+                    }
+                    HlAction::Error(error) => {
+                        self.ui.label(cx, ids!(sel_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Highlight operation failed: {error}")
+                            } else {
+                                format!("高亮操作失败：{error}")
+                            },
+                        );
+                    }
                 }
-                self.clear_reader_selection(cx);
-                self.refresh_current_chapter(cx);
                 continue;
             }
             if let Some(note) = action.downcast_ref::<NoteAction>() {
@@ -10002,7 +10125,18 @@ impl MatchEvent for App {
             let range = *SEL_RANGE.read().unwrap();
             let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
             if let (Some(range), Some(book_id)) = (range, book_id) {
-                spawn_add_highlight(book_id, self.chapter_idx, range);
+                let ids = self.selected_highlight_ids();
+                if ids.is_empty() {
+                    self.ui
+                        .label(cx, ids!(sel_hint))
+                        .set_text(cx, localized("正在添加高亮…", "Adding highlight…"));
+                    spawn_add_highlight(book_id, self.chapter_idx, range);
+                } else {
+                    self.ui
+                        .label(cx, ids!(sel_hint))
+                        .set_text(cx, localized("正在删除高亮…", "Removing highlight…"));
+                    spawn_delete_highlights(book_id, self.chapter_idx, ids);
+                }
             }
         }
         if self.ui.button(cx, ids!(note_from_sel_btn)).clicked(actions) {

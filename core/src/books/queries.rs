@@ -320,6 +320,39 @@ pub async fn get_highlights_by_chapter(
     Ok(map)
 }
 
+/// 按 id 批量删除一本书的高亮。书 id 和高亮类型一起限制删除范围，
+/// 避免误删其他书籍的笔记或注释。
+pub async fn delete_highlights(
+    pool: &SqlitePool,
+    book_id: &str,
+    ids: &[String],
+) -> Result<usize, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("开始删除高亮事务失败: {e}"))?;
+    let mut deleted = 0usize;
+    for id in ids {
+        deleted += sqlx::query(
+            "DELETE FROM book_notes
+             WHERE id = ? AND book_id = ? AND type = 'annotation' AND style = 'highlight'",
+        )
+        .bind(id)
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("删除高亮失败: {e}"))?
+        .rows_affected() as usize;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("提交删除高亮事务失败: {e}"))?;
+    Ok(deleted)
+}
+
 /// 读取一本书的阅读状态（恢复进度用）。
 pub async fn get_status(pool: &SqlitePool, id: &str) -> Result<Option<BookStatus>, String> {
     let row = sqlx::query("SELECT * FROM book_status WHERE book_id = ?")
@@ -413,4 +446,78 @@ pub async fn scan_import_dir(
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+
+    fn pool() -> (tokio::runtime::Runtime, SqlitePool) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pool = runtime
+            .block_on(SqlitePool::connect("sqlite::memory:"))
+            .unwrap();
+        runtime
+            .block_on(
+                sqlx::query(
+                    "CREATE TABLE book_notes (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        book_id TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        cfi TEXT NOT NULL,
+                        text TEXT,
+                        style TEXT,
+                        color TEXT,
+                        section_id TEXT,
+                        norm_start INTEGER,
+                        norm_end INTEGER,
+                        note TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    )",
+                )
+                .execute(&pool),
+            )
+            .unwrap();
+        (runtime, pool)
+    }
+
+    #[test]
+    fn deleting_highlights_is_scoped_to_book_type_and_style() {
+        let (runtime, pool) = pool();
+        let first = runtime
+            .block_on(add_highlight(&pool, "book-1", 0, (0, 1, 0, 4), "yellow"))
+            .unwrap();
+        let second = runtime
+            .block_on(add_highlight(&pool, "book-1", 0, (1, 0, 1, 3), "blue"))
+            .unwrap();
+        let other_book = runtime
+            .block_on(add_highlight(&pool, "book-2", 0, (0, 0, 0, 2), "teal"))
+            .unwrap();
+
+        let deleted = runtime
+            .block_on(delete_highlights(
+                &pool,
+                "book-1",
+                &[first.clone(), other_book.clone()],
+            ))
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining = runtime
+            .block_on(get_highlights_by_chapter(&pool, "book-1"))
+            .unwrap();
+        assert_eq!(remaining[&0].len(), 1);
+        assert_eq!(remaining[&0][0].id, second);
+        assert_eq!(
+            runtime
+                .block_on(get_highlights_by_chapter(&pool, "book-2"))
+                .unwrap()[&0][0]
+                .id,
+            other_book
+        );
+    }
 }

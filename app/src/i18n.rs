@@ -75,6 +75,7 @@ pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
         "ask_ai" => choose(english, "问 AI", "Ask AI"),
         "speak" => choose(english, "发音", "Speak"),
         "highlight" => choose(english, "高亮", "Highlight"),
+        "remove_highlight" => choose(english, "删除高亮", "Remove Highlight"),
         "contents" => choose(english, "目录", "Contents"),
         "reader_ai" => choose(english, "阅读 AI", "Reader AI"),
         "reader_chat_placeholder" => choose(

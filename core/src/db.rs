@@ -250,6 +250,11 @@ impl Db {
             .block_on(books::get_highlights_by_chapter(&self.pool, book_id))
     }
 
+    pub fn delete_highlights(&self, book_id: &str, ids: &[String]) -> Result<usize, String> {
+        self.rt
+            .block_on(books::delete_highlights(&self.pool, book_id, ids))
+    }
+
     // —— 阅读统计 ——
 
     pub fn start_reading_session(&self, book_id: &str) -> Result<String, String> {
