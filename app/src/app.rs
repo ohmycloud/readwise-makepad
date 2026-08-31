@@ -1841,8 +1841,37 @@ static SELECTION_POPUP_POINTER: AtomicBool = AtomicBool::new(false);
 /// 选区状态事件（ChapterList → App）。
 #[derive(Debug)]
 enum SelAction {
-    Show,
+    Show { anchor: Option<DVec2> },
     Hide,
+}
+
+const SELECTION_POPUP_MAX_WIDTH: f64 = 520.0;
+const SELECTION_POPUP_SIDE_INSET: f64 = 12.0;
+const SELECTION_POPUP_GAP: f64 = 10.0;
+const SELECTION_POPUP_ESTIMATED_HEIGHT: f64 = 76.0;
+
+fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) -> (DVec2, f64) {
+    let horizontal_inset = SELECTION_POPUP_SIDE_INSET.min(viewport.size.x.max(0.0) * 0.25);
+    let vertical_inset = SELECTION_POPUP_SIDE_INSET.min(viewport.size.y.max(0.0) * 0.25);
+    let popup_width =
+        SELECTION_POPUP_MAX_WIDTH.min((viewport.size.x - horizontal_inset * 2.0).max(1.0));
+    let min_x = viewport.pos.x + horizontal_inset;
+    let max_x = (viewport.pos.x + viewport.size.x - horizontal_inset - popup_width).max(min_x);
+    let x = (anchor.x - popup_width * 0.5).clamp(min_x, max_x);
+
+    let popup_height = popup_height.max(1.0);
+    let min_y = viewport.pos.y + vertical_inset;
+    let max_y = (viewport.pos.y + viewport.size.y - vertical_inset - popup_height).max(min_y);
+    let above = anchor.y - popup_height - SELECTION_POPUP_GAP;
+    let below = anchor.y + SELECTION_POPUP_GAP;
+    let y = if above >= min_y {
+        above
+    } else if below <= max_y {
+        below
+    } else {
+        above.clamp(min_y, max_y)
+    };
+    (dvec2(x, y), popup_width)
 }
 
 /// 笔记后台操作结果。
@@ -2309,6 +2338,43 @@ mod highlight_overlap_tests {
             vec!["first".to_string(), "cross".to_string()]
         );
         assert!(overlapping_highlight_ids(&highlights, ((4, 0), (4, 3))).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod selection_popup_tests {
+    use super::*;
+
+    #[test]
+    fn popup_prefers_above_selection_and_stays_inside_viewport() {
+        let viewport = Rect {
+            pos: dvec2(100.0, 80.0),
+            size: dvec2(800.0, 600.0),
+        };
+        let (position, width) = selection_popup_geometry(viewport, dvec2(500.0, 400.0), 76.0);
+        assert_eq!(width, 520.0);
+        assert_eq!(position, dvec2(240.0, 314.0));
+    }
+
+    #[test]
+    fn popup_flips_below_and_shrinks_for_a_narrow_viewport() {
+        let viewport = Rect {
+            pos: dvec2(20.0, 40.0),
+            size: dvec2(320.0, 500.0),
+        };
+        let (position, width) = selection_popup_geometry(viewport, dvec2(28.0, 55.0), 76.0);
+        assert_eq!(width, 296.0);
+        assert_eq!(position, dvec2(32.0, 65.0));
+    }
+
+    #[test]
+    fn popup_clamps_to_bottom_when_neither_side_has_enough_space() {
+        let viewport = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(260.0, 100.0),
+        };
+        let (position, _) = selection_popup_geometry(viewport, dvec2(130.0, 50.0), 90.0);
+        assert_eq!(position.y, 12.0);
     }
 }
 
@@ -3700,9 +3766,7 @@ script_mod! {
                                 sel_bar := View{
                                     visible: false
                                     width: Fill height: Fill
-                                    flow: Down
-                                    align: Align{x: 0.5 y: 1.0}
-                                    padding: Inset{left: 18 right: 18 bottom: 18}
+                                    flow: Overlay
                                     selection_popup := RoundedView{
                                         width: 520 height: Fit
                                         new_batch: true
@@ -4844,7 +4908,9 @@ impl ChapterList {
             eprintln!("[SEL] up: range={:?} show={}", range, non_empty);
         }
         Cx::post_action(if non_empty {
-            SelAction::Show
+            SelAction::Show {
+                anchor: self.last_abs,
+            }
         } else {
             SelAction::Hide
         });
@@ -4896,7 +4962,8 @@ impl ChapterList {
                 }
             }
             Event::Scroll(_) if self.selecting => self.extend_after_scroll(cx),
-            Event::MouseUp(_) if self.selecting => {
+            Event::MouseUp(event) if self.selecting => {
+                self.last_abs = Some(event.abs);
                 self.finish_selection();
             }
             Event::LongPress(event) if self.compact_layout => {
@@ -4941,7 +5008,10 @@ impl ChapterList {
                             self.apply_visible_selection(cx);
                         }
                     }
-                    TouchState::Stop => self.finish_selection(),
+                    TouchState::Stop => {
+                        self.last_abs = Some(touch.abs);
+                        self.finish_selection();
+                    }
                     TouchState::Start | TouchState::Stable => {}
                 }
             }
@@ -5788,6 +5858,11 @@ pub struct App {
     reader_page_span: usize,
     #[rust]
     pending_reader_pagination_layout: bool,
+    /// 选区工具条由 App 这一覆盖层所有者定位；锚点是选区手势结束的屏幕坐标。
+    #[rust]
+    selection_popup_anchor: Option<DVec2>,
+    #[rust]
+    pending_selection_popup_layout: bool,
     #[rust]
     on_reader_page: bool,
     #[rust]
@@ -8407,9 +8482,50 @@ impl App {
             .set_text(cx, crate::i18n::text(app_language(), key));
     }
 
+    /// 将工具条锚定在选区手势结束处，并严格限制在正文视口内。
+    /// 第一次使用估算高度立即显示；完成一帧布局后再用真实高度校正一次。
+    fn position_selection_popup(&self, cx: &mut Cx, use_measured_height: bool) -> bool {
+        let Some(anchor) = self.selection_popup_anchor else {
+            return false;
+        };
+        let viewport = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .area()
+            .clipped_rect(cx);
+        if viewport.size.x <= 0.0 || viewport.size.y <= 0.0 {
+            return false;
+        }
+        let popup = self.ui.view(cx, ids!(selection_popup));
+        let measured_height = popup.area().rect(cx).size.y;
+        let popup_height = if use_measured_height && measured_height > 0.0 {
+            measured_height
+        } else {
+            SELECTION_POPUP_ESTIMATED_HEIGHT
+        };
+        let (position, width) = selection_popup_geometry(viewport, anchor, popup_height);
+        let Some(mut inner) = popup.borrow_mut() else {
+            return false;
+        };
+        let old_position = inner.walk.abs_pos;
+        let old_width = match inner.walk.width {
+            Size::Fixed(value) => value,
+            _ => -1.0,
+        };
+        let changed = old_position
+            .map(|old| (old.x - position.x).abs() > 0.5 || (old.y - position.y).abs() > 0.5)
+            .unwrap_or(true)
+            || (old_width - width).abs() > 0.5;
+        inner.walk.abs_pos = Some(position);
+        inner.walk.width = Size::Fixed(width);
+        changed
+    }
+
     fn clear_reader_selection(&mut self, cx: &mut Cx) {
         *SEL_RANGE.write().unwrap() = None;
         SELECTED_TEXT.write().unwrap().clear();
+        self.selection_popup_anchor = None;
+        self.pending_selection_popup_layout = false;
         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
         let list = self
             .ui
@@ -9259,26 +9375,41 @@ impl MatchEvent for App {
                 continue;
             }
             if let Some(sel) = action.downcast_ref::<SelAction>() {
-                let show = matches!(sel, SelAction::Show);
-                self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, show);
-                if show {
-                    self.update_highlight_action_label(cx);
-                    let text = SELECTED_TEXT.read().unwrap();
-                    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                    let preview: String = compact.chars().take(72).collect();
-                    let suffix = if compact.chars().count() > 72 {
-                        "…"
-                    } else {
-                        ""
-                    };
-                    self.ui.label(cx, ids!(sel_hint)).set_text(
-                        cx,
-                        &if app_language() == AppLanguage::English {
-                            format!("Selected: {preview}{suffix}")
+                match sel {
+                    SelAction::Show { anchor } => {
+                        let viewport = self
+                            .ui
+                            .widget(cx, ids!(chapter_list))
+                            .area()
+                            .clipped_rect(cx);
+                        self.selection_popup_anchor =
+                            Some(anchor.unwrap_or_else(|| viewport.pos + viewport.size * 0.5));
+                        self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, true);
+                        self.position_selection_popup(cx, false);
+                        self.pending_selection_popup_layout = true;
+                        self.update_highlight_action_label(cx);
+                        let text = SELECTED_TEXT.read().unwrap();
+                        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let preview: String = compact.chars().take(72).collect();
+                        let suffix = if compact.chars().count() > 72 {
+                            "…"
                         } else {
-                            format!("已选择：{preview}{suffix}")
-                        },
-                    );
+                            ""
+                        };
+                        self.ui.label(cx, ids!(sel_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Selected: {preview}{suffix}")
+                            } else {
+                                format!("已选择：{preview}{suffix}")
+                            },
+                        );
+                    }
+                    SelAction::Hide => {
+                        self.selection_popup_anchor = None;
+                        self.pending_selection_popup_layout = false;
+                        self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
+                    }
                 }
                 self.ui.redraw(cx);
                 continue;
@@ -10801,6 +10932,9 @@ impl AppMain for App {
                 if CURRENT_BOOK.read().unwrap().is_some() {
                     self.pending_reader_pagination_layout = true;
                 }
+                if self.selection_popup_anchor.is_some() {
+                    self.pending_selection_popup_layout = true;
+                }
                 let responsive_changed = self.update_responsive_layout(
                     cx,
                     event.new_geom.inner_size,
@@ -10851,6 +10985,12 @@ impl AppMain for App {
                 self.restore_projected_ui_after_draw(cx);
             }
             self.resolve_reader_pagination_layout_after_draw(cx);
+            if self.pending_selection_popup_layout {
+                self.pending_selection_popup_layout = false;
+                if self.position_selection_popup(cx, true) {
+                    self.ui.redraw(cx);
+                }
+            }
         }
         if let Some(direction) = reader_swipe {
             let selection_is_clear =
