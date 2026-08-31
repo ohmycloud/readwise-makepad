@@ -13,6 +13,7 @@ use std::time::Instant;
 
 type AiSettings = readwise_core::ai::AiSettings;
 type AppLanguage = readwise_core::settings::AppLanguage;
+type LibraryViewMode = readwise_core::settings::LibraryViewMode;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
 type ReaderBackground = readwise_core::settings::ReaderBackground;
@@ -60,6 +61,30 @@ fn library_surface_visibility(visible_count: usize) -> (bool, bool) {
     // hidden, a responsive rebuild can leave it uninstantiated and later
     // set_visible calls become no-ops until another user action finds it.
     (visible_count == 0, true)
+}
+
+fn shelf_grid_columns_for_width(width: f64) -> usize {
+    if width >= 1080.0 {
+        4
+    } else if width >= 760.0 {
+        3
+    } else {
+        2
+    }
+}
+
+fn shelf_grid_row_count(book_count: usize, columns: usize) -> usize {
+    book_count.div_ceil(columns.max(1))
+}
+
+fn shelf_grid_book_index(
+    row: usize,
+    column: usize,
+    columns: usize,
+    book_count: usize,
+) -> Option<usize> {
+    let index = row.checked_mul(columns)?.checked_add(column)?;
+    (index < book_count).then_some(index)
 }
 
 fn word_range_at(text: &str, char_index: usize) -> Option<(usize, usize)> {
@@ -1174,6 +1199,17 @@ mod shelf_filter_tests {
         assert_eq!(shelf_items_for_tag(&items, Some("fiction"))[0].id, "a");
         assert!(shelf_items_for_tag(&items, Some("missing")).is_empty());
     }
+
+    #[test]
+    fn shelf_grid_uses_responsive_columns_and_complete_rows() {
+        assert_eq!(shelf_grid_columns_for_width(390.0), 2);
+        assert_eq!(shelf_grid_columns_for_width(900.0), 3);
+        assert_eq!(shelf_grid_columns_for_width(1200.0), 4);
+        assert_eq!(shelf_grid_row_count(0, 3), 0);
+        assert_eq!(shelf_grid_row_count(7, 3), 3);
+        assert_eq!(shelf_grid_book_index(2, 0, 3, 7), Some(6));
+        assert_eq!(shelf_grid_book_index(2, 1, 3, 7), None);
+    }
 }
 
 /// 当前打开的书（后台线程写入，UI 读）。
@@ -1246,6 +1282,10 @@ static GLOSS_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(true
 /// 对应的场景主题，并保留相同的控件明暗语义。
 static READER_THEME: LazyLock<RwLock<ReaderTheme>> =
     LazyLock::new(|| RwLock::new(ReaderTheme::Dark));
+
+/// 书库投影方式。作为本地偏好与其他界面设置一起保存，并在旋转重建后恢复。
+static LIBRARY_VIEW_MODE: LazyLock<RwLock<LibraryViewMode>> =
+    LazyLock::new(|| RwLock::new(LibraryViewMode::List));
 
 /// 全应用场景背景：正文、导航、窗口标题栏和其余功能页共享同一纸张配色。
 static READER_BACKGROUND: LazyLock<RwLock<ReaderBackground>> =
@@ -1492,6 +1532,8 @@ mod reader_scene_palette_tests {
 
 static READER_SETTINGS_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
 static READER_SETTINGS_SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static READER_PROGRESS_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
+static READER_PROGRESS_SAVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 const READER_FONT_DEFAULT: f32 = 11.0;
 const READER_FONT_MIN: f32 = 8.0;
@@ -1761,17 +1803,108 @@ fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
 static CURRENT_CHAPTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// First visible paragraph, used only to restore an Android same-process App rebuild.
 static CURRENT_READER_BLOCK: AtomicUsize = AtomicUsize::new(0);
+/// Exact offset inside the first visible paragraph, stored as `f64::to_bits()`.
+static CURRENT_READER_SCROLL_BITS: AtomicU64 = AtomicU64::new(0.0_f64.to_bits());
 
 /// 打开书的结果（后台 → UI）。
 #[derive(Debug)]
 enum ReaderAction {
     Opened {
-        resume_chapter: usize,
+        resume: ReaderLocation,
         gloss_count: usize,
         parse_ms: u128,
         initial_gloss_ms: u128,
     },
     OpenError(String),
+}
+
+/// 持久化的阅读位置。旧版本只保存章节号；v2 额外保存首个可见段落及其滚动偏移。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ReaderLocation {
+    chapter: usize,
+    block: usize,
+    scroll: f64,
+}
+
+impl ReaderLocation {
+    fn encode(self) -> String {
+        let scroll = if self.scroll.is_finite() {
+            self.scroll
+        } else {
+            0.0
+        };
+        format!("v2:{}:{}:{scroll}", self.chapter, self.block)
+    }
+
+    fn decode(value: &str, chapter_count: usize) -> Self {
+        let legacy = || {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|chapter| *chapter < chapter_count)
+                .map(|chapter| Self {
+                    chapter,
+                    ..Self::default()
+                })
+                .unwrap_or_default()
+        };
+        let Some(encoded) = value.strip_prefix("v2:") else {
+            return legacy();
+        };
+        let mut fields = encoded.split(':');
+        let Some(chapter) = fields.next().and_then(|field| field.parse::<usize>().ok()) else {
+            return legacy();
+        };
+        let Some(block) = fields.next().and_then(|field| field.parse::<usize>().ok()) else {
+            return legacy();
+        };
+        let Some(scroll) = fields.next().and_then(|field| field.parse::<f64>().ok()) else {
+            return legacy();
+        };
+        if fields.next().is_some() || chapter >= chapter_count || !scroll.is_finite() {
+            return legacy();
+        }
+        Self {
+            chapter,
+            block,
+            scroll,
+        }
+    }
+}
+
+#[cfg(test)]
+mod reader_location_tests {
+    use super::*;
+
+    #[test]
+    fn reader_location_round_trips_chapter_block_and_scroll() {
+        let location = ReaderLocation {
+            chapter: 3,
+            block: 27,
+            scroll: -18.75,
+        };
+        assert_eq!(ReaderLocation::decode(&location.encode(), 8), location);
+    }
+
+    #[test]
+    fn reader_location_accepts_legacy_chapters_and_rejects_invalid_values() {
+        assert_eq!(
+            ReaderLocation::decode("4", 8),
+            ReaderLocation {
+                chapter: 4,
+                ..ReaderLocation::default()
+            }
+        );
+        assert_eq!(ReaderLocation::decode("9", 8), ReaderLocation::default());
+        assert_eq!(
+            ReaderLocation::decode("v2:2:10:NaN", 8),
+            ReaderLocation::default()
+        );
+        assert_eq!(
+            ReaderLocation::decode("v2:20:10:-1", 8),
+            ReaderLocation::default()
+        );
+    }
 }
 
 fn selected_single_word(text: &str) -> Option<String> {
@@ -1853,9 +1986,8 @@ fn spawn_open_book(item: ShelfItem) {
         let resume = DB
             .get()
             .and_then(|db| db.get_status(&item.id).ok().flatten())
-            .and_then(|s| s.location.parse::<usize>().ok())
-            .filter(|idx| *idx < total)
-            .unwrap_or(0);
+            .map(|status| ReaderLocation::decode(&status.location, total))
+            .unwrap_or_default();
         let highlights = DB
             .get()
             .and_then(|db| db.get_highlights_by_chapter(&item.id).ok())
@@ -1877,12 +2009,12 @@ fn spawn_open_book(item: ShelfItem) {
         };
         let gloss_started = std::time::Instant::now();
         if *GLOSS_ENABLED.read().unwrap() {
-            let _ = book.chapter_chunks(resume, true);
+            let _ = book.chapter_chunks(resume.chapter, true);
         }
         let initial_gloss_ms = gloss_started.elapsed().as_millis();
         *CURRENT_BOOK.write().unwrap() = Some(book);
         Cx::post_action(ReaderAction::Opened {
-            resume_chapter: resume,
+            resume,
             gloss_count,
             parse_ms,
             initial_gloss_ms,
@@ -1922,18 +2054,50 @@ fn build_chapter_chunks(book: &mut OpenBook, idx: usize) -> Option<Vec<String>> 
     Some(chunks)
 }
 
-/// 后台保存阅读进度（章节粒度，location 存章节下标）。
-fn spawn_save_progress(id: String, chapter_idx: usize, total: usize) {
+#[derive(Clone, Debug)]
+struct ReaderProgressSnapshot {
+    book_id: String,
+    chapter_count: usize,
+    location: ReaderLocation,
+}
+
+fn write_reader_progress(snapshot: &ReaderProgressSnapshot) -> Result<(), String> {
+    let Some(db) = DB.get() else { return Ok(()) };
+    db.update_progress(
+        &snapshot.book_id,
+        (snapshot.location.chapter + 1) as i64,
+        snapshot.chapter_count as i64,
+        &snapshot.location.encode(),
+    )
+}
+
+/// 串行、去旧地保存滚动位置，避免密集滚动产生的后台写入乱序覆盖新位置。
+fn spawn_save_progress(snapshot: ReaderProgressSnapshot) {
+    let version = READER_PROGRESS_SAVE_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
     std::thread::spawn(move || {
-        if let Some(db) = DB.get() {
-            let _ = db.update_progress(
-                &id,
-                (chapter_idx + 1) as i64,
-                total as i64,
-                &chapter_idx.to_string(),
-            );
+        let Ok(_guard) = READER_PROGRESS_SAVE_LOCK.lock() else {
+            ::log::error!("阅读进度保存队列已损坏");
+            return;
+        };
+        if version != READER_PROGRESS_SAVE_VERSION.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Err(error) = write_reader_progress(&snapshot) {
+            ::log::error!("保存阅读进度失败: {error}");
         }
     });
+}
+
+/// 进入后台、离开阅读页或退出时同步落盘；版本号会淘汰仍在等待的旧异步写入。
+fn save_progress_now(snapshot: ReaderProgressSnapshot) {
+    READER_PROGRESS_SAVE_VERSION.fetch_add(1, Ordering::Relaxed);
+    let Ok(_guard) = READER_PROGRESS_SAVE_LOCK.lock() else {
+        ::log::error!("阅读进度保存队列已损坏");
+        return;
+    };
+    if let Err(error) = write_reader_progress(&snapshot) {
+        ::log::error!("保存阅读进度失败: {error}");
+    }
 }
 
 fn shelf_status(language: AppLanguage, status: &str, cur: i64, total: i64) -> String {
@@ -2191,6 +2355,7 @@ fn current_reader_settings() -> ReaderSettings {
 
     ReaderSettings {
         language: *APP_LANGUAGE.read().unwrap(),
+        library_view_mode: *LIBRARY_VIEW_MODE.read().unwrap(),
         theme: *READER_THEME.read().unwrap(),
         background: *READER_BACKGROUND.read().unwrap(),
         font: *READER_FONT.read().unwrap(),
@@ -2431,6 +2596,81 @@ script_mod! {
         del_btn := ButtonFlat{ text: "删除" }
     }
 
+    mod.widgets.BookShelfGridCard = RoundedView{
+        width: Fill height: 286
+        new_batch: true
+        flow: Down spacing: 5 padding: 10
+        align: Align{ x: 0.5 }
+        draw_bg.color: theme.color_bg_container
+        draw_bg.border_radius: 8.0
+        cover := View{
+            width: 86 height: 116
+            flow: Overlay
+            cover_ph := SolidView{
+                width: Fill height: Fill
+                new_batch: true
+                align: Center
+                draw_bg.color: theme.color_highlight
+                draw_bg.border_radius: 5.0
+                cover_letter := Label{
+                    text: ""
+                    draw_text.text_style.font_size: 28
+                }
+            }
+            cover_img := Image{
+                width: Fill height: Fill
+                fit: ImageFit.Biggest
+            }
+        }
+        card_title := Label{
+            width: Fill
+            max_lines: 2
+            text_overflow: Ellipsis
+            text: ""
+            draw_text.text_style.font_size: 12
+        }
+        card_author := Label{
+            width: Fill
+            max_lines: 1
+            text_overflow: Ellipsis
+            text: ""
+            draw_text.color: theme.color_label_inner_inactive
+            draw_text.text_style.font_size: 9
+        }
+        card_status := Label{
+            width: Fill
+            max_lines: 1
+            text_overflow: Ellipsis
+            text: ""
+            draw_text.color: theme.color_highlight
+            draw_text.text_style.font_size: 9
+        }
+        card_tags := Label{
+            width: Fill
+            max_lines: 1
+            text_overflow: Ellipsis
+            text: ""
+            draw_text.color: theme.color_label_inner_inactive
+            draw_text.text_style.font_size: 8.5
+        }
+        grid_actions := View{
+            width: Fill height: 30
+            flow: Right spacing: 3
+            read_btn := ButtonFlat{
+                width: Fill height: 30 text: "阅读"
+                draw_text.text_style.font_size: 8.5
+            }
+            tag_btn := ButtonFlatter{
+                width: Fill height: 30 text: "标签"
+                draw_text.text_style.font_size: 8.5
+            }
+            del_btn := ButtonFlat{
+                width: Fill height: 30 text: "删除"
+                draw_text.text_style.font_size: 8.5
+            }
+        }
+    }
+
     mod.widgets.BookShelfBase = #(BookShelf::register_widget(vm))
     mod.widgets.BookShelf = set_type_default() do mod.widgets.BookShelfBase{
         width: Fill height: Fill
@@ -2441,6 +2681,46 @@ script_mod! {
             scroll_bar: ScrollBar{}
             Card := mod.widgets.BookShelfCard{}
             CardAlternate := mod.widgets.BookShelfCard{}
+            GridRow := View{
+                width: Fill height: Fit
+                flow: Right spacing: 12
+                grid_cell_0 := View{
+                    width: Fill height: 286
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_1 := View{
+                    width: Fill height: 286
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_2 := View{
+                    width: Fill height: 286
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_3 := View{
+                    width: Fill height: 286
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+            }
+            GridRowAlternate := View{
+                width: Fill height: Fit
+                flow: Right spacing: 12
+                grid_cell_0 := View{
+                    width: Fill height: 286
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_1 := View{
+                    width: Fill height: 286
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_2 := View{
+                    width: Fill height: 286
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_3 := View{
+                    width: Fill height: 286
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+            }
         }
     }
 
@@ -2892,6 +3172,12 @@ script_mod! {
                                         width: Fill
                                         text: "书库"
                                         draw_text.text_style.font_size: 18
+                                    }
+                                    library_view_list := RadioButtonTabFlat{
+                                        text: "列表"
+                                    }
+                                    library_view_grid := RadioButtonTabFlat{
+                                        text: "网格"
                                     }
                                     import_epub_btn := ButtonFlat{
                                         // 平台能力在初始脚本对象中确定；不要依赖 Startup
@@ -4907,81 +5193,160 @@ struct BookShelf {
     projection_revision: usize,
     #[rust]
     alternate_template: bool,
+    #[rust]
+    last_view_mode: LibraryViewMode,
+    #[rust]
+    grid_columns: usize,
+}
+
+impl BookShelf {
+    fn bind_book_card(
+        &mut self,
+        cx: &mut Cx2d,
+        card: &WidgetRef,
+        book_index: usize,
+        book: &ShelfItem,
+        language: AppLanguage,
+    ) {
+        let letter = book
+            .title
+            .chars()
+            .next()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        card.label(cx, ids!(cover_letter)).set_text(cx, &letter);
+        card.label(cx, ids!(card_title)).set_text(cx, &book.title);
+        card.label(cx, ids!(card_author)).set_text(cx, &book.author);
+        card.label(cx, ids!(card_status)).set_text(
+            cx,
+            &shelf_status(
+                language,
+                &book.status,
+                book.progress_current,
+                book.progress_total,
+            ),
+        );
+        card.label(cx, ids!(card_tags)).set_text(
+            cx,
+            &if book.tags.is_empty() {
+                crate::i18n::text(language, "no_tags").to_string()
+            } else {
+                book.tags
+                    .iter()
+                    .map(|tag| format!("#{tag}"))
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            },
+        );
+        card.widget(cx, ids!(read_btn))
+            .set_text(cx, crate::i18n::text(language, "reader"));
+        card.widget(cx, ids!(tag_btn))
+            .set_text(cx, crate::i18n::text(language, "edit_tags"));
+        card.widget(cx, ids!(del_btn))
+            .set_text(cx, crate::i18n::text(language, "delete"));
+
+        if self.loaded_covers.get(&book_index) != Some(&book.cover_path) {
+            let img = card.image(cx, ids!(cover_img));
+            match &book.cover_path {
+                Some(path) => {
+                    let path = std::path::Path::new(path);
+                    if let Err(error) = img.load_image_file_by_path(cx, path) {
+                        println!("封面加载失败 {}: {:?}", path.display(), error);
+                        img.set_texture(cx, None);
+                    }
+                }
+                None => img.set_texture(cx, None),
+            }
+            self.loaded_covers
+                .insert(book_index, book.cover_path.clone());
+        }
+    }
+
+    fn grid_columns(&self) -> usize {
+        self.grid_columns.max(2)
+    }
 }
 
 impl Widget for BookShelf {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let shelf = SHELF_VISIBLE.read().unwrap();
         let language = *APP_LANGUAGE.read().unwrap();
+        let view_mode = *LIBRARY_VIEW_MODE.read().unwrap();
+        let measured_width = self.view.area().rect(cx).size.x;
+        let available_width = if measured_width > 0.0 {
+            measured_width
+        } else {
+            cx.display_context.screen_size.x
+        };
+        let grid_columns = shelf_grid_columns_for_width(available_width);
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                list.set_item_range(cx, 0, shelf.entries.len());
-                if self.projection_revision != shelf.revision {
+                let item_count = if view_mode == LibraryViewMode::Grid {
+                    shelf_grid_row_count(shelf.entries.len(), grid_columns)
+                } else {
+                    shelf.entries.len()
+                };
+                list.set_item_range(cx, 0, item_count);
+                if self.projection_revision != shelf.revision
+                    || self.last_view_mode != view_mode
+                    || (view_mode == LibraryViewMode::Grid && self.grid_columns != grid_columns)
+                {
                     list.set_first_id_and_scroll(0, 0.0);
                     self.projection_revision = shelf.revision;
+                    self.last_view_mode = view_mode;
+                    self.grid_columns = grid_columns;
                     self.alternate_template = !self.alternate_template;
                     self.loaded_covers.clear();
                 }
-                let template = if self.alternate_template {
+                let template = if view_mode == LibraryViewMode::Grid {
+                    if self.alternate_template {
+                        id!(GridRowAlternate)
+                    } else {
+                        id!(GridRow)
+                    }
+                } else if self.alternate_template {
                     id!(CardAlternate)
                 } else {
                     id!(Card)
                 };
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let Some(book) = shelf.entry_for_item_id(item_id) else {
-                        continue;
-                    };
-                    let letter = book
-                        .title
-                        .chars()
-                        .next()
-                        .map(|c| c.to_string())
-                        .unwrap_or_default();
                     let item = list.item(cx, item_id, template);
-                    item.label(cx, ids!(cover_letter)).set_text(cx, &letter);
-                    item.label(cx, ids!(card_title)).set_text(cx, &book.title);
-                    item.label(cx, ids!(card_author)).set_text(cx, &book.author);
-                    item.label(cx, ids!(card_status)).set_text(
-                        cx,
-                        &shelf_status(
-                            language,
-                            &book.status,
-                            book.progress_current,
-                            book.progress_total,
-                        ),
-                    );
-                    item.label(cx, ids!(card_tags)).set_text(
-                        cx,
-                        &if book.tags.is_empty() {
-                            crate::i18n::text(language, "no_tags").to_string()
-                        } else {
-                            book.tags
-                                .iter()
-                                .map(|tag| format!("#{tag}"))
-                                .collect::<Vec<_>>()
-                                .join("  ")
-                        },
-                    );
-                    item.widget(cx, ids!(read_btn))
-                        .set_text(cx, crate::i18n::text(language, "reader"));
-                    item.widget(cx, ids!(tag_btn))
-                        .set_text(cx, crate::i18n::text(language, "edit_tags"));
-                    item.widget(cx, ids!(del_btn))
-                        .set_text(cx, crate::i18n::text(language, "delete"));
-                    if self.loaded_covers.get(&item_id) != Some(&book.cover_path) {
-                        let img = item.image(cx, ids!(cover_img));
-                        match &book.cover_path {
-                            Some(path) => {
-                                let p = std::path::Path::new(path);
-                                if let Err(e) = img.load_image_file_by_path(cx, p) {
-                                    println!("封面加载失败 {}: {:?}", path, e);
-                                    img.set_texture(cx, None);
-                                }
+                    if view_mode == LibraryViewMode::Grid {
+                        for (column, cell_id) in [
+                            id!(grid_cell_0),
+                            id!(grid_cell_1),
+                            id!(grid_cell_2),
+                            id!(grid_cell_3),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let cell = item.widget(cx, &[cell_id]);
+                            cell.set_visible(cx, column < grid_columns);
+                            if column >= grid_columns {
+                                continue;
                             }
-                            None => img.set_texture(cx, None),
+                            let card = cell.widget(cx, ids!(grid_card));
+                            let book_index = shelf_grid_book_index(
+                                item_id,
+                                column,
+                                grid_columns,
+                                shelf.entries.len(),
+                            );
+                            card.set_visible(cx, book_index.is_some());
+                            if let Some(book_index) = book_index {
+                                self.bind_book_card(
+                                    cx,
+                                    &card,
+                                    book_index,
+                                    &shelf.entries[book_index],
+                                    language,
+                                );
+                            }
                         }
-                        self.loaded_covers.insert(item_id, book.cover_path.clone());
+                    } else if let Some(book) = shelf.entry_for_item_id(item_id) {
+                        self.bind_book_card(cx, &item, item_id, book, language);
                     }
                     item.draw_all_unscoped(cx);
                 }
@@ -5057,6 +5422,8 @@ pub struct App {
     reading_session_invalidated: bool,
     #[rust]
     reading_checkpoint_timer: Timer,
+    #[rust]
+    reading_progress_save_timer: Timer,
     #[rust]
     statistics_after_pending_session: bool,
     #[rust]
@@ -5195,6 +5562,26 @@ impl App {
         }
         self.ui.widget(cx, ids!(sidebar)).redraw(cx);
         self.ui.widget(cx, ids!(mobile_nav)).redraw(cx);
+    }
+
+    fn sync_library_view_controls(&self, cx: &mut Cx, mode: LibraryViewMode) {
+        self.ui
+            .radio_button(cx, ids!(library_view_list))
+            .set_active(cx, mode == LibraryViewMode::List, Animate::No);
+        self.ui
+            .radio_button(cx, ids!(library_view_grid))
+            .set_active(cx, mode == LibraryViewMode::Grid, Animate::No);
+    }
+
+    fn set_library_view_mode(&mut self, cx: &mut Cx, mode: LibraryViewMode) {
+        if *LIBRARY_VIEW_MODE.read().unwrap() == mode {
+            self.sync_library_view_controls(cx, mode);
+            return;
+        }
+        *LIBRARY_VIEW_MODE.write().unwrap() = mode;
+        self.sync_library_view_controls(cx, mode);
+        self.ui.widget(cx, ids!(book_shelf)).redraw(cx);
+        self.persist_reader_settings(cx);
     }
 
     fn available_shelf_tags() -> Vec<String> {
@@ -5359,6 +5746,34 @@ impl App {
             .label(cx, ids!(library_delete_modal_message))
             .set_text(cx, &message);
         self.ui.modal(cx, ids!(library_delete_modal)).open(cx);
+    }
+
+    fn handle_library_book_card_actions(
+        &mut self,
+        cx: &mut Cx,
+        actions: &Actions,
+        card: &WidgetRef,
+        book: &ShelfItem,
+    ) {
+        if card.button(cx, ids!(del_btn)).clicked(actions) {
+            self.open_delete_book_confirmation(cx, book);
+        }
+        if card.button(cx, ids!(tag_btn)).clicked(actions) {
+            self.open_library_tag_editor(cx, book);
+        }
+        if card.button(cx, ids!(read_btn)).clicked(actions) {
+            self.replace_notes(cx, Vec::new());
+            self.ui.label(cx, ids!(title)).set_text(
+                cx,
+                &if app_language() == AppLanguage::English {
+                    format!("Loading “{}”…", book.title)
+                } else {
+                    format!("《{}》加载中…", book.title)
+                },
+            );
+            self.activate_page(cx, AppPage::Reader);
+            spawn_open_book(book.clone());
+        }
     }
 
     fn open_reader_image_viewer(&mut self, cx: &mut Cx, path: &str) {
@@ -5609,6 +6024,8 @@ impl App {
         set_text!(mobile_nav_settings, "settings");
 
         set_text!(library_title, "library");
+        set_text!(library_view_list, "list_view");
+        set_text!(library_view_grid, "grid_view");
         set_text!(import_epub_btn, "import_epub");
         set_text!(library_hint, "library_hint");
         set_text!(library_empty_title, "library_empty");
@@ -6121,6 +6538,7 @@ impl App {
     }
 
     fn stop_reading_timer(&mut self, cx: &mut Cx, load_statistics: bool) {
+        self.flush_reader_progress(cx);
         let was_pending = self.reading_session_pending;
         if was_pending {
             self.reading_session_invalidated = true;
@@ -7104,8 +7522,62 @@ impl App {
         self.redraw_chat(cx);
     }
 
-    /// 切换到指定章节：按 </p> 切块喂给 PortalList，更新标题/页码，保存进度，滚回顶部。
-    fn set_chapter(&mut self, cx: &mut Cx, idx: usize) {
+    fn current_reader_progress_snapshot(&self, cx: &mut Cx) -> Option<ReaderProgressSnapshot> {
+        let (book_id, chapter_count) = {
+            let guard = CURRENT_BOOK.read().unwrap();
+            let book = guard.as_ref()?;
+            (book.id.clone(), book.chapters.len())
+        };
+        let list = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list));
+        let block_count = PARAGRAPHS.read().unwrap().len();
+        let block = list.first_id().min(block_count.saturating_sub(1));
+        let scroll = list.scroll_position();
+        let scroll = if scroll.is_finite() { scroll } else { 0.0 };
+        CURRENT_READER_BLOCK.store(block, Ordering::Relaxed);
+        CURRENT_READER_SCROLL_BITS.store(scroll.to_bits(), Ordering::Relaxed);
+        Some(ReaderProgressSnapshot {
+            book_id,
+            chapter_count,
+            location: ReaderLocation {
+                chapter: self.chapter_idx.min(chapter_count.saturating_sub(1)),
+                block,
+                scroll,
+            },
+        })
+    }
+
+    fn queue_reader_progress_save(&self, cx: &mut Cx) {
+        if let Some(snapshot) = self.current_reader_progress_snapshot(cx) {
+            spawn_save_progress(snapshot);
+        }
+    }
+
+    fn debounce_reader_progress_save(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.reading_progress_save_timer);
+        self.reading_progress_save_timer = cx.start_timeout(0.75);
+    }
+
+    fn flush_reader_progress(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.reading_progress_save_timer);
+        self.reading_progress_save_timer = Timer::default();
+        if let Some(snapshot) = self.current_reader_progress_snapshot(cx) {
+            save_progress_now(snapshot);
+        }
+    }
+
+    /// 切换到指定章节并恢复章内位置。普通章节跳转传入章首并立即保存；
+    /// 从数据库/进程状态恢复时不先写入章首，避免覆盖尚未应用的旧位置。
+    fn set_chapter_at(
+        &mut self,
+        cx: &mut Cx,
+        idx: usize,
+        block: usize,
+        scroll: f64,
+        persist: bool,
+    ) {
         let (id, title, total, chunks) = {
             let mut guard = CURRENT_BOOK.write().unwrap();
             let Some(book) = guard.as_mut() else { return };
@@ -7122,11 +7594,14 @@ impl App {
                 chunks,
             )
         };
+        let restored_block = block.min(chunks.len().saturating_sub(1));
+        let restored_scroll = if scroll.is_finite() { scroll } else { 0.0 };
         self.clear_reader_selection(cx);
         self.close_note_composer(cx);
         self.chapter_idx = idx;
         CURRENT_CHAPTER.store(idx, std::sync::atomic::Ordering::Relaxed);
-        CURRENT_READER_BLOCK.store(0, Ordering::Relaxed);
+        CURRENT_READER_BLOCK.store(restored_block, Ordering::Relaxed);
+        CURRENT_READER_SCROLL_BITS.store(restored_scroll.to_bits(), Ordering::Relaxed);
         replace_paragraphs(chunks);
         self.ui
             .label(cx, ids!(title))
@@ -7137,9 +7612,23 @@ impl App {
         self.ui
             .widget(cx, ids!(chapter_list))
             .portal_list(cx, ids!(list))
-            .set_first_id_and_scroll(0, 0.0);
-        spawn_save_progress(id, idx, total);
+            .set_first_id_and_scroll(restored_block, restored_scroll);
+        if persist {
+            spawn_save_progress(ReaderProgressSnapshot {
+                book_id: id,
+                chapter_count: total,
+                location: ReaderLocation {
+                    chapter: idx,
+                    block: restored_block,
+                    scroll: restored_scroll,
+                },
+            });
+        }
         self.ui.redraw(cx);
+    }
+
+    fn set_chapter(&mut self, cx: &mut Cx, idx: usize) {
+        self.set_chapter_at(cx, idx, 0, 0.0, true);
     }
 
     /// Re-project the process-lifetime reader state into a freshly-created
@@ -7151,14 +7640,8 @@ impl App {
         }
         let chapter = CURRENT_CHAPTER.load(Ordering::Relaxed);
         let first_block = CURRENT_READER_BLOCK.load(Ordering::Relaxed);
-        self.set_chapter(cx, chapter);
-        let max_block = PARAGRAPHS.read().unwrap().len().saturating_sub(1);
-        let restored_block = first_block.min(max_block);
-        self.ui
-            .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list))
-            .set_first_id_and_scroll(restored_block, 0.0);
-        CURRENT_READER_BLOCK.store(restored_block, Ordering::Relaxed);
+        let first_scroll = f64::from_bits(CURRENT_READER_SCROLL_BITS.load(Ordering::Relaxed));
+        self.set_chapter_at(cx, chapter, first_block, first_scroll, false);
         self.update_progress_label(cx);
     }
 
@@ -7174,6 +7657,7 @@ impl App {
             .widget(cx, ids!(chapter_list))
             .portal_list(cx, ids!(list));
         CURRENT_READER_BLOCK.store(list.first_id(), Ordering::Relaxed);
+        CURRENT_READER_SCROLL_BITS.store(list.scroll_position().to_bits(), Ordering::Relaxed);
         let blocks = PARAGRAPHS.read().unwrap().len().max(1);
         let read_to = (list.first_id() + list.visible_items()).min(blocks);
         let pct = read_to * 100 / blocks;
@@ -7212,6 +7696,7 @@ impl App {
             self.ui.redraw(cx);
         }
         self.update_progress_label(cx);
+        self.debounce_reader_progress_save(cx);
     }
 
     /// 阅读页快捷键：空格/PgDn/→ 下一屏，PgUp/← 上一屏，Shift+←/→ 跨章，Home 回章首。
@@ -7245,6 +7730,7 @@ impl App {
                     .set_first_id_and_scroll(0, 0.0);
                 self.ui.redraw(cx);
                 self.update_progress_label(cx);
+                self.debounce_reader_progress_save(cx);
             }
             _ => {}
         }
@@ -7362,6 +7848,7 @@ impl App {
         let scene_changed = *READER_THEME.read().unwrap() != settings.theme
             || *READER_BACKGROUND.read().unwrap() != settings.background;
         *APP_LANGUAGE.write().unwrap() = settings.language;
+        *LIBRARY_VIEW_MODE.write().unwrap() = settings.library_view_mode;
         *READER_THEME.write().unwrap() = settings.theme;
         *READER_BACKGROUND.write().unwrap() = settings.background;
         *READER_FONT.write().unwrap() = settings.font;
@@ -7392,6 +7879,7 @@ impl App {
             Animate::No,
         );
         self.sync_theme_controls(cx, settings.theme);
+        self.sync_library_view_controls(cx, settings.library_view_mode);
         self.sync_reader_background_controls(cx, settings.background);
         self.apply_reader_background(cx, settings.background);
         self.sync_app_language_controls(cx, settings.language);
@@ -7402,6 +7890,7 @@ impl App {
         self.refresh_swatches(cx);
 
         self.refresh_current_chapter(cx);
+        self.ui.widget(cx, ids!(book_shelf)).redraw(cx);
         if scene_changed {
             self.apply_runtime_theme(cx, settings.theme);
         }
@@ -7637,6 +8126,10 @@ impl MatchEvent for App {
     }
 
     fn handle_timer(&mut self, cx: &mut Cx, event: &TimerEvent) {
+        if self.reading_progress_save_timer.is_timer(event).is_some() {
+            self.reading_progress_save_timer = Timer::default();
+            self.queue_reader_progress_save(cx);
+        }
         if self.reading_checkpoint_timer.is_timer(event).is_some() {
             if let Some(id) = self.reading_session_id.clone() {
                 spawn_checkpoint_reading_session(id);
@@ -7683,7 +8176,8 @@ impl MatchEvent for App {
         }
     }
 
-    fn handle_shutdown(&mut self, _cx: &mut Cx) {
+    fn handle_shutdown(&mut self, cx: &mut Cx) {
+        self.flush_reader_progress(cx);
         if let Some(id) = self.reading_session_id.take() {
             if let Some(db) = DB.get() {
                 let _ = db.finish_reading_session(&id);
@@ -7699,6 +8193,17 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let chapter_list = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list));
+        if self.on_reader_page
+            && CURRENT_BOOK.read().unwrap().is_some()
+            && chapter_list.scrolled(actions)
+        {
+            self.update_progress_label(cx);
+            self.debounce_reader_progress_save(cx);
+        }
         for action in actions {
             #[cfg(target_os = "ios")]
             if let Some(import_action) =
@@ -8348,7 +8853,7 @@ impl MatchEvent for App {
             if let Some(reader) = action.downcast_ref::<ReaderAction>() {
                 match reader {
                     ReaderAction::Opened {
-                        resume_chapter,
+                        resume,
                         gloss_count,
                         parse_ms,
                         initial_gloss_ms,
@@ -8358,7 +8863,8 @@ impl MatchEvent for App {
                             parse_ms,
                             initial_gloss_ms
                         );
-                        self.set_chapter(cx, *resume_chapter);
+                        self.set_chapter_at(cx, resume.chapter, resume.block, resume.scroll, false);
+                        self.update_progress_label(cx);
                         if *GLOSS_ENABLED.read().unwrap() && *gloss_count == 0 {
                             self.ui.label(cx, ids!(status)).set_text(
                                 cx,
@@ -8591,35 +9097,62 @@ impl MatchEvent for App {
             self.ui.modal(cx, ids!(reader_image_modal)).close(cx);
         }
 
+        if let Some(index) = self
+            .ui
+            .radio_button_set(cx, ids_array!(library_view_list, library_view_grid))
+            .selected(cx, actions)
+        {
+            self.set_library_view_mode(
+                cx,
+                if index == 0 {
+                    LibraryViewMode::List
+                } else {
+                    LibraryViewMode::Grid
+                },
+            );
+        }
+
+        let shelf_view_mode = *LIBRARY_VIEW_MODE.read().unwrap();
+        let grid_columns = self
+            .ui
+            .widget(cx, ids!(book_shelf))
+            .borrow::<BookShelf>()
+            .map(|shelf| shelf.grid_columns())
+            .unwrap_or_else(|| shelf_grid_columns_for_width(cx.display_context.screen_size.x));
         let shelf_list = self
             .ui
             .widget(cx, ids!(book_shelf))
             .portal_list(cx, ids!(list));
         for (item_id, item) in shelf_list.items_with_actions(actions) {
-            let book = SHELF_VISIBLE
-                .read()
-                .unwrap()
-                .entry_for_item_id(item_id)
-                .cloned();
-            let Some(book) = book else { continue };
-            if item.button(cx, ids!(del_btn)).clicked(actions) {
-                self.open_delete_book_confirmation(cx, &book);
-            }
-            if item.button(cx, ids!(tag_btn)).clicked(actions) {
-                self.open_library_tag_editor(cx, &book);
-            }
-            if item.button(cx, ids!(read_btn)).clicked(actions) {
-                self.replace_notes(cx, Vec::new());
-                self.ui.label(cx, ids!(title)).set_text(
-                    cx,
-                    &if app_language() == AppLanguage::English {
-                        format!("Loading “{}”…", book.title)
-                    } else {
-                        format!("《{}》加载中…", book.title)
-                    },
-                );
-                self.activate_page(cx, AppPage::Reader);
-                spawn_open_book(book);
+            if shelf_view_mode == LibraryViewMode::Grid {
+                for (column, cell_id) in [
+                    id!(grid_cell_0),
+                    id!(grid_cell_1),
+                    id!(grid_cell_2),
+                    id!(grid_cell_3),
+                ]
+                .into_iter()
+                .enumerate()
+                .take(grid_columns)
+                {
+                    let book = {
+                        let shelf = SHELF_VISIBLE.read().unwrap();
+                        shelf_grid_book_index(item_id, column, grid_columns, shelf.entries.len())
+                            .and_then(|book_index| shelf.entry_for_item_id(book_index).cloned())
+                    };
+                    let Some(book) = book else { continue };
+                    let card = item.widget(cx, &[cell_id, id!(grid_card)]);
+                    self.handle_library_book_card_actions(cx, actions, &card, &book);
+                }
+            } else {
+                let book = SHELF_VISIBLE
+                    .read()
+                    .unwrap()
+                    .entry_for_item_id(item_id)
+                    .cloned();
+                if let Some(book) = book {
+                    self.handle_library_book_card_actions(cx, actions, &item, &book);
+                }
             }
         }
         if self.ui.button(cx, ids!(import_epub_btn)).clicked(actions) {
@@ -9723,12 +10256,6 @@ impl AppMain for App {
             }
             Event::VirtualKeyboard(event) => self.handle_virtual_keyboard(cx, event),
             Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
-            // 滚轮/触控板滚动后刷新章内百分比
-            Event::Scroll(_) => {
-                if self.on_reader_page && CURRENT_BOOK.read().unwrap().is_some() {
-                    self.update_progress_label(cx);
-                }
-            }
             // 拖入悬停：声明接受拷贝，否则系统不触发 Drop。
             Event::Drag(de) => {
                 if de.items.iter().any(is_epub_item) {

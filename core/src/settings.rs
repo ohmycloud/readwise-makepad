@@ -22,6 +22,29 @@ impl AppLanguage {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LibraryViewMode {
+    #[default]
+    List,
+    Grid,
+}
+
+impl LibraryViewMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Grid => "grid",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "grid" => Self::Grid,
+            _ => Self::List,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderTheme {
     #[default]
     Dark,
@@ -144,6 +167,7 @@ impl ReaderSpacing {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReaderSettings {
     pub language: AppLanguage,
+    pub library_view_mode: LibraryViewMode,
     pub theme: ReaderTheme,
     pub background: ReaderBackground,
     pub font: ReaderFont,
@@ -163,6 +187,7 @@ impl Default for ReaderSettings {
     fn default() -> Self {
         Self {
             language: AppLanguage::Chinese,
+            library_view_mode: LibraryViewMode::List,
             theme: ReaderTheme::Dark,
             background: ReaderBackground::Paper,
             font: ReaderFont::Standard,
@@ -255,6 +280,14 @@ mod tests {
         assert_eq!(AppLanguage::English.as_str(), "en");
         assert_eq!(AppLanguage::from_str("en-US"), AppLanguage::English);
         assert_eq!(AppLanguage::from_str("unknown"), AppLanguage::Chinese);
+    }
+
+    #[test]
+    fn library_view_mode_uses_stable_storage_values() {
+        assert_eq!(LibraryViewMode::List.as_str(), "list");
+        assert_eq!(LibraryViewMode::Grid.as_str(), "grid");
+        assert_eq!(LibraryViewMode::from_str("grid"), LibraryViewMode::Grid);
+        assert_eq!(LibraryViewMode::from_str("unknown"), LibraryViewMode::List);
     }
 
     #[test]

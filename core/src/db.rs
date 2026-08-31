@@ -345,6 +345,10 @@ impl Db {
                     "reader.language" => {
                         settings.language = crate::settings::AppLanguage::from_str(&value)
                     }
+                    "reader.library_view_mode" => {
+                        settings.library_view_mode =
+                            crate::settings::LibraryViewMode::from_str(&value)
+                    }
                     "reader.theme" => {
                         settings.theme = crate::settings::ReaderTheme::from_str(&value)
                     }
@@ -400,6 +404,7 @@ impl Db {
             let settings = settings.clone().normalized();
             let now = chrono::Utc::now().timestamp_millis();
             let language = settings.language.as_str();
+            let library_view_mode = settings.library_view_mode.as_str();
             let theme = settings.theme.as_str();
             let background = settings.background.as_str();
             let font = settings.font.as_str();
@@ -415,6 +420,7 @@ impl Db {
             let highlight_color_slot = settings.highlight_color_slot.to_string();
             let values = [
                 ("reader.language", language),
+                ("reader.library_view_mode", library_view_mode),
                 ("reader.theme", theme),
                 ("reader.background", background),
                 ("reader.font", font),

@@ -12,6 +12,8 @@ pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
         "statistics" => choose(english, "统计", "Statistics"),
         "settings" => choose(english, "设置", "Settings"),
         "import_epub" => choose(english, "导入 EPUB", "Import EPUB"),
+        "list_view" => choose(english, "列表", "List"),
+        "grid_view" => choose(english, "网格", "Grid"),
         "library_hint" => choose(
             english,
             "把 EPUB 拖进窗口，或放入导入目录后重启。",
@@ -317,6 +319,8 @@ mod tests {
             "vocabulary",
             "statistics",
             "settings",
+            "list_view",
+            "grid_view",
             "language",
             "gloss_enabled",
             "delete_book_title",
