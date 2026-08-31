@@ -1926,6 +1926,10 @@ fn library_action_menu_geometry(viewport: Rect, anchor: Rect, menu_height: f64) 
     (dvec2(x, y), width)
 }
 
+fn library_card_release_opens_reader(menu_was_open: bool, release_is_over: bool) -> bool {
+    !menu_was_open && release_is_over
+}
+
 /// 笔记后台操作结果。
 #[derive(Debug)]
 enum NoteAction {
@@ -2457,6 +2461,13 @@ mod selection_popup_tests {
         let (position, width) = library_action_menu_geometry(viewport, anchor, 238.0);
         assert_eq!(width, 204.0);
         assert_eq!(position, dvec2(28.0, 136.0));
+    }
+
+    #[test]
+    fn an_open_library_menu_blocks_card_release_from_opening_the_reader() {
+        assert!(!library_card_release_opens_reader(true, true));
+        assert!(!library_card_release_opens_reader(false, false));
+        assert!(library_card_release_opens_reader(false, true));
     }
 }
 
@@ -3029,7 +3040,9 @@ script_mod! {
     mod.widgets.BookShelfCard = RoundedView{
         width: Fill height: Fit
         new_batch: true
-        capture_overload: true
+        // Child buttons and top-level overlays must win hit testing. Enabling
+        // overload here makes the card deliberately click through both.
+        capture_overload: false
         cursor: MouseCursor.Hand
         flow: Right spacing: 14 padding: 12
         align: Align{ y: 0.5 }
@@ -3084,7 +3097,7 @@ script_mod! {
     mod.widgets.BookShelfGridCard = RoundedView{
         width: Fill height: 226
         new_batch: true
-        capture_overload: true
+        capture_overload: false
         cursor: MouseCursor.Hand
         flow: Down spacing: 5 padding: 10
         align: Align{ x: 0.5 }
@@ -3736,7 +3749,11 @@ script_mod! {
                                     flow: Overlay
                                     library_action_dismiss := View{
                                         width: Fill height: Fill
-                                        capture_overload: true
+                                        // View only emits pointer actions when it has a
+                                        // cursor or animator. It stays behind the menu,
+                                        // so only genuine outside clicks reach it.
+                                        cursor: MouseCursor.Default
+                                        capture_overload: false
                                     }
                                     library_action_menu := RoundedShadowView{
                                         width: 238 height: Fit
@@ -6544,15 +6561,18 @@ impl App {
         actions: &Actions,
         card: &WidgetRef,
         book: &ShelfItem,
+        library_menu_was_open: bool,
     ) {
         let more_button = card.button(cx, ids!(more_btn));
         if more_button.clicked(actions) {
-            self.open_library_action_menu(cx, book, more_button.area().clipped_rect(cx));
+            if !library_menu_was_open {
+                self.open_library_action_menu(cx, book, more_button.area().clipped_rect(cx));
+            }
             return;
         }
         if let Some(action) = actions.find_widget_action(card.widget_uid()) {
             if let ViewAction::FingerUp(event) = action.cast() {
-                if event.is_over {
+                if library_card_release_opens_reader(library_menu_was_open, event.is_over) {
                     self.open_book_for_reading(cx, book.clone());
                 }
             }
@@ -9225,6 +9245,10 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        // A menu action can close the overlay before this action batch reaches
+        // the shelf-card loop. Preserve the state from the start of the batch
+        // so that the same pointer release can never open a book underneath.
+        let library_action_menu_was_open = self.library_action_book_id.is_some();
         let chapter_list = self
             .ui
             .widget(cx, ids!(chapter_list))
@@ -10430,7 +10454,13 @@ impl MatchEvent for App {
                     };
                     let Some(book) = book else { continue };
                     let card = item.widget(cx, &[cell_id, id!(grid_card)]);
-                    self.handle_library_book_card_actions(cx, actions, &card, &book);
+                    self.handle_library_book_card_actions(
+                        cx,
+                        actions,
+                        &card,
+                        &book,
+                        library_action_menu_was_open,
+                    );
                 }
             } else {
                 let book = SHELF_VISIBLE
@@ -10439,7 +10469,13 @@ impl MatchEvent for App {
                     .entry_for_item_id(item_id)
                     .cloned();
                 if let Some(book) = book {
-                    self.handle_library_book_card_actions(cx, actions, &item, &book);
+                    self.handle_library_book_card_actions(
+                        cx,
+                        actions,
+                        &item,
+                        &book,
+                        library_action_menu_was_open,
+                    );
                 }
             }
         }
@@ -11388,6 +11424,12 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self.library_action_book_id.is_some()
+            && (matches!(event, Event::KeyDown(key) if key.key_code == KeyCode::Escape)
+                || event.back_pressed())
+        {
+            self.close_library_action_menu(cx);
+        }
         let reader_swipe = self.track_reader_swipe(cx, event);
         if let Event::MouseDown(e) = event {
             let popup_captures_pointer = SEL_RANGE.read().unwrap().is_some()
