@@ -214,6 +214,19 @@ impl Db {
         self.rt.block_on(books::set_book_tags(&self.pool, id, tags))
     }
 
+    pub fn rename_book(&self, id: &str, title: &str) -> Result<String, String> {
+        self.rt.block_on(books::rename_book(&self.pool, id, title))
+    }
+
+    pub fn set_book_want_to_read(&self, id: &str, want_to_read: bool) -> Result<(), String> {
+        self.rt
+            .block_on(books::set_book_want_to_read(&self.pool, id, want_to_read))
+    }
+
+    pub fn mark_book_completed(&self, id: &str) -> Result<(), String> {
+        self.rt.block_on(books::mark_book_completed(&self.pool, id))
+    }
+
     pub fn update_progress(
         &self,
         id: &str,

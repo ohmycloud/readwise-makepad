@@ -110,7 +110,8 @@ pub async fn get_shelf_items(
         r#"SELECT b.id, b.title, b.author, b.file_path, b.cover_path, b.tags, b.created_at,
                   COALESCE(s.status, 'unread') AS status,
                   COALESCE(s.progress_current, 0) AS progress_current,
-                  COALESCE(s.progress_total, 0) AS progress_total
+                  COALESCE(s.progress_total, 0) AS progress_total,
+                  s.metadata AS status_metadata
            FROM books b LEFT JOIN book_status s ON b.id = s.book_id
            ORDER BY b.created_at DESC"#,
     )
@@ -130,6 +131,11 @@ pub async fn get_shelf_items(
                 .get::<Option<String>, _>("tags")
                 .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
                 .unwrap_or_default();
+            let want_to_read = row
+                .get::<Option<String>, _>("status_metadata")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                .and_then(|value| value.get("want_to_read").and_then(|value| value.as_bool()))
+                .unwrap_or(false);
             BookShelfItem {
                 id: row.get("id"),
                 title: row.get("title"),
@@ -139,6 +145,7 @@ pub async fn get_shelf_items(
                 status: row.get("status"),
                 progress_current: row.get("progress_current"),
                 progress_total: row.get("progress_total"),
+                want_to_read,
                 tags,
                 created_at: row.get("created_at"),
             }
@@ -224,6 +231,98 @@ pub async fn set_book_tags(
         .await
         .map_err(|e| format!("提交标签事务失败: {e}"))?;
     Ok(tags)
+}
+
+pub fn normalize_book_title(title: &str) -> Result<String, String> {
+    const MAX_TITLE_CHARS: usize = 300;
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("书名不能为空".to_string());
+    }
+    if title.chars().any(char::is_control) {
+        return Err("书名不能包含控制字符".to_string());
+    }
+    if title.chars().count() > MAX_TITLE_CHARS {
+        return Err(format!("书名不能超过 {MAX_TITLE_CHARS} 个字符"));
+    }
+    Ok(title.to_string())
+}
+
+/// 只修改应用中的展示书名，不改写用户原始 EPUB 文件。
+pub async fn rename_book(pool: &SqlitePool, book_id: &str, title: &str) -> Result<String, String> {
+    let title = normalize_book_title(title)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let result = sqlx::query("UPDATE books SET title = ?, updated_at = ? WHERE id = ?")
+        .bind(&title)
+        .bind(now)
+        .bind(book_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("重命名书籍失败: {error}"))?;
+    if result.rows_affected() == 0 {
+        return Err("书籍不存在".to_string());
+    }
+    Ok(title)
+}
+
+/// “欲读清单”独立于 unread/reading/completed，存入 status.metadata，
+/// 这样加入清单不会破坏真实阅读进度。
+pub async fn set_book_want_to_read(
+    pool: &SqlitePool,
+    book_id: &str,
+    want_to_read: bool,
+) -> Result<(), String> {
+    let metadata = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT metadata FROM book_status WHERE book_id = ?",
+    )
+    .bind(book_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("读取书籍清单状态失败: {error}"))?
+    .ok_or_else(|| "书籍不存在".to_string())?;
+    let mut object = metadata
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    object.insert(
+        "want_to_read".to_string(),
+        serde_json::Value::Bool(want_to_read),
+    );
+    let metadata =
+        serde_json::to_string(&object).map_err(|error| format!("编码书籍清单状态失败: {error}"))?;
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query("UPDATE book_status SET metadata = ?, updated_at = ? WHERE book_id = ?")
+        .bind(metadata)
+        .bind(now)
+        .bind(book_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("保存书籍清单状态失败: {error}"))?;
+    Ok(())
+}
+
+pub async fn mark_book_completed(pool: &SqlitePool, book_id: &str) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let result = sqlx::query(
+        "UPDATE book_status
+         SET status = 'completed',
+             progress_current = CASE
+                 WHEN progress_total > 0 THEN progress_total
+                 ELSE progress_current
+             END,
+             completed_at = ?, updated_at = ?
+         WHERE book_id = ?",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(book_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("标记书籍已读完失败: {error}"))?;
+    if result.rows_affected() == 0 {
+        return Err("书籍不存在".to_string());
+    }
+    Ok(())
 }
 
 /// 删除书籍：先删磁盘目录，再删 DB（外键级联清 status 等）。
@@ -519,5 +618,113 @@ mod highlight_tests {
                 .id,
             other_book
         );
+    }
+}
+
+#[cfg(test)]
+mod library_mutation_tests {
+    use super::*;
+
+    fn pool() -> (tokio::runtime::Runtime, SqlitePool) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pool = runtime
+            .block_on(SqlitePool::connect("sqlite::memory:"))
+            .unwrap();
+        runtime
+            .block_on(
+                sqlx::query(
+                    "CREATE TABLE books (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        title TEXT NOT NULL,
+                        author TEXT,
+                        file_path TEXT NOT NULL,
+                        cover_path TEXT,
+                        tags TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE book_status (
+                        book_id TEXT PRIMARY KEY NOT NULL,
+                        status TEXT NOT NULL,
+                        progress_current INTEGER DEFAULT 0,
+                        progress_total INTEGER DEFAULT 0,
+                        location TEXT,
+                        last_read_at INTEGER,
+                        started_at INTEGER,
+                        completed_at INTEGER,
+                        metadata TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );",
+                )
+                .execute(&pool),
+            )
+            .unwrap();
+        runtime
+            .block_on(
+                sqlx::query(
+                    "INSERT INTO books
+                     (id, title, author, file_path, cover_path, tags, created_at, updated_at)
+                     VALUES ('book-1', 'Old title', 'Author', 'book.epub', NULL, NULL, 1, 1);
+                     INSERT INTO book_status
+                     (book_id, status, progress_current, progress_total, location, metadata, created_at, updated_at)
+                     VALUES ('book-1', 'reading', 3, 10, '', '{\"preserved\":true}', 1, 1);",
+                )
+                .execute(&pool),
+            )
+            .unwrap();
+        (runtime, pool)
+    }
+
+    #[test]
+    fn rename_want_to_read_and_finish_preserve_independent_book_state() {
+        let (runtime, pool) = pool();
+        let title = runtime
+            .block_on(rename_book(&pool, "book-1", "  A much shorter title  "))
+            .unwrap();
+        assert_eq!(title, "A much shorter title");
+
+        runtime
+            .block_on(set_book_want_to_read(&pool, "book-1", true))
+            .unwrap();
+        let shelf = runtime
+            .block_on(get_shelf_items(&pool, Path::new("/data")))
+            .unwrap();
+        assert_eq!(shelf[0].title, title);
+        assert!(shelf[0].want_to_read);
+        let metadata: String = runtime
+            .block_on(
+                sqlx::query_scalar("SELECT metadata FROM book_status WHERE book_id = 'book-1'")
+                    .fetch_one(&pool),
+            )
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(metadata["preserved"], true);
+
+        runtime
+            .block_on(mark_book_completed(&pool, "book-1"))
+            .unwrap();
+        let row = runtime
+            .block_on(
+                sqlx::query(
+                    "SELECT status, progress_current, progress_total, completed_at
+                 FROM book_status WHERE book_id = 'book-1'",
+                )
+                .fetch_one(&pool),
+            )
+            .unwrap();
+        assert_eq!(row.get::<String, _>("status"), "completed");
+        assert_eq!(row.get::<i64, _>("progress_current"), 10);
+        assert_eq!(row.get::<i64, _>("progress_total"), 10);
+        assert!(row.get::<Option<i64>, _>("completed_at").is_some());
+    }
+
+    #[test]
+    fn rename_rejects_blank_and_control_characters() {
+        assert!(normalize_book_title("   ").is_err());
+        assert!(normalize_book_title("bad\ntitle").is_err());
     }
 }

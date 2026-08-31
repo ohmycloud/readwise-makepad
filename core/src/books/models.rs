@@ -80,6 +80,8 @@ pub struct BookShelfItem {
     pub status: String,
     pub progress_current: i64,
     pub progress_total: i64,
+    /// 独立于阅读进度状态的“欲读清单”标记，保存在 book_status.metadata。
+    pub want_to_read: bool,
     /// 用户为书籍设置的标签名称，顺序与编辑时一致。
     pub tags: Vec<String>,
     pub created_at: i64,

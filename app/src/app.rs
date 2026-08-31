@@ -1228,16 +1228,22 @@ struct ShelfItem {
     status: String,
     progress_current: i64,
     progress_total: i64,
+    want_to_read: bool,
     tags: Vec<String>,
     cover_path: Option<String>,
     file_path: String,
 }
+
+const WANT_TO_READ_FILTER: &str = "\0readwise:want-to-read";
 
 fn shelf_items_for_tag(items: &[ShelfItem], selected: Option<&str>) -> Vec<ShelfItem> {
     items
         .iter()
         .filter(|book| {
             selected.is_none_or(|selected| {
+                if selected == WANT_TO_READ_FILTER {
+                    return book.want_to_read;
+                }
                 book.tags
                     .iter()
                     .any(|tag| tag.eq_ignore_ascii_case(selected))
@@ -1259,6 +1265,7 @@ mod shelf_filter_tests {
             status: "unread".to_string(),
             progress_current: 0,
             progress_total: 0,
+            want_to_read: false,
             tags: tags.iter().map(|tag| tag.to_string()).collect(),
             cover_path: None,
             file_path: String::new(),
@@ -1267,10 +1274,16 @@ mod shelf_filter_tests {
 
     #[test]
     fn shelf_tag_filter_is_case_insensitive_and_allows_empty_results() {
-        let items = vec![book("a", &["Fiction"]), book("b", &["Reference"])];
+        let mut wanted = book("b", &["Reference"]);
+        wanted.want_to_read = true;
+        let items = vec![book("a", &["Fiction"]), wanted];
         assert_eq!(shelf_items_for_tag(&items, None).len(), 2);
         assert_eq!(shelf_items_for_tag(&items, Some("fiction"))[0].id, "a");
         assert!(shelf_items_for_tag(&items, Some("missing")).is_empty());
+        assert_eq!(
+            shelf_items_for_tag(&items, Some(WANT_TO_READ_FILTER))[0].id,
+            "b"
+        );
     }
 
     #[test]
@@ -1866,6 +1879,8 @@ const SELECTION_POPUP_MAX_WIDTH: f64 = 520.0;
 const SELECTION_POPUP_SIDE_INSET: f64 = 12.0;
 const SELECTION_POPUP_GAP: f64 = 10.0;
 const SELECTION_POPUP_ESTIMATED_HEIGHT: f64 = 56.0;
+const LIBRARY_ACTION_MENU_MAX_WIDTH: f64 = 238.0;
+const LIBRARY_ACTION_MENU_ESTIMATED_HEIGHT: f64 = 238.0;
 
 fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) -> (DVec2, f64) {
     let horizontal_inset = SELECTION_POPUP_SIDE_INSET.min(viewport.size.x.max(0.0) * 0.25);
@@ -1889,6 +1904,26 @@ fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) ->
         above.clamp(min_y, max_y)
     };
     (dvec2(x, y), popup_width)
+}
+
+fn library_action_menu_geometry(viewport: Rect, anchor: Rect, menu_height: f64) -> (DVec2, f64) {
+    let inset = 8.0_f64.min(viewport.size.x.max(0.0) * 0.2);
+    let width = LIBRARY_ACTION_MENU_MAX_WIDTH.min((viewport.size.x - inset * 2.0).max(1.0));
+    let min_x = viewport.pos.x + inset;
+    let max_x = (viewport.pos.x + viewport.size.x - inset - width).max(min_x);
+    let x = (anchor.pos.x + anchor.size.x - width).clamp(min_x, max_x);
+    let min_y = viewport.pos.y + inset;
+    let max_y = (viewport.pos.y + viewport.size.y - inset - menu_height).max(min_y);
+    let below = anchor.pos.y + anchor.size.y + 6.0;
+    let above = anchor.pos.y - menu_height - 6.0;
+    let y = if below <= max_y {
+        below
+    } else if above >= min_y {
+        above
+    } else {
+        below.clamp(min_y, max_y)
+    };
+    (dvec2(x, y), width)
 }
 
 /// 笔记后台操作结果。
@@ -2393,6 +2428,36 @@ mod selection_popup_tests {
         let (position, _) = selection_popup_geometry(viewport, dvec2(130.0, 50.0), 90.0);
         assert_eq!(position.y, 12.0);
     }
+
+    #[test]
+    fn library_menu_aligns_to_more_button_and_flips_above_near_bottom() {
+        let viewport = Rect {
+            pos: dvec2(100.0, 80.0),
+            size: dvec2(700.0, 560.0),
+        };
+        let anchor = Rect {
+            pos: dvec2(720.0, 590.0),
+            size: dvec2(36.0, 30.0),
+        };
+        let (position, width) = library_action_menu_geometry(viewport, anchor, 238.0);
+        assert_eq!(width, 238.0);
+        assert_eq!(position, dvec2(518.0, 346.0));
+    }
+
+    #[test]
+    fn library_menu_shrinks_and_stays_inside_narrow_viewport() {
+        let viewport = Rect {
+            pos: dvec2(20.0, 40.0),
+            size: dvec2(220.0, 500.0),
+        };
+        let anchor = Rect {
+            pos: dvec2(190.0, 100.0),
+            size: dvec2(34.0, 30.0),
+        };
+        let (position, width) = library_action_menu_geometry(viewport, anchor, 238.0);
+        assert_eq!(width, 204.0);
+        assert_eq!(position, dvec2(28.0, 136.0));
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2468,11 +2533,27 @@ enum ShelfAction {
     TagsSaved {
         items: usize,
     },
+    Renamed {
+        items: usize,
+        book_id: String,
+        title: String,
+    },
+    WantToReadChanged {
+        items: usize,
+        book_id: String,
+        enabled: bool,
+    },
+    MarkedCompleted {
+        items: usize,
+        book_id: String,
+        title: String,
+    },
     Deleted {
         items: usize,
         title: String,
     },
     TagError(String),
+    UpdateError(String),
     DeleteError(String),
     Error(String),
 }
@@ -2489,6 +2570,7 @@ fn refresh_shelf(db: &readwise_core::Db) -> Result<usize, String> {
             status: b.status.clone(),
             progress_current: b.progress_current,
             progress_total: b.progress_total,
+            want_to_read: b.want_to_read,
             tags: b.tags.clone(),
             cover_path: b.cover_abs_path.clone(),
             file_path: b.file_abs_path.clone(),
@@ -2509,6 +2591,72 @@ fn spawn_set_book_tags(book_id: String, tags: Vec<String>) {
         match refresh_shelf(db) {
             Ok(items) => Cx::post_action(ShelfAction::TagsSaved { items }),
             Err(error) => Cx::post_action(ShelfAction::TagError(error)),
+        }
+    });
+}
+
+fn spawn_rename_book(book_id: String, title: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else {
+            Cx::post_action(ShelfAction::UpdateError("数据库尚未就绪".to_string()));
+            return;
+        };
+        let title = match db.rename_book(&book_id, &title) {
+            Ok(title) => title,
+            Err(error) => {
+                Cx::post_action(ShelfAction::UpdateError(error));
+                return;
+            }
+        };
+        match refresh_shelf(db) {
+            Ok(items) => Cx::post_action(ShelfAction::Renamed {
+                items,
+                book_id,
+                title,
+            }),
+            Err(error) => Cx::post_action(ShelfAction::UpdateError(error)),
+        }
+    });
+}
+
+fn spawn_set_book_want_to_read(book_id: String, enabled: bool) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else {
+            Cx::post_action(ShelfAction::UpdateError("数据库尚未就绪".to_string()));
+            return;
+        };
+        if let Err(error) = db.set_book_want_to_read(&book_id, enabled) {
+            Cx::post_action(ShelfAction::UpdateError(error));
+            return;
+        }
+        match refresh_shelf(db) {
+            Ok(items) => Cx::post_action(ShelfAction::WantToReadChanged {
+                items,
+                book_id,
+                enabled,
+            }),
+            Err(error) => Cx::post_action(ShelfAction::UpdateError(error)),
+        }
+    });
+}
+
+fn spawn_mark_book_completed(book_id: String, title: String) {
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else {
+            Cx::post_action(ShelfAction::UpdateError("数据库尚未就绪".to_string()));
+            return;
+        };
+        if let Err(error) = db.mark_book_completed(&book_id) {
+            Cx::post_action(ShelfAction::UpdateError(error));
+            return;
+        }
+        match refresh_shelf(db) {
+            Ok(items) => Cx::post_action(ShelfAction::MarkedCompleted {
+                items,
+                book_id,
+                title,
+            }),
+            Err(error) => Cx::post_action(ShelfAction::UpdateError(error)),
         }
     });
 }
@@ -2879,11 +3027,10 @@ script_mod! {
     use mod.widgets.*
 
     mod.widgets.BookShelfCard = RoundedView{
-        // PortalList 会记录每个项目 draw 后的实际高度。卡片不能写死为
-        // 94px：书名、作者、进度和标签四行加 padding 后可能更高，溢出的
-        // 进度文字会被下一张不透明卡片盖住。
         width: Fill height: Fit
         new_batch: true
+        capture_overload: true
+        cursor: MouseCursor.Hand
         flow: Right spacing: 14 padding: 12
         align: Align{ y: 0.5 }
         draw_bg.color: theme.color_bg_container
@@ -2911,6 +3058,8 @@ script_mod! {
             flow: Down spacing: 4
             card_title := Label{
                 width: Fill
+                max_lines: 2
+                text_overflow: Ellipsis
                 text: ""
                 draw_text.text_style.font_size: 14
             }
@@ -2925,21 +3074,18 @@ script_mod! {
                 draw_text.color: theme.color_highlight
                 draw_text.text_style.font_size: 9
             }
-            card_tags := Label{
-                width: Fill
-                text: ""
-                draw_text.color: theme.color_label_inner_inactive
-                draw_text.text_style.font_size: 8.5
-            }
         }
-        read_btn := ButtonFlat{ text: "阅读" }
-        tag_btn := ButtonFlatter{ text: "标签" }
-        del_btn := ButtonFlat{ text: "删除" }
+        more_btn := ButtonFlatter{
+            width: 40 height: 36 text: "•••"
+            draw_text.text_style.font_size: 13
+        }
     }
 
     mod.widgets.BookShelfGridCard = RoundedView{
-        width: Fill height: 286
+        width: Fill height: 226
         new_batch: true
+        capture_overload: true
+        cursor: MouseCursor.Hand
         flow: Down spacing: 5 padding: 10
         align: Align{ x: 0.5 }
         draw_bg.color: theme.color_bg_container
@@ -2963,12 +3109,22 @@ script_mod! {
                 fit: ImageFit.Biggest
             }
         }
-        card_title := Label{
+        grid_title_row := View{
             width: Fill
-            max_lines: 2
-            text_overflow: Ellipsis
-            text: ""
-            draw_text.text_style.font_size: 12
+            height: Fit
+            flow: Right spacing: 4
+            align: Align{y: 0.5}
+            card_title := Label{
+                width: Fill
+                max_lines: 2
+                text_overflow: Ellipsis
+                text: ""
+                draw_text.text_style.font_size: 12
+            }
+            more_btn := ButtonFlatter{
+                width: 34 height: 30 text: "•••"
+                draw_text.text_style.font_size: 11
+            }
         }
         card_author := Label{
             width: Fill
@@ -2986,30 +3142,6 @@ script_mod! {
             draw_text.color: theme.color_highlight
             draw_text.text_style.font_size: 9
         }
-        card_tags := Label{
-            width: Fill
-            max_lines: 1
-            text_overflow: Ellipsis
-            text: ""
-            draw_text.color: theme.color_label_inner_inactive
-            draw_text.text_style.font_size: 8.5
-        }
-        grid_actions := View{
-            width: Fill height: 30
-            flow: Right spacing: 3
-            read_btn := ButtonFlat{
-                width: Fill height: 30 text: "阅读"
-                draw_text.text_style.font_size: 8.5
-            }
-            tag_btn := ButtonFlatter{
-                width: Fill height: 30 text: "标签"
-                draw_text.text_style.font_size: 8.5
-            }
-            del_btn := ButtonFlat{
-                width: Fill height: 30 text: "删除"
-                draw_text.text_style.font_size: 8.5
-            }
-        }
     }
 
     mod.widgets.BookShelfBase = #(BookShelf::register_widget(vm))
@@ -3026,19 +3158,19 @@ script_mod! {
                 width: Fill height: Fit
                 flow: Right spacing: 12
                 grid_cell_0 := View{
-                    width: Fill height: 286
+                    width: Fill height: 226
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_1 := View{
-                    width: Fill height: 286
+                    width: Fill height: 226
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_2 := View{
-                    width: Fill height: 286
+                    width: Fill height: 226
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_3 := View{
-                    width: Fill height: 286
+                    width: Fill height: 226
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
             }
@@ -3046,19 +3178,19 @@ script_mod! {
                 width: Fill height: Fit
                 flow: Right spacing: 12
                 grid_cell_0 := View{
-                    width: Fill height: 286
+                    width: Fill height: 226
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_1 := View{
-                    width: Fill height: 286
+                    width: Fill height: 226
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_2 := View{
-                    width: Fill height: 286
+                    width: Fill height: 226
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_3 := View{
-                    width: Fill height: 286
+                    width: Fill height: 226
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
             }
@@ -3598,6 +3730,46 @@ script_mod! {
                                 // Keep the PortalList mounted; it reads the
                                 // centralized shelf projection in draw_walk.
                                 book_shelf := mod.widgets.BookShelf{}
+                                library_action_layer := View{
+                                    visible: false
+                                    width: Fill height: Fill
+                                    flow: Overlay
+                                    library_action_dismiss := View{
+                                        width: Fill height: Fill
+                                        capture_overload: true
+                                    }
+                                    library_action_menu := RoundedShadowView{
+                                        width: 238 height: Fit
+                                        new_batch: true
+                                        flow: Down spacing: 2 padding: 8
+                                        draw_bg.color: theme.color_bg_container
+                                        draw_bg.border_color: theme.color_bg_highlight_inline
+                                        draw_bg.border_radius: 10.0
+                                        draw_bg.shadow_color: #0004
+                                        draw_bg.shadow_radius: 12.0
+                                        draw_bg.shadow_offset: vec2(0, 4)
+                                        library_share_book := ButtonFlatter{
+                                            width: Fill height: 34 text: "分享"
+                                        }
+                                        library_want_to_read := ButtonFlatter{
+                                            width: Fill height: 34 text: "加入欲读清单"
+                                        }
+                                        Hr{}
+                                        library_add_collection := ButtonFlatter{
+                                            width: Fill height: 34 text: "添加到藏书"
+                                        }
+                                        library_mark_finished := ButtonFlatter{
+                                            width: Fill height: 34 text: "标记为已读完"
+                                        }
+                                        library_rename_book := ButtonFlatter{
+                                            width: Fill height: 34 text: "重新命名"
+                                        }
+                                        library_delete_book := ButtonFlatter{
+                                            width: Fill height: 34 text: "删除"
+                                            draw_text.color: theme.color_error
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -4592,6 +4764,40 @@ script_mod! {
                                     align: Align{x: 1.0 y: 0.5}
                                     library_delete_cancel := ButtonFlat{text: "取消"}
                                     library_delete_confirm := Button{text: "确认删除"}
+                                }
+                            }
+                        }
+                    }
+                    library_rename_modal := Modal{
+                        content +: {
+                            width: 400 height: Fit
+                            library_rename_card := RoundedView{
+                                width: Fill height: Fit
+                                new_batch: true
+                                flow: Down spacing: 12 padding: 22
+                                draw_bg.color: theme.color_bg_container
+                                draw_bg.border_radius: 10.0
+                                library_rename_title := Label{
+                                    width: Fill
+                                    text: "重新命名"
+                                    draw_text.text_style.font_size: 15
+                                }
+                                library_rename_input := TextInput{
+                                    width: Fill height: 40
+                                    empty_text: "输入新的书名"
+                                }
+                                library_rename_status := Label{
+                                    width: Fill height: Fit
+                                    text: ""
+                                    draw_text.color: theme.color_highlight
+                                    draw_text.text_style.font_size: 9
+                                }
+                                library_rename_actions := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    library_rename_cancel := ButtonFlat{text: "取消"}
+                                    library_rename_save := Button{text: "保存"}
                                 }
                             }
                         }
@@ -5660,25 +5866,6 @@ impl BookShelf {
                 book.progress_total,
             ),
         );
-        card.label(cx, ids!(card_tags)).set_text(
-            cx,
-            &if book.tags.is_empty() {
-                crate::i18n::text(language, "no_tags").to_string()
-            } else {
-                book.tags
-                    .iter()
-                    .map(|tag| format!("#{tag}"))
-                    .collect::<Vec<_>>()
-                    .join("  ")
-            },
-        );
-        card.widget(cx, ids!(read_btn))
-            .set_text(cx, crate::i18n::text(language, "reader"));
-        card.widget(cx, ids!(tag_btn))
-            .set_text(cx, crate::i18n::text(language, "edit_tags"));
-        card.widget(cx, ids!(del_btn))
-            .set_text(cx, crate::i18n::text(language, "delete"));
-
         let card_uid = card.widget_uid();
         if shelf_cover_needs_load(&self.loaded_covers, card_uid, &book.cover_path) {
             let img = card.image(cx, ids!(cover_img));
@@ -5841,6 +6028,15 @@ pub struct App {
     library_tag_filter: Option<String>,
     #[rust]
     editing_book_tags_id: Option<String>,
+    #[rust]
+    editing_book_title_id: Option<String>,
+    /// 三点菜单由书库公共覆盖层持有，卡片只提供书籍 id 与按钮锚点。
+    #[rust]
+    library_action_book_id: Option<String>,
+    #[rust]
+    library_action_anchor: Option<Rect>,
+    #[rust]
+    pending_library_action_layout: bool,
     /// 待用户确认删除的 (book_id, title)。实际磁盘与数据库操作只在确认后开始。
     #[rust]
     pending_delete_book: Option<(String, String)>,
@@ -5960,6 +6156,9 @@ impl App {
     }
 
     fn activate_page(&mut self, cx: &mut Cx, page: AppPage) {
+        if page != AppPage::Library && self.library_action_book_id.is_some() {
+            self.close_library_action_menu(cx);
+        }
         self.ui
             .page_flip(cx, ids!(pages))
             .set_active_page(cx, page.live_id());
@@ -6027,6 +6226,7 @@ impl App {
     }
 
     fn set_library_view_mode(&mut self, cx: &mut Cx, mode: LibraryViewMode) {
+        self.close_library_action_menu(cx);
         if *LIBRARY_VIEW_MODE.read().unwrap() == mode {
             self.sync_library_view_controls(cx, mode);
             return;
@@ -6050,11 +6250,10 @@ impl App {
 
     fn refresh_shelf_projection(&mut self, cx: &mut Cx) {
         let tags = Self::available_shelf_tags();
-        if self
-            .library_tag_filter
-            .as_ref()
-            .is_some_and(|selected| !tags.iter().any(|tag| tag.eq_ignore_ascii_case(selected)))
-        {
+        if self.library_tag_filter.as_ref().is_some_and(|selected| {
+            selected != WANT_TO_READ_FILTER
+                && !tags.iter().any(|tag| tag.eq_ignore_ascii_case(selected))
+        }) {
             self.library_tag_filter = None;
         }
 
@@ -6064,16 +6263,21 @@ impl App {
         let total = all.len();
         SHELF_VISIBLE.write().unwrap().replace(visible);
 
-        let mut labels = Vec::with_capacity(tags.len() + 1);
+        let mut labels = Vec::with_capacity(tags.len() + 2);
         labels.push(tr("all_tags").to_string());
+        labels.push(tr("want_to_read").to_string());
         labels.extend(tags.iter().cloned());
         let selected_index = self
             .library_tag_filter
             .as_ref()
             .and_then(|selected| {
-                tags.iter()
-                    .position(|tag| tag.eq_ignore_ascii_case(selected))
-                    .map(|index| index + 1)
+                if selected == WANT_TO_READ_FILTER {
+                    Some(1)
+                } else {
+                    tags.iter()
+                        .position(|tag| tag.eq_ignore_ascii_case(selected))
+                        .map(|index| index + 2)
+                }
             })
             .unwrap_or(0);
         let dropdown = self.ui.drop_down(cx, ids!(library_tag_filter));
@@ -6090,9 +6294,13 @@ impl App {
             .set_text(cx, &summary);
 
         let is_filtered_empty = total > 0 && visible_count == 0;
+        let is_want_to_read_filter =
+            self.library_tag_filter.as_deref() == Some(WANT_TO_READ_FILTER);
         self.ui.label(cx, ids!(library_empty_title)).set_text(
             cx,
-            if is_filtered_empty {
+            if is_filtered_empty && is_want_to_read_filter {
+                tr("want_to_read_empty")
+            } else if is_filtered_empty {
                 tr("no_tag_matches")
             } else {
                 tr("library_empty")
@@ -6100,7 +6308,9 @@ impl App {
         );
         self.ui.label(cx, ids!(library_empty_hint)).set_text(
             cx,
-            if is_filtered_empty {
+            if is_filtered_empty && is_want_to_read_filter {
+                tr("want_to_read_empty_hint")
+            } else if is_filtered_empty {
                 tr("no_tag_matches_hint")
             } else if cfg!(any(target_os = "android", target_os = "ios")) {
                 localized(
@@ -6128,15 +6338,141 @@ impl App {
     }
 
     fn set_library_tag_filter(&mut self, cx: &mut Cx, index: usize) {
-        self.library_tag_filter = if index == 0 {
-            None
-        } else {
-            Self::available_shelf_tags().get(index - 1).cloned()
+        self.close_library_action_menu(cx);
+        self.library_tag_filter = match index {
+            0 => None,
+            1 => Some(WANT_TO_READ_FILTER.to_string()),
+            index => Self::available_shelf_tags().get(index - 2).cloned(),
         };
         self.refresh_shelf_projection(cx);
     }
 
+    fn library_action_book(&self) -> Option<ShelfItem> {
+        let book_id = self.library_action_book_id.as_deref()?;
+        SHELF
+            .read()
+            .unwrap()
+            .iter()
+            .find(|book| book.id == book_id)
+            .cloned()
+    }
+
+    fn position_library_action_menu(&self, cx: &mut Cx, use_measured_height: bool) -> bool {
+        let Some(anchor) = self.library_action_anchor else {
+            return false;
+        };
+        let viewport = self
+            .ui
+            .widget(cx, ids!(library_body))
+            .area()
+            .clipped_rect(cx);
+        if viewport.size.x <= 0.0 || viewport.size.y <= 0.0 {
+            return false;
+        }
+        let menu = self.ui.view(cx, ids!(library_action_menu));
+        let measured_height = menu.area().rect(cx).size.y;
+        let menu_height = if use_measured_height && measured_height > 0.0 {
+            measured_height
+        } else {
+            LIBRARY_ACTION_MENU_ESTIMATED_HEIGHT
+        };
+        let (position, width) = library_action_menu_geometry(viewport, anchor, menu_height);
+        let Some(mut inner) = menu.borrow_mut() else {
+            return false;
+        };
+        let old_position = inner.walk.abs_pos;
+        let old_width = match inner.walk.width {
+            Size::Fixed(value) => value,
+            _ => -1.0,
+        };
+        let changed = old_position
+            .map(|old| (old.x - position.x).abs() > 0.5 || (old.y - position.y).abs() > 0.5)
+            .unwrap_or(true)
+            || (old_width - width).abs() > 0.5;
+        inner.walk.abs_pos = Some(position);
+        inner.walk.width = Size::Fixed(width);
+        changed
+    }
+
+    fn open_library_action_menu(&mut self, cx: &mut Cx, book: &ShelfItem, anchor: Rect) {
+        self.library_action_book_id = Some(book.id.clone());
+        self.library_action_anchor = Some(anchor);
+        self.ui.widget(cx, ids!(library_want_to_read)).set_text(
+            cx,
+            tr(if book.want_to_read {
+                "remove_want_to_read"
+            } else {
+                "add_want_to_read"
+            }),
+        );
+        self.ui
+            .widget(cx, ids!(library_action_layer))
+            .set_visible(cx, true);
+        self.position_library_action_menu(cx, false);
+        self.pending_library_action_layout = true;
+        self.ui.widget(cx, ids!(library_action_layer)).redraw(cx);
+    }
+
+    fn close_library_action_menu(&mut self, cx: &mut Cx) {
+        self.library_action_book_id = None;
+        self.library_action_anchor = None;
+        self.pending_library_action_layout = false;
+        self.ui
+            .widget(cx, ids!(library_action_layer))
+            .set_visible(cx, false);
+    }
+
+    fn open_book_for_reading(&mut self, cx: &mut Cx, book: ShelfItem) {
+        self.close_library_action_menu(cx);
+        self.replace_notes(cx, Vec::new());
+        self.ui.label(cx, ids!(title)).set_text(
+            cx,
+            &if app_language() == AppLanguage::English {
+                format!("Loading “{}”…", book.title)
+            } else {
+                format!("《{}》加载中…", book.title)
+            },
+        );
+        self.activate_page(cx, AppPage::Reader);
+        spawn_open_book(book);
+    }
+
+    fn open_library_rename_editor(&mut self, cx: &mut Cx, book: &ShelfItem) {
+        self.close_library_action_menu(cx);
+        self.editing_book_title_id = Some(book.id.clone());
+        self.ui
+            .text_input(cx, ids!(library_rename_input))
+            .set_text(cx, &book.title);
+        self.ui
+            .label(cx, ids!(library_rename_status))
+            .set_text(cx, "");
+        self.ui.modal(cx, ids!(library_rename_modal)).open(cx);
+    }
+
+    fn save_library_rename(&mut self, cx: &mut Cx) {
+        let Some(book_id) = self.editing_book_title_id.clone() else {
+            return;
+        };
+        let title = self.ui.text_input(cx, ids!(library_rename_input)).text();
+        if let Err(error) = readwise_core::books::normalize_book_title(&title) {
+            self.ui.label(cx, ids!(library_rename_status)).set_text(
+                cx,
+                &if app_language() == AppLanguage::English {
+                    "Enter a title between 1 and 300 characters.".to_string()
+                } else {
+                    error
+                },
+            );
+            return;
+        }
+        self.ui
+            .label(cx, ids!(library_rename_status))
+            .set_text(cx, localized("正在保存书名…", "Saving title…"));
+        spawn_rename_book(book_id, title);
+    }
+
     fn open_library_tag_editor(&mut self, cx: &mut Cx, book: &ShelfItem) {
+        self.close_library_action_menu(cx);
         self.editing_book_tags_id = Some(book.id.clone());
         self.ui.label(cx, ids!(library_tag_modal_title)).set_text(
             cx,
@@ -6183,6 +6519,7 @@ impl App {
     }
 
     fn open_delete_book_confirmation(&mut self, cx: &mut Cx, book: &ShelfItem) {
+        self.close_library_action_menu(cx);
         self.pending_delete_book = Some((book.id.clone(), book.title.clone()));
         let message = if app_language() == AppLanguage::English {
             format!(
@@ -6208,24 +6545,17 @@ impl App {
         card: &WidgetRef,
         book: &ShelfItem,
     ) {
-        if card.button(cx, ids!(del_btn)).clicked(actions) {
-            self.open_delete_book_confirmation(cx, book);
+        let more_button = card.button(cx, ids!(more_btn));
+        if more_button.clicked(actions) {
+            self.open_library_action_menu(cx, book, more_button.area().clipped_rect(cx));
+            return;
         }
-        if card.button(cx, ids!(tag_btn)).clicked(actions) {
-            self.open_library_tag_editor(cx, book);
-        }
-        if card.button(cx, ids!(read_btn)).clicked(actions) {
-            self.replace_notes(cx, Vec::new());
-            self.ui.label(cx, ids!(title)).set_text(
-                cx,
-                &if app_language() == AppLanguage::English {
-                    format!("Loading “{}”…", book.title)
-                } else {
-                    format!("《{}》加载中…", book.title)
-                },
-            );
-            self.activate_page(cx, AppPage::Reader);
-            spawn_open_book(book.clone());
+        if let Some(action) = actions.find_widget_action(card.widget_uid()) {
+            if let ViewAction::FingerUp(event) = action.cast() {
+                if event.is_over {
+                    self.open_book_for_reading(cx, book.clone());
+                }
+            }
         }
     }
 
@@ -6336,7 +6666,12 @@ impl App {
                 palette.border,
             );
         }
-        for id in [id!(note_composer), id!(word_card), id!(indicator_bg)] {
+        for id in [
+            id!(note_composer),
+            id!(word_card),
+            id!(indicator_bg),
+            id!(library_rename_card),
+        ] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),
@@ -6344,14 +6679,16 @@ impl App {
                 palette.border,
             );
         }
-        // 选区菜单是临时浮层，不能与正文共用 surface；按钮再回到 surface，
+        // 临时菜单不能与页面共用 surface；按钮再回到 surface，
         // 形成“正文 → field 浮层 → surface 操作”的稳定层级。
-        apply_reader_surface_palette(
-            cx,
-            self.ui.widget(cx, ids!(selection_popup)),
-            palette.field,
-            palette.border,
-        );
+        for id in [id!(selection_popup), id!(library_action_menu)] {
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.field,
+                palette.border,
+            );
+        }
         apply_reader_surface_palette(
             cx,
             self.ui.widget(cx, ids!(image_viewer_card)),
@@ -6368,6 +6705,7 @@ impl App {
             id!(reader_ai_title),
             id!(card_word),
             id!(image_viewer_info),
+            id!(library_rename_title),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
@@ -6380,6 +6718,7 @@ impl App {
             id!(reader_chat_status),
             id!(sel_hint),
             id!(card_hint),
+            id!(library_rename_status),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
         }
@@ -6402,6 +6741,8 @@ impl App {
             id!(add_vocab_btn),
             id!(know_btn),
             id!(image_viewer_close),
+            id!(library_rename_cancel),
+            id!(library_rename_save),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
@@ -6418,10 +6759,37 @@ impl App {
             id!(speak_sel_btn),
             id!(hl_btn),
             id!(sel_close_btn),
+            id!(library_share_book),
+            id!(library_want_to_read),
+            id!(library_add_collection),
+            id!(library_mark_finished),
+            id!(library_rename_book),
+            id!(library_delete_book),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), popup_button_palette);
         }
-        for id in [id!(note_extra), id!(reader_chat_input)] {
+        let destructive = if background == ReaderBackground::Night
+            || (background == ReaderBackground::FollowTheme
+                && *READER_THEME.read().unwrap() == ReaderTheme::Dark)
+        {
+            Vec4f::from_u32(0xff8a_84ff)
+        } else {
+            Vec4f::from_u32(0xb43c_36ff)
+        };
+        let mut delete_button = self.ui.widget(cx, ids!(library_delete_book));
+        script_apply_eval!(cx, delete_button, {
+            draw_text +: {
+                color: #(destructive)
+                color_hover: #(destructive)
+                color_down: #(destructive)
+                color_focus: #(destructive)
+            }
+        });
+        for id in [
+            id!(note_extra),
+            id!(reader_chat_input),
+            id!(library_rename_input),
+        ] {
             apply_reader_input_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
 
@@ -6507,6 +6875,26 @@ impl App {
         set_text!(library_tag_cancel, "cancel");
         set_text!(library_tag_save, "save");
         set_empty_text!(library_tag_input, "tag_input_placeholder");
+        set_text!(library_share_book, "share_book");
+        let want_to_read_key = if self
+            .library_action_book()
+            .is_some_and(|book| book.want_to_read)
+        {
+            "remove_want_to_read"
+        } else {
+            "add_want_to_read"
+        };
+        self.ui
+            .widget(cx, ids!(library_want_to_read))
+            .set_text(cx, crate::i18n::text(language, want_to_read_key));
+        set_text!(library_add_collection, "add_to_collection");
+        set_text!(library_mark_finished, "mark_finished");
+        set_text!(library_rename_book, "rename_book");
+        set_text!(library_delete_book, "delete");
+        set_text!(library_rename_title, "rename_book");
+        set_text!(library_rename_cancel, "cancel");
+        set_text!(library_rename_save, "save");
+        set_empty_text!(library_rename_input, "rename_book_placeholder");
         set_text!(library_delete_modal_title, "delete_book_title");
         set_text!(library_delete_cancel, "cancel");
         set_text!(library_delete_confirm, "delete_book_confirm");
@@ -9667,6 +10055,81 @@ impl MatchEvent for App {
                             },
                         );
                     }
+                    ShelfAction::Renamed {
+                        items,
+                        book_id,
+                        title,
+                    } => {
+                        self.editing_book_title_id = None;
+                        self.ui.modal(cx, ids!(library_rename_modal)).close(cx);
+                        if let Some(item) = CURRENT_ITEM.write().unwrap().as_mut() {
+                            if item.id == *book_id {
+                                item.title = title.clone();
+                            }
+                        }
+                        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+                            if book.id == *book_id {
+                                book.title = title.clone();
+                            }
+                        }
+                        self.refresh_shelf_projection(cx);
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Renamed to “{title}” · {items} books")
+                            } else {
+                                format!("已重命名为《{title}》 · 共 {items} 本")
+                            },
+                        );
+                    }
+                    ShelfAction::WantToReadChanged {
+                        items,
+                        book_id,
+                        enabled,
+                    } => {
+                        if let Some(item) = CURRENT_ITEM.write().unwrap().as_mut() {
+                            if item.id == *book_id {
+                                item.want_to_read = *enabled;
+                            }
+                        }
+                        self.refresh_shelf_projection(cx);
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!(
+                                    "{} Want to Read · {items} books",
+                                    if *enabled { "Added to" } else { "Removed from" }
+                                )
+                            } else if *enabled {
+                                format!("已加入欲读清单 · 共 {items} 本")
+                            } else {
+                                format!("已移出欲读清单 · 共 {items} 本")
+                            },
+                        );
+                    }
+                    ShelfAction::MarkedCompleted {
+                        items,
+                        book_id,
+                        title,
+                    } => {
+                        if let Some(item) = CURRENT_ITEM.write().unwrap().as_mut() {
+                            if item.id == *book_id {
+                                item.status = "completed".to_string();
+                                if item.progress_total > 0 {
+                                    item.progress_current = item.progress_total;
+                                }
+                            }
+                        }
+                        self.refresh_shelf_projection(cx);
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Marked “{title}” as finished · {items} books")
+                            } else {
+                                format!("已将《{title}》标记为读完 · 共 {items} 本")
+                            },
+                        );
+                    }
                     ShelfAction::TagError(e) => {
                         self.ui.label(cx, ids!(library_tag_status)).set_text(
                             cx,
@@ -9676,6 +10139,20 @@ impl MatchEvent for App {
                                 format!("标签保存失败：{e}")
                             },
                         );
+                    }
+                    ShelfAction::UpdateError(e) => {
+                        let message = if app_language() == AppLanguage::English {
+                            format!("Failed to update book: {e}")
+                        } else {
+                            format!("更新书籍失败：{e}")
+                        };
+                        if self.editing_book_title_id.is_some() {
+                            self.ui
+                                .label(cx, ids!(library_rename_status))
+                                .set_text(cx, &message);
+                        } else {
+                            self.ui.label(cx, ids!(library_hint)).set_text(cx, &message);
+                        }
                     }
                     ShelfAction::Deleted { items, title } => {
                         self.refresh_shelf_projection(cx);
@@ -9786,6 +10263,115 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.confirm_delete_book(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_rename_cancel))
+            .clicked(actions)
+            || self
+                .ui
+                .modal(cx, ids!(library_rename_modal))
+                .dismissed(actions)
+        {
+            self.editing_book_title_id = None;
+            self.ui.modal(cx, ids!(library_rename_modal)).close(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_rename_save))
+            .clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(library_rename_input))
+                .returned(actions)
+                .is_some()
+        {
+            self.save_library_rename(cx);
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(library_share_book))
+            .clicked(actions)
+        {
+            if let Some(book) = self.library_action_book() {
+                let shared = if book.author.trim().is_empty() {
+                    book.title
+                } else {
+                    format!("{} — {}", book.title, book.author)
+                };
+                cx.copy_to_clipboard(&shared);
+                self.close_library_action_menu(cx);
+                self.ui.label(cx, ids!(library_hint)).set_text(
+                    cx,
+                    localized(
+                        "书籍信息已复制，可粘贴到其他应用分享",
+                        "Book details copied; paste them into another app to share",
+                    ),
+                );
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_want_to_read))
+            .clicked(actions)
+        {
+            if let Some(book) = self.library_action_book() {
+                let enabled = !book.want_to_read;
+                self.close_library_action_menu(cx);
+                self.ui
+                    .label(cx, ids!(library_hint))
+                    .set_text(cx, localized("正在更新欲读清单…", "Updating Want to Read…"));
+                spawn_set_book_want_to_read(book.id, enabled);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_add_collection))
+            .clicked(actions)
+        {
+            if let Some(book) = self.library_action_book() {
+                self.open_library_tag_editor(cx, &book);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_mark_finished))
+            .clicked(actions)
+        {
+            if let Some(book) = self.library_action_book() {
+                self.close_library_action_menu(cx);
+                self.ui
+                    .label(cx, ids!(library_hint))
+                    .set_text(cx, localized("正在标记为已读完…", "Marking as finished…"));
+                spawn_mark_book_completed(book.id, book.title);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_rename_book))
+            .clicked(actions)
+        {
+            if let Some(book) = self.library_action_book() {
+                self.open_library_rename_editor(cx, &book);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_delete_book))
+            .clicked(actions)
+        {
+            if let Some(book) = self.library_action_book() {
+                self.open_delete_book_confirmation(cx, &book);
+            }
+        }
+        if self
+            .ui
+            .view(cx, ids!(library_action_dismiss))
+            .finger_up(actions)
+            .is_some()
+        {
+            self.close_library_action_menu(cx);
         }
         if self
             .ui
@@ -10947,6 +11533,9 @@ impl AppMain for App {
                 if self.selection_popup_anchor.is_some() {
                     self.pending_selection_popup_layout = true;
                 }
+                if self.library_action_anchor.is_some() {
+                    self.pending_library_action_layout = true;
+                }
                 let responsive_changed = self.update_responsive_layout(
                     cx,
                     event.new_geom.inner_size,
@@ -11000,6 +11589,12 @@ impl AppMain for App {
             if self.pending_selection_popup_layout {
                 self.pending_selection_popup_layout = false;
                 if self.position_selection_popup(cx, true) {
+                    self.ui.redraw(cx);
+                }
+            }
+            if self.pending_library_action_layout {
+                self.pending_library_action_layout = false;
+                if self.position_library_action_menu(cx, true) {
                     self.ui.redraw(cx);
                 }
             }
