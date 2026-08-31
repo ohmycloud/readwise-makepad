@@ -2373,7 +2373,10 @@ script_mod! {
     use mod.widgets.*
 
     mod.widgets.BookShelfCard = RoundedView{
-        width: Fill height: 94
+        // PortalList 会记录每个项目 draw 后的实际高度。卡片不能写死为
+        // 94px：书名、作者、进度和标签四行加 padding 后可能更高，溢出的
+        // 进度文字会被下一张不透明卡片盖住。
+        width: Fill height: Fit
         new_batch: true
         flow: Right spacing: 14 padding: 12
         align: Align{ y: 0.5 }
