@@ -8999,6 +8999,17 @@ impl App {
             .set_text(cx, crate::i18n::text(app_language(), key));
     }
 
+    fn reset_selection_action_hover(&self, cx: &mut Cx) {
+        self.ui.button(cx, ids!(copy_sel_btn)).reset_hover(cx);
+        self.ui.button(cx, ids!(note_from_sel_btn)).reset_hover(cx);
+        self.ui.button(cx, ids!(vocab_from_sel_btn)).reset_hover(cx);
+        self.ui.button(cx, ids!(translate_sel_btn)).reset_hover(cx);
+        self.ui.button(cx, ids!(ask_ai_sel_btn)).reset_hover(cx);
+        self.ui.button(cx, ids!(speak_sel_btn)).reset_hover(cx);
+        self.ui.button(cx, ids!(hl_btn)).reset_hover(cx);
+        self.ui.button(cx, ids!(sel_close_btn)).reset_hover(cx);
+    }
+
     fn set_selection_hint(&mut self, cx: &mut Cx, text: &str) {
         let hint = self.ui.widget(cx, ids!(sel_hint));
         hint.set_visible(cx, !text.is_empty());
@@ -9100,6 +9111,7 @@ impl App {
         SELECTED_TEXT.write().unwrap().clear();
         self.selection_popup_anchor = None;
         self.pending_selection_popup_layout = false;
+        self.reset_selection_action_hover(cx);
         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
         let list = self
             .ui
@@ -9148,6 +9160,7 @@ impl App {
                 "Extra text is optional; the quote is saved with the note.",
             ),
         );
+        self.reset_selection_action_hover(cx);
         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
         self.ui.redraw(cx);
     }
@@ -9967,6 +9980,7 @@ impl MatchEvent for App {
                             .clipped_rect(cx);
                         self.selection_popup_anchor =
                             Some(anchor.unwrap_or_else(|| viewport.pos + viewport.size * 0.5));
+                        self.reset_selection_action_hover(cx);
                         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, true);
                         self.position_selection_popup(cx, false);
                         self.pending_selection_popup_layout = true;
@@ -9976,6 +9990,7 @@ impl MatchEvent for App {
                     SelAction::Hide => {
                         self.selection_popup_anchor = None;
                         self.pending_selection_popup_layout = false;
+                        self.reset_selection_action_hover(cx);
                         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
                     }
                 }
