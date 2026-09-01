@@ -48,26 +48,21 @@ pub const WORD_COLOR_PRESETS: &[(&str, Option<(f32, f32, f32)>)] = &[
     ("橙", Some(GLOSS_PRESETS[2].1)),
 ];
 
-// TextFlow 的 InlineCode 背景在矩形左右各内缩 1px 并带 2px 圆角。
-// RubyWord 是独立 run，高亮跨过它时需要覆盖这个内缩区并与相邻 run 略微重叠。
-const HIGHLIGHT_JOIN_OUTSET: f64 = 2.0;
-const HIGHLIGHT_JOIN_INSET_OVERLAP: f64 = 1.5;
-
-fn highlight_join_rects(rect: Rect) -> [Rect; 2] {
-    let join_width = HIGHLIGHT_JOIN_OUTSET + HIGHLIGHT_JOIN_INSET_OVERLAP;
-    [
-        Rect {
-            pos: dvec2(rect.pos.x - HIGHLIGHT_JOIN_OUTSET, rect.pos.y),
-            size: dvec2(join_width, rect.size.y),
-        },
-        Rect {
-            pos: dvec2(
-                rect.pos.x + rect.size.x - HIGHLIGHT_JOIN_INSET_OVERLAP,
-                rect.pos.y,
-            ),
-            size: dvec2(join_width, rect.size.y),
-        },
-    ]
+/// 注音词自身的可选背景仍沿用 TextFlow 的既有样式。永久高亮绝不走这条
+/// 排版分支，而是在 ChapterList 完成正文排版后统一覆盖绘制。
+fn draw_word_with_background(tf: &mut TextFlow, cx: &mut Cx2d, text: &str, color: Vec4f) {
+    let old_color = tf.draw_block.code_color;
+    let old_padding = tf.inline_code_padding;
+    let old_margin = tf.inline_code_margin;
+    tf.draw_block.code_color = color;
+    tf.inline_code_padding = Inset::default();
+    tf.inline_code_margin = Inset::default();
+    tf.inline_code.push();
+    tf.draw_text(cx, text);
+    tf.inline_code.pop();
+    tf.draw_block.code_color = old_color;
+    tf.inline_code_padding = old_padding;
+    tf.inline_code_margin = old_margin;
 }
 
 script_mod! {
@@ -125,8 +120,6 @@ pub struct RubyWord {
     word: String,
     #[rust]
     gloss: String,
-    #[rust]
-    highlight_slot: Option<usize>,
 }
 
 impl ScriptHook for RubyWord {
@@ -171,26 +164,19 @@ impl WidgetNode for RubyWord {
 
 impl Widget for RubyWord {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
-        let (v, highlight) = match v.rsplit_once(readwise_core::vocab::annotate::MARK_SEP) {
-            Some((text, color)) => (text, Some(color)),
-            None => (v, None),
-        };
-        let highlight_slot = highlight.map(|color| match color {
-            "teal" | "green" => 1,
-            "blue" => 2,
-            "orange" | "red" | "violet" => 3,
-            _ => 0,
-        });
+        let v = v
+            .rsplit_once(readwise_core::vocab::annotate::MARK_SEP)
+            .map(|(text, _)| text)
+            .unwrap_or(v);
         // 正式管线：内文 = 词 + RUBY_SEP + 释义（随文本每帧刷新，widget 复用不串位）；
         // 无分隔符时保留创建时从 t 属性读的释义（M0 demo 兼容）。
         let (word, gloss) = match v.split_once(readwise_core::vocab::annotate::RUBY_SEP) {
             Some((word, gloss)) => (word.to_string(), gloss.to_string()),
             None => (v.to_string(), self.gloss.clone()),
         };
-        if self.word != word || self.gloss != gloss || self.highlight_slot != highlight_slot {
+        if self.word != word || self.gloss != gloss {
             self.word = word;
             self.gloss = gloss;
-            self.highlight_slot = highlight_slot;
             self.redraw(cx);
         }
     }
@@ -214,16 +200,8 @@ impl Widget for RubyWord {
             });
         }
         tf.areas_tracker.push_tracker();
-        if let Some(slot) = self.highlight_slot {
-            crate::mark_span::draw_text_with_background(
-                tf,
-                cx,
-                &self.word,
-                crate::mark_span::hl_color(slot),
-                true,
-            );
-        } else if let Some((r, g, b, a)) = *WORD_BG.read().unwrap() {
-            crate::mark_span::draw_text_with_background(
+        if let Some((r, g, b, a)) = *WORD_BG.read().unwrap() {
+            draw_word_with_background(
                 tf,
                 cx,
                 &self.word,
@@ -233,7 +211,6 @@ impl Widget for RubyWord {
                     z: b,
                     w: a,
                 },
-                false,
             );
         } else {
             tf.draw_text(cx, &self.word);
@@ -250,24 +227,6 @@ impl Widget for RubyWord {
             }
         } else {
             self.drawn_areas = tf.areas_tracker.areas[start..end].to_vec();
-        }
-
-        // `<mark>` 遇到 `<ruby>` 会被拆成 MarkSpan / RubyWord / MarkSpan
-        // 三个独立背景。InlineCode 的圆角内缩会在 RubyWord 两侧露出正文底色；
-        // 只补绘连接带，不改变 padding、游标推进或断行宽度。
-        if let Some(slot) = self.highlight_slot {
-            self.draw_fill.color = crate::mark_span::hl_color(slot);
-            for area in &self.drawn_areas {
-                let rect = area.rect(cx);
-                // inline-code 路径还会登记宽度为 0 的 padding/margin area；
-                // 只有实际背景矩形同时具有有效宽高。
-                if rect.size.x <= 0.5 || rect.size.y <= 0.5 {
-                    continue;
-                }
-                for join in highlight_join_rects(rect) {
-                    self.draw_fill.draw_abs(cx, join);
-                }
-            }
         }
 
         if !self.gloss.is_empty() {
@@ -389,27 +348,5 @@ impl Widget for RubyWord {
                 _ => {}
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::highlight_join_rects;
-    use makepad_widgets::{dvec2, Rect};
-
-    #[test]
-    fn ruby_highlight_join_bands_overlap_both_sdf_edges() {
-        let source = Rect {
-            pos: dvec2(10.0, 20.0),
-            size: dvec2(30.0, 18.0),
-        };
-        let [left, right] = highlight_join_rects(source);
-
-        assert_eq!(left.pos, dvec2(8.0, 20.0));
-        assert_eq!(left.size, dvec2(3.5, 18.0));
-        assert_eq!(right.pos, dvec2(38.5, 20.0));
-        assert_eq!(right.size, dvec2(3.5, 18.0));
-        assert!(left.pos.x + left.size.x > source.pos.x + 1.0);
-        assert!(right.pos.x < source.pos.x + source.size.x - 1.0);
     }
 }

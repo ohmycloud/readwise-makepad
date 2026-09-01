@@ -37,84 +37,13 @@ pub fn hl_color(slot: usize) -> Vec4f {
 /// 槽位 → 存库颜色名（book_notes.color）。
 pub const HL_COLOR_NAMES: &[&str] = &["yellow", "teal", "blue", "orange"];
 
-const LPXS_PER_POINT: f64 = 96.0 / 72.0;
-// Font line boxes vary slightly by family. This factor deliberately errs a
-// little high so adjacent highlight rows overlap instead of leaving a hairline.
-const HIGHLIGHT_LINE_BOX_EM: f64 = 1.25;
-// TextFlow's InlineCode SDF draws one logical pixel inside its rect on every
-// edge. Compensate that inset and overlap the anti-aliased edges by half a
-// pixel, otherwise two vertically adjacent rects still show a fine seam.
-const HIGHLIGHT_SDF_EDGE_OVERLAP: f64 = 1.5;
-
-fn highlight_vertical_padding(font_size: f32, line_spacing: f32, font_scale: f32) -> f64 {
-    let extra_spacing = (line_spacing - 1.0).max(0.0) as f64;
-    let line_box = font_size.max(0.0) as f64
-        * LPXS_PER_POINT
-        * font_scale.max(0.0) as f64
-        * HIGHLIGHT_LINE_BOX_EM;
-    line_box * extra_spacing * 0.5 + HIGHLIGHT_SDF_EDGE_OVERLAP
-}
-
-fn active_text_line_metrics(tf: &TextFlow) -> (f32, f32) {
-    let line_spacing = if tf.fixed.value() > 0 {
-        tf.text_style_fixed.line_spacing
-    } else if tf.bold.value() > 0 {
-        if tf.italic.value() > 0 {
-            tf.text_style_bold_italic.line_spacing
-        } else {
-            tf.text_style_bold.line_spacing
-        }
-    } else if tf.italic.value() > 0 {
-        tf.text_style_italic.line_spacing
-    } else {
-        tf.text_style_normal.line_spacing
-    };
-    let font_size = *tf.font_sizes.last().unwrap_or(&tf.font_size);
-    (font_size, line_spacing)
-}
-
-/// Draw an inline run through TextFlow's built-in background path. Temporarily
-/// enabling the inline-code branch is intentional: that branch lays out each
-/// wrapped row first, emits its background before the glyph batch, and still
-/// participates in TextFlow selection. A permanent highlight expands into the
-/// configured line gap; matching negative margins keep the reader's line layout
-/// and wrapping unchanged.
-pub(crate) fn draw_text_with_background(
-    tf: &mut TextFlow,
-    cx: &mut Cx2d,
-    text: &str,
-    color: Vec4f,
-    fill_line_gap: bool,
-) {
-    let old_color = tf.draw_block.code_color;
-    let old_padding = tf.inline_code_padding;
-    let old_margin = tf.inline_code_margin;
-    tf.draw_block.code_color = color;
-    if fill_line_gap {
-        let (font_size, line_spacing) = active_text_line_metrics(tf);
-        let vertical = highlight_vertical_padding(font_size, line_spacing, tf.draw_text.font_scale);
-        tf.inline_code_padding = Inset {
-            top: vertical,
-            bottom: vertical,
-            left: 0.0,
-            right: 0.0,
-        };
-        tf.inline_code_margin = Inset {
-            top: -vertical,
-            bottom: -vertical,
-            left: 0.0,
-            right: 0.0,
-        };
-    } else {
-        tf.inline_code_padding = Inset::default();
-        tf.inline_code_margin = Inset::default();
+pub fn hl_slot_for_name(color: &str) -> usize {
+    match color {
+        "teal" | "green" => 1,
+        "blue" => 2,
+        "orange" | "red" | "violet" => 3,
+        _ => 0,
     }
-    tf.inline_code.push();
-    tf.draw_text(cx, text);
-    tf.inline_code.pop();
-    tf.draw_block.code_color = old_color;
-    tf.inline_code_padding = old_padding;
-    tf.inline_code_margin = old_margin;
 }
 
 script_mod! {
@@ -124,8 +53,8 @@ script_mod! {
     mod.widgets.MarkSpan = set_type_default() do mod.widgets.MarkSpanBase{}
 }
 
-/// 高亮段：文字和底色交给 TextFlow 在同一帧内联绘制（与正文同排版）。
-/// 不自报命中（point_hits_area=false），选区与点词从其上正常穿过。
+/// 兼容旧 `<mark>` 文档的纯文字 run。永久高亮底色由 ChapterList 在正文
+/// 排版完成后按数据库区间绘制；这里绝不进入 InlineCode 或改变 turtle 布局。
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct MarkSpan {
     #[uid]
@@ -138,8 +67,6 @@ pub struct MarkSpan {
     drawn_areas: Vec<Area>,
     #[rust]
     text: String,
-    #[rust]
-    color_slot: usize,
 }
 
 impl ScriptHook for MarkSpan {}
@@ -168,18 +95,11 @@ impl WidgetNode for MarkSpan {
 
 impl Widget for MarkSpan {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
-        let (text, color) = v
+        let (text, _) = v
             .rsplit_once(readwise_core::vocab::annotate::MARK_SEP)
             .unwrap_or((v, "yellow"));
-        let color_slot = match color {
-            "teal" | "green" => 1,
-            "blue" => 2,
-            "orange" | "red" | "violet" => 3,
-            _ => 0,
-        };
-        if self.text != text || self.color_slot != color_slot {
+        if self.text != text {
             self.text = text.to_string();
-            self.color_slot = color_slot;
             self.redraw(cx);
         }
     }
@@ -193,7 +113,7 @@ impl Widget for MarkSpan {
             return DrawStep::done();
         };
         tf.areas_tracker.push_tracker();
-        draw_text_with_background(tf, cx, &self.text, hl_color(self.color_slot), true);
+        tf.draw_text(cx, &self.text);
         let (start, end) = tf.areas_tracker.pop_tracker();
         if self.drawn_areas.len() == end - start {
             for i in 0..end - start {
@@ -207,22 +127,4 @@ impl Widget for MarkSpan {
     }
 
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
-}
-
-#[cfg(test)]
-mod tests {
-    use super::highlight_vertical_padding;
-
-    #[test]
-    fn highlight_padding_fills_half_of_the_configured_line_gap() {
-        // 12pt = 16 logical pixels; the conservative 1.25em line box is 20px.
-        // At 1.5 line spacing each side grows by 5px plus the 1.5px SDF overlap.
-        assert!((highlight_vertical_padding(12.0, 1.5, 1.0) - 6.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn highlight_padding_keeps_sdf_edges_overlapping_at_tight_spacing() {
-        assert_eq!(highlight_vertical_padding(12.0, 1.0, 1.0), 1.5);
-        assert_eq!(highlight_vertical_padding(12.0, 0.8, 1.0), 1.5);
-    }
 }

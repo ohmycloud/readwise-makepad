@@ -449,6 +449,29 @@ fn selection_range_in_block(
     (from < to).then_some((from, to))
 }
 
+fn highlight_range_in_block(
+    highlight: &readwise_core::books::Highlight,
+    block_id: usize,
+    text_len: usize,
+) -> Option<(usize, usize)> {
+    if block_id < highlight.start_block || block_id > highlight.end_block {
+        return None;
+    }
+    let from = if block_id == highlight.start_block {
+        highlight.start_char
+    } else {
+        0
+    }
+    .min(text_len);
+    let to = if block_id == highlight.end_block {
+        highlight.end_char
+    } else {
+        text_len
+    }
+    .min(text_len);
+    (from < to).then_some((from, to))
+}
+
 #[cfg(test)]
 mod table_block_tests {
     use super::{
@@ -2498,36 +2521,10 @@ fn spawn_open_book(item: ShelfItem) {
     });
 }
 
-/// 章节 → PortalList 块（含高亮标记注入）。
+/// 章节 → PortalList 块。永久高亮只保留数据库坐标，由 ChapterList 在正文
+/// 排版完成后覆盖绘制，绝不向 HTML 注入 `<mark>` 或改变行内 run。
 fn build_chapter_chunks(book: &mut OpenBook, idx: usize) -> Option<Vec<String>> {
-    let mut chunks = book.chapter_chunks(idx, *GLOSS_ENABLED.read().unwrap())?;
-    if let Some(hls) = book.highlights.get(&idx) {
-        let mut per_block: HashMap<usize, Vec<(usize, usize, &str)>> = HashMap::new();
-        for hl in hls {
-            for b in hl.start_block..=hl.end_block.min(chunks.len().saturating_sub(1)) {
-                let from = if b == hl.start_block {
-                    hl.start_char
-                } else {
-                    0
-                };
-                let to = if b == hl.end_block {
-                    hl.end_char
-                } else {
-                    usize::MAX
-                };
-                per_block
-                    .entry(b)
-                    .or_default()
-                    .push((from, to, hl.color.as_str()));
-            }
-        }
-        for (b, ranges) in per_block {
-            if let Some(chunk) = chunks.get_mut(b) {
-                *chunk = readwise_core::vocab::annotate::inject_colored_marks(chunk, &ranges);
-            }
-        }
-    }
-    Some(chunks)
+    book.chapter_chunks(idx, *GLOSS_ENABLED.read().unwrap())
 }
 
 fn overlapping_highlight_ids(
@@ -2574,6 +2571,16 @@ mod highlight_overlap_tests {
             vec!["first".to_string(), "cross".to_string()]
         );
         assert!(overlapping_highlight_ids(&highlights, ((4, 0), (4, 3))).is_empty());
+    }
+
+    #[test]
+    fn highlight_projects_across_blocks_without_exceeding_visible_text() {
+        let highlight = highlight("cross", (2, 4), (4, 18));
+        assert_eq!(highlight_range_in_block(&highlight, 1, 20), None);
+        assert_eq!(highlight_range_in_block(&highlight, 2, 20), Some((4, 20)));
+        assert_eq!(highlight_range_in_block(&highlight, 3, 12), Some((0, 12)));
+        assert_eq!(highlight_range_in_block(&highlight, 4, 10), Some((0, 10)));
+        assert_eq!(highlight_range_in_block(&highlight, 5, 20), None);
     }
 }
 
@@ -5400,14 +5407,15 @@ impl ChapterList {
         )
     }
 
-    /// RubyWord 是独立 continuation run，Makepad 为它生成的原生选区矩形不
-    /// 与前后正文共享行基线。含注音的段落改用统一布局绘制一次连续底色。
-    fn draw_unified_selection(
+    /// 按连续的可见正文坐标绘制一个不参与布局的覆盖层。RubyWord 等自定义
+    /// run 仍由原始 Html/TextFlow 排版；选区或永久高亮只在排版后增加颜色。
+    fn draw_unified_range_overlay(
         &mut self,
         cx: &mut Cx2d,
         widget: &WidgetRef,
         html_source: &str,
         range: (usize, usize),
+        color: Vec4f,
     ) {
         let Some(layout) = self.unified_markup_layout(cx, widget, html_source) else {
             return;
@@ -5417,6 +5425,7 @@ impl ChapterList {
         if start >= end {
             return;
         }
+        self.draw_reader_selection.color = color;
         let selection = LayoutSelection {
             anchor: LayoutCursor {
                 index: start,
@@ -5772,6 +5781,14 @@ impl Widget for ChapterList {
         });
         self.draw_reader_selection.color = selection_color;
         let selection_range = *SEL_RANGE.read().unwrap();
+        let chapter_idx = CURRENT_CHAPTER.load(Ordering::Relaxed);
+        let chapter_highlights = CURRENT_BOOK
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|book| book.highlights.get(&chapter_idx))
+            .cloned()
+            .unwrap_or_default();
         let normal_family = if reader_font == ReaderFont::Monospace {
             self.font_monospace.font_family.clone()
         } else {
@@ -5882,15 +5899,31 @@ impl Widget for ChapterList {
                         item.selection_clear();
                     }
                     item.draw_all_unscoped(cx);
+                    let source_len = readwise_core::vocab::annotate::rendered_text(para).len();
+                    if code_text.is_none() {
+                        for highlight in &chapter_highlights {
+                            let Some(range) =
+                                highlight_range_in_block(highlight, item_id, source_len)
+                            else {
+                                continue;
+                            };
+                            let color = crate::mark_span::hl_color(
+                                crate::mark_span::hl_slot_for_name(&highlight.color),
+                            );
+                            self.draw_unified_range_overlay(cx, &item, para, range, color);
+                        }
+                    }
                     if has_gloss {
-                        if let Some(range) = selection_range.and_then(|range| {
-                            selection_range_in_block(
+                        if let Some(range) = selection_range
+                            .and_then(|range| selection_range_in_block(range, item_id, source_len))
+                        {
+                            self.draw_unified_range_overlay(
+                                cx,
+                                &item,
+                                para,
                                 range,
-                                item_id,
-                                readwise_core::vocab::annotate::rendered_text(para).len(),
-                            )
-                        }) {
-                            self.draw_unified_selection(cx, &item, para, range);
+                                selection_color,
+                            );
                         }
                     }
                 }
