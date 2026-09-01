@@ -3744,10 +3744,13 @@ script_mod! {
                                 // centralized shelf projection in draw_walk.
                                 book_shelf := mod.widgets.BookShelf{}
                                 library_action_layer := View{
-                                    visible: false
+                                    // Keep the transparent overlay owner mounted so it
+                                    // has a valid Area before the first menu request.
+                                    // Only its interactive children are toggled.
                                     width: Fill height: Fill
                                     flow: Overlay
                                     library_action_dismiss := View{
+                                        visible: false
                                         width: Fill height: Fill
                                         // View only emits pointer actions when it has a
                                         // cursor or animator. It stays behind the menu,
@@ -3756,6 +3759,7 @@ script_mod! {
                                         capture_overload: false
                                     }
                                     library_action_menu := RoundedShadowView{
+                                        visible: false
                                         width: 238 height: Fit
                                         new_batch: true
                                         flow: Down spacing: 2 padding: 8
@@ -6423,7 +6427,10 @@ impl App {
             }),
         );
         self.ui
-            .widget(cx, ids!(library_action_layer))
+            .widget(cx, ids!(library_action_dismiss))
+            .set_visible(cx, true);
+        self.ui
+            .widget(cx, ids!(library_action_menu))
             .set_visible(cx, true);
         self.position_library_action_menu(cx, false);
         self.pending_library_action_layout = true;
@@ -6435,8 +6442,12 @@ impl App {
         self.library_action_anchor = None;
         self.pending_library_action_layout = false;
         self.ui
-            .widget(cx, ids!(library_action_layer))
+            .widget(cx, ids!(library_action_dismiss))
             .set_visible(cx, false);
+        self.ui
+            .widget(cx, ids!(library_action_menu))
+            .set_visible(cx, false);
+        self.ui.widget(cx, ids!(library_action_layer)).redraw(cx);
     }
 
     fn open_book_for_reading(&mut self, cx: &mut Cx, book: ShelfItem) {
