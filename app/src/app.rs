@@ -4055,46 +4055,53 @@ script_mod! {
                                         }
                                     }
                                 }
-                                word_card := RoundedShadowView{
-                                    visible: false
-                                    width: 420 height: Fit
-                                    new_batch: true
-                                    padding: 14
-                                    flow: Down spacing: 10
-                                    draw_bg.color: theme.color_bg_container
-                                    draw_bg.border_color: theme.color_bg_highlight_inline
-                                    draw_bg.border_radius: 10.0
-                                    draw_bg.shadow_color: #0004
-                                    draw_bg.shadow_radius: 12.0
-                                    draw_bg.shadow_offset: vec2(0, 4)
-                                    card_head := View{
-                                        width: Fill
-                                        height: Fit
-                                        spacing: 14
-                                        align: Align{ y: 0.5 }
-                                        card_word := Label{
-                                            text: ""
-                                            draw_text.text_style.font_size: 17
-                                        }
-                                        card_gloss := Label{
+                                word_card_layer := View{
+                                    // Keep the transparent owner in the draw tree so its
+                                    // Area can schedule the very first popup frame. Only
+                                    // the card itself is toggled and receives pointer hits.
+                                    width: Fill height: Fill
+                                    flow: Overlay
+                                    word_card := RoundedShadowView{
+                                        visible: false
+                                        width: 420 height: Fit
+                                        new_batch: true
+                                        padding: 14
+                                        flow: Down spacing: 10
+                                        draw_bg.color: theme.color_bg_container
+                                        draw_bg.border_color: theme.color_bg_highlight_inline
+                                        draw_bg.border_radius: 10.0
+                                        draw_bg.shadow_color: #0004
+                                        draw_bg.shadow_radius: 12.0
+                                        draw_bg.shadow_offset: vec2(0, 4)
+                                        card_head := View{
                                             width: Fill
-                                            text: ""
-                                            draw_text.color: theme.color_highlight
-                                            draw_text.text_style.font_size: 13
+                                            height: Fit
+                                            spacing: 14
+                                            align: Align{ y: 0.5 }
+                                            card_word := Label{
+                                                text: ""
+                                                draw_text.text_style.font_size: 17
+                                            }
+                                            card_gloss := Label{
+                                                width: Fill
+                                                text: ""
+                                                draw_text.color: theme.color_highlight
+                                                draw_text.text_style.font_size: 13
+                                            }
+                                            close_card_btn := ButtonFlat{ text: "关闭" }
                                         }
-                                        close_card_btn := ButtonFlat{ text: "关闭" }
-                                    }
-                                    card_foot := View{
-                                        width: Fill height: Fit
-                                        spacing: 14
-                                        align: Align{ y: 0.5 }
-                                        add_vocab_btn := ButtonFlat{ text: "加入生词本" }
-                                        know_btn := ButtonFlat{ text: "标为已认识" }
-                                        card_hint := Label{
-                                            width: Fill
-                                            text: ""
-                                            draw_text.color: theme.color_label_inner_inactive
-                                            draw_text.text_style.font_size: 9
+                                        card_foot := View{
+                                            width: Fill height: Fit
+                                            spacing: 14
+                                            align: Align{ y: 0.5 }
+                                            add_vocab_btn := ButtonFlat{ text: "加入生词本" }
+                                            know_btn := ButtonFlat{ text: "标为已认识" }
+                                            card_hint := Label{
+                                                width: Fill
+                                                text: ""
+                                                draw_text.color: theme.color_label_inner_inactive
+                                                draw_text.text_style.font_size: 9
+                                            }
                                         }
                                     }
                                 }
@@ -9083,6 +9090,7 @@ impl App {
         self.word_card_anchor = None;
         self.pending_word_card_layout = false;
         self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
+        self.ui.widget(cx, ids!(word_card_layer)).redraw(cx);
     }
 
     fn clear_reader_selection(&mut self, cx: &mut Cx) {
@@ -10367,7 +10375,7 @@ impl MatchEvent for App {
                 self.position_word_card(cx, false);
                 self.pending_word_card_layout = true;
                 self.card = Some((word, lemma, gloss));
-                self.ui.redraw(cx);
+                self.ui.widget(cx, ids!(word_card_layer)).redraw(cx);
             }
         }
         if let Some(index) = self
