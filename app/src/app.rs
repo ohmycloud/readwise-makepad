@@ -386,7 +386,53 @@ fn textflow_selection_prefix_len(html: &str) -> usize {
 }
 
 fn needs_unified_reader_hit_test(html: &str) -> bool {
-    html.to_ascii_lowercase().contains("<mark")
+    let mut remaining = html;
+    let mut has_fragmented_text = false;
+    let mut has_embedded_visual = false;
+    while let Some(tag_start) = remaining.find('<') {
+        remaining = &remaining[tag_start + 1..];
+        let candidate = remaining
+            .trim_start()
+            .strip_prefix('/')
+            .unwrap_or(remaining.trim_start())
+            .trim_start();
+        let name_end = candidate
+            .find(|ch: char| !ch.is_ascii_alphanumeric())
+            .unwrap_or(candidate.len());
+        let name = &candidate[..name_end];
+        let name = name.to_ascii_lowercase();
+        if matches!(name.as_str(), "img" | "image" | "svg") {
+            // A plain-text layout cannot represent the horizontal space
+            // occupied by an inline visual. Keep the widget-aware path for
+            // these mixed-media blocks instead of shifting every later index.
+            has_embedded_visual = true;
+        } else if matches!(
+            name.as_str(),
+            // Each of these changes TextFlow state or enters a custom/link
+            // widget, splitting one visual line into independently laid-out
+            // selection segments.
+            "a" | "b"
+                | "strong"
+                | "i"
+                | "em"
+                | "code"
+                | "u"
+                | "del"
+                | "s"
+                | "strike"
+                | "sub"
+                | "sup"
+                | "mark"
+                | "ruby"
+        ) {
+            has_fragmented_text = true;
+        }
+        let Some(tag_end) = remaining.find('>') else {
+            break;
+        };
+        remaining = &remaining[tag_end + 1..];
+    }
+    has_fragmented_text && !has_embedded_visual
 }
 
 fn selection_range_in_block(
@@ -432,11 +478,26 @@ mod table_block_tests {
     }
 
     #[test]
-    fn permanent_marks_use_unified_reader_hit_testing() {
+    fn fragmented_inline_runs_use_unified_reader_hit_testing() {
         assert!(needs_unified_reader_hit_test(
             "<p>before <MARK>selected</MARK> after</p>"
         ));
+        assert!(needs_unified_reader_hit_test(
+            "<p>before <em>italic</em> after</p>"
+        ));
+        assert!(needs_unified_reader_hit_test(
+            "<p>before <ruby t='word'>vocabulary</ruby> after</p>"
+        ));
+        assert!(needs_unified_reader_hit_test(
+            "<p>before <a href='chapter.xhtml'>link</a> after</p>"
+        ));
         assert!(!needs_unified_reader_hit_test("<p>ordinary text</p>"));
+        assert!(!needs_unified_reader_hit_test(
+            "<p>before <image>name</image> after</p>"
+        ));
+        assert!(!needs_unified_reader_hit_test(
+            "<p><em>caption</em><img src='figure.png'/></p>"
+        ));
     }
 
     #[test]
@@ -5315,8 +5376,9 @@ impl ChapterList {
         })
     }
 
-    /// `<mark>` 会把同一段拆成多个 TextFlow run。Makepad 逐 run 的命中使用
-    /// 跨行整体包围框，run 重叠时会错误地总选中前一个，因此命中统一布局。
+    /// 斜体、粗体、链接、注音和 `<mark>` 都会把同一段拆成多个 TextFlow run。
+    /// Makepad 逐 run 的命中使用跨行整体包围框，run 重叠时会错误地总选中
+    /// 前一个，因此这些段落统一按连续的可见正文布局命中。
     fn unified_markup_hit_index(
         &self,
         cx: &mut Cx,
