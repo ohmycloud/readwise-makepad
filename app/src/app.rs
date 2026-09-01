@@ -3368,7 +3368,9 @@ script_mod! {
         list := PortalList{
             width: Fill height: Fill
             auto_tail: true
-            smooth_tail: true
+            // History restoration must land at the tail immediately. A smooth
+            // tail makes a freshly-opened thread visibly traverse every message.
+            smooth_tail: false
             spacing: 8
             padding: Inset{left: 20 right: 20 top: 12 bottom: 12}
             scroll_bar: ScrollBar{}
@@ -9891,7 +9893,9 @@ impl MatchEvent for App {
                             ..Default::default()
                         };
                         self.configure_ai_backend(cx);
-                        self.ui.redraw(cx);
+                        // Restore the thread at its tail before the chat page's
+                        // first visible draw instead of animating from item zero.
+                        self.redraw_chat(cx);
                     }
                     AiStateAction::SettingsSaved(settings) => {
                         self.ai_settings = settings.clone();
