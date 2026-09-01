@@ -138,8 +138,8 @@ impl WidgetNode for RubyWord {
             self.drawn_areas.iter().for_each(|area| area.redraw(cx));
         }
     }
-    /// 命中区域 = 词的各行绘制段（PortalList 的选区/点击仲裁靠它自报：
-    /// 按在注音词上→点词，按在普通文本→列表接管拖选）。
+    /// 命中区域 = 词的各行绘制段。词卡点击和正文拖选会同时收到按下事件，
+    /// 最终由 FingerUp 的 `was_tap()` 区分单击弹卡片与拖动选择文字。
     fn point_hits_area(&self, cx: &Cx, point: DVec2) -> bool {
         self.drawn_areas
             .iter()

@@ -4,6 +4,7 @@ use crate::sample_chapter;
 use makepad_ai::{
     AiBackend, AiEvent, AiRequest, BackendConfig, Message, OpenAiBackend, RequestId, StreamDelta,
 };
+use makepad_widgets::makepad_draw::text::geom::Point as LayoutPoint;
 use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
@@ -355,15 +356,65 @@ fn is_table_block(html: &str) -> bool {
             .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'>' || *byte == b'/')
 }
 
+/// Html/TextFlow inserts a selection-only newline when a top-level paragraph or
+/// heading starts. Persistent highlights, notes, and `rendered_text` use the
+/// visible source-text coordinate space, so the reader translates this prefix
+/// only at the TextFlow boundary.
+fn textflow_selection_prefix_len(html: &str) -> usize {
+    let trimmed = html.trim_start();
+    if !trimmed.starts_with('<') {
+        return 0;
+    }
+    let Some(tag_end) = trimmed.find('>') else {
+        return 0;
+    };
+    let tag = trimmed[1..tag_end]
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    usize::from(matches!(
+        tag.as_str(),
+        "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+    ))
+}
+
+fn needs_unified_reader_hit_test(html: &str) -> bool {
+    html.to_ascii_lowercase().contains("<mark")
+}
+
 #[cfg(test)]
 mod table_block_tests {
-    use super::is_table_block;
+    use super::{is_table_block, needs_unified_reader_hit_test, textflow_selection_prefix_len};
 
     #[test]
     fn recognizes_only_top_level_table_blocks() {
         assert!(is_table_block("  <TABLE class='data'><tr></tr></TABLE>"));
         assert!(!is_table_block("<p>Table 1</p><table></table>"));
         assert!(!is_table_block("<tableau>not a table</tableau>"));
+    }
+
+    #[test]
+    fn reader_selection_separates_textflow_prefix_from_source_offsets() {
+        assert_eq!(textflow_selection_prefix_len(" <p>words</p>"), 1);
+        assert_eq!(
+            textflow_selection_prefix_len("<H2 id='title'>Title</H2>"),
+            1
+        );
+        assert_eq!(
+            textflow_selection_prefix_len("<blockquote><p>x</p></blockquote>"),
+            0
+        );
+        assert_eq!(textflow_selection_prefix_len("plain text"), 0);
+    }
+
+    #[test]
+    fn permanent_marks_use_unified_reader_hit_testing() {
+        assert!(needs_unified_reader_hit_test(
+            "<p>before <MARK>selected</MARK> after</p>"
+        ));
+        assert!(!needs_unified_reader_hit_test("<p>ordinary text</p>"));
     }
 }
 
@@ -3562,9 +3613,13 @@ script_mod! {
         font_standard_bold: theme.font_bold{}
         font_standard_bold_italic: theme.font_bold_italic{}
         font_monospace: theme.font_code{}
+        html_default_inset: theme.space_1
         list := PortalList{
             width: Fill height: Fill
             selectable: true
+            // Desktop text selection owns pointer drags. Wheel/scrollbar
+            // scrolling remains available; compact mode enables touch drag.
+            drag_scrolling: false
             padding: Inset{ left: 32 right: 32 top: 8 bottom: 8 }
             spacing: 6
             scroll_bar: ScrollBar{}
@@ -5036,8 +5091,10 @@ struct ChapterList {
     font_standard_bold_italic: TextStyle,
     #[live]
     font_monospace: TextStyle,
-    /// 选区自跟踪（PortalList 未暴露区间 API，用公开的命中接口镜像；
-    /// 仅镜像记录，绘制仍由原生选区完成）。
+    #[live]
+    html_default_inset: f64,
+    /// 选区自跟踪（PortalList 未暴露区间 API，用公开的命中接口镜像）。
+    /// 普通文字与原生选区同步；注音词/链接等交互内联文字由镜像投影绘制。
     #[rust]
     sel_anchor: Option<(usize, usize)>,
     #[rust]
@@ -5071,8 +5128,12 @@ impl ChapterList {
                 bottom: 8.0,
             }
         };
+        let drag_scrolling = compact_layout;
         let mut list_widget = self.view.widget(cx, ids!(list));
-        script_apply_eval!(cx, list_widget, {padding: #(reader_padding)});
+        script_apply_eval!(cx, list_widget, {
+            padding: #(reader_padding)
+            drag_scrolling: #(drag_scrolling)
+        });
         let list = self.view.portal_list(cx, ids!(list));
         if let Some(mut inner) = list.borrow_mut() {
             inner.selectable = !compact_layout;
@@ -5086,9 +5147,99 @@ impl ChapterList {
         self.view.redraw(cx);
     }
 
-    /// 命中可见块的 (块id, 字符下标)。点位在视口外或块间隙时吸附到
+    /// `<mark>` 会把同一段拆成多个 TextFlow run。Makepad 逐 run 的命中使用
+    /// 跨行整体包围框，run 重叠时会错误地总选中前一个。这里把可见正文按
+    /// 当前阅读字体统一排版，仅用于逐视觉行定位字符，不改变实际富文本绘制。
+    fn unified_markup_hit_index(
+        &self,
+        cx: &mut Cx,
+        widget: &WidgetRef,
+        html_source: &str,
+        abs: DVec2,
+    ) -> Option<usize> {
+        let plain = readwise_core::vocab::annotate::rendered_text(html_source);
+        if plain.is_empty() {
+            return Some(0);
+        }
+        let html_ref = widget.widget(cx, ids!(para_html));
+        let rect = html_ref.area().rect(cx);
+        let mut html = html_ref.borrow_mut::<Html>()?;
+        let text_flow = &mut html.text_flow;
+
+        // Gloss templates replace Html's theme inset with 22px of top room
+        // for ruby annotations and zero horizontal inset.
+        let has_gloss = html_source.to_ascii_lowercase().contains("<ruby");
+        let (padding_left, padding_right, padding_top) = if has_gloss {
+            (0.0, 0.0, 22.0)
+        } else {
+            (
+                self.html_default_inset,
+                self.html_default_inset,
+                self.html_default_inset,
+            )
+        };
+        let trimmed = html_source.trim_start().to_ascii_lowercase();
+        let (heading_scale, block_margin_top) = if trimmed.starts_with("<h1") {
+            (2.0, text_flow.heading_margin.top)
+        } else if trimmed.starts_with("<h2") {
+            (1.5, text_flow.heading_margin.top)
+        } else if trimmed.starts_with("<h3") {
+            (1.17, text_flow.heading_margin.top)
+        } else if trimmed.starts_with("<h4") {
+            (1.0, text_flow.heading_margin.top)
+        } else if trimmed.starts_with("<h5") {
+            (0.83, text_flow.heading_margin.top)
+        } else if trimmed.starts_with("<h6") {
+            (0.67, text_flow.heading_margin.top)
+        } else if trimmed.starts_with("<p") {
+            (1.0, text_flow.paragraph_margin.top)
+        } else {
+            (1.0, 0.0)
+        };
+
+        let saved_style = text_flow.draw_text.text_style.clone();
+        let saved_max_lines = text_flow.draw_text.max_lines;
+        let mut hit_style = if trimmed.starts_with("<h") {
+            text_flow.text_style_bold.clone()
+        } else {
+            text_flow.text_style_normal.clone()
+        };
+        hit_style.font_size = text_flow.font_size * heading_scale;
+        text_flow.draw_text.text_style = hit_style;
+        text_flow.draw_text.max_lines = 0;
+        let max_width = (rect.size.x - padding_left - padding_right).max(1.0) as f32;
+        let laidout = text_flow.draw_text.layout(
+            cx,
+            0.0,
+            0.0,
+            Some(max_width),
+            true,
+            Align::default(),
+            &plain,
+        );
+        text_flow.draw_text.text_style = saved_style;
+        text_flow.draw_text.max_lines = saved_max_lines;
+
+        if laidout.rows.is_empty() {
+            return Some(0);
+        }
+        let origin = rect.pos
+            + dvec2(
+                padding_left,
+                padding_top + text_flow.font_size as f64 * heading_scale as f64 * block_margin_top,
+            );
+        let local = LayoutPoint::new((abs.x - origin.x) as f32, (abs.y - origin.y) as f32);
+        Some(
+            laidout
+                .point_in_lpxs_to_cursor(local)
+                .index
+                .min(plain.len()),
+        )
+    }
+
+    /// 命中可见块的 (块id, 正文字符下标)。点位在视口外或块间隙时吸附到
     /// 最近边界，与 PortalList 原生选择规则保持一致。
-    fn hit_block_char(&self, cx: &Cx, abs: DVec2) -> Option<(usize, usize)> {
+    fn hit_block_char(&self, cx: &mut Cx, abs: DVec2) -> Option<(usize, usize)> {
         let list = self.view.portal_list(cx, ids!(list));
         let first = list.first_id();
         let vis = list.visible_items() + 1;
@@ -5114,9 +5265,23 @@ impl ChapterList {
         }
         for (id, widget, rect) in &visible {
             if rect.contains(abs) {
-                return widget
-                    .selection_point_to_char_index(cx, abs)
-                    .map(|char_idx| (*id, char_idx));
+                let paragraphs = PARAGRAPHS.read().unwrap();
+                let paragraph = paragraphs.get(*id)?;
+                let plain_len = readwise_core::vocab::annotate::rendered_text(paragraph).len();
+                let is_code = CODE_BLOCKS
+                    .read()
+                    .unwrap()
+                    .get(*id)
+                    .and_then(Option::as_ref)
+                    .is_some();
+                let char_idx = if needs_unified_reader_hit_test(paragraph) && !is_code {
+                    self.unified_markup_hit_index(cx, widget, paragraph, abs)?
+                } else {
+                    widget
+                        .selection_point_to_char_index(cx, abs)?
+                        .saturating_sub(textflow_selection_prefix_len(paragraph))
+                };
+                return Some((*id, char_idx.min(plain_len)));
             }
         }
         if let Some((id, widget, _)) = visible
@@ -5124,7 +5289,13 @@ impl ChapterList {
             .rev()
             .find(|(_, _, rect)| rect.pos.y + rect.size.y <= abs.y)
         {
-            return Some((*id, widget.selection_text_len()));
+            let len = PARAGRAPHS
+                .read()
+                .unwrap()
+                .get(*id)
+                .map(|paragraph| readwise_core::vocab::annotate::rendered_text(paragraph).len())
+                .unwrap_or_else(|| widget.selection_text_len());
+            return Some((*id, len));
         }
         Some((*first_id, 0))
     }
@@ -5145,6 +5316,7 @@ impl ChapterList {
     /// 重新投影到当前可见 widget，而不能依赖上一次的原生选择状态。
     fn apply_visible_selection(&self, cx: &mut Cx) {
         let range = *SEL_RANGE.read().unwrap();
+        let paragraphs = PARAGRAPHS.read().unwrap();
         let list = self.view.portal_list(cx, ids!(list));
         let first = list.first_id();
         let vis = list.visible_items() + 1;
@@ -5152,17 +5324,20 @@ impl ChapterList {
             let Some((_, widget)) = list.get_item(id) else {
                 continue;
             };
+            let paragraph = paragraphs.get(id).map(String::as_str).unwrap_or("");
+            let prefix = textflow_selection_prefix_len(paragraph);
+            let source_len = readwise_core::vocab::annotate::rendered_text(paragraph).len();
             match range {
                 None => widget.selection_clear(),
                 Some((start, end)) if id < start.0 || id > end.0 => widget.selection_clear(),
                 Some((start, end)) if id == start.0 && id == end.0 => {
-                    widget.selection_set(start.1, end.1)
+                    widget.selection_set(start.1 + prefix, end.1 + prefix)
                 }
                 Some((start, _)) if id == start.0 => {
-                    widget.selection_set(start.1, widget.selection_text_len())
+                    widget.selection_set(start.1 + prefix, source_len + prefix)
                 }
-                Some((_, end)) if id == end.0 => widget.selection_set(0, end.1),
-                Some(_) => widget.selection_select_all(),
+                Some((_, end)) if id == end.0 => widget.selection_set(prefix, end.1 + prefix),
+                Some(_) => widget.selection_set(prefix, source_len + prefix),
             }
             widget.redraw(cx);
         }
@@ -5227,6 +5402,9 @@ impl ChapterList {
     fn track_selection(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::MouseDown(e) => {
+                if e.button != MouseButton::PRIMARY {
+                    return;
+                }
                 let list = self.view.portal_list(cx, ids!(list));
                 if !list.area().rect(cx).contains(e.abs) {
                     return;
@@ -5240,24 +5418,15 @@ impl ChapterList {
                 self.sel_anchor = None;
                 self.last_abs = Some(e.abs);
                 Cx::post_action(SelAction::Hide);
-                let first = list.first_id();
-                let vis = list.visible_items() + 1;
-                let on_interactive = (first..first + vis).any(|id| {
-                    list.get_item(id)
-                        .map(|(_, w)| w.find_interactive_widget_from_point(cx, e.abs).is_some())
-                        .unwrap_or(false)
-                });
-                if !on_interactive {
-                    if let Some(hit) = self.hit_block_char(cx, e.abs) {
-                        self.sel_anchor = Some(hit);
-                        self.selecting = true;
-                    }
+                // Inline text widgets (ruby words and links) must keep receiving
+                // clicks, but they are also valid text-selection starting points.
+                // Their FingerUp `was_tap()` check distinguishes a click from a drag.
+                if let Some(hit) = self.hit_block_char(cx, e.abs) {
+                    self.sel_anchor = Some(hit);
+                    self.selecting = true;
                 }
                 if std::env::var("SEL_DEBUG").is_ok() {
-                    eprintln!(
-                        "[SEL] down: interactive={} anchor={:?}",
-                        on_interactive, self.sel_anchor
-                    );
+                    eprintln!("[SEL] down: anchor={:?}", self.sel_anchor);
                 }
             }
             Event::MouseMove(e) => {
@@ -5413,6 +5582,15 @@ impl Widget for ChapterList {
                         let html = item.widget(cx, ids!(para_html));
                         if let Some(mut inner) = html.borrow_mut::<Html>() {
                             if inner.body.as_ref() != para {
+                                // Html assigns anonymous custom tags (`mark`, `ruby`,
+                                // links) positional IDs. Adding/removing a mark can
+                                // therefore move a RubyWord onto an ID previously owned
+                                // by MarkSpan. TextFlow::item_with_scope does not replace
+                                // an existing item when its template changes, so retaining
+                                // the map would draw the gloss as ordinary inline content.
+                                // Rebuild only when the document actually changes; steady
+                                // frames keep their widgets and area references.
+                                inner.text_flow.clear_items();
                                 inner.set_text(cx, para);
                             }
                             inner.text_flow.selectable = !self.compact_layout;
@@ -5435,16 +5613,18 @@ impl Widget for ChapterList {
                         };
                     }
                     if let Some((start, end)) = selection_range {
+                        let prefix = textflow_selection_prefix_len(para);
+                        let source_len = readwise_core::vocab::annotate::rendered_text(para).len();
                         if item_id < start.0 || item_id > end.0 {
                             item.selection_clear();
                         } else if item_id == start.0 && item_id == end.0 {
-                            item.selection_set(start.1, end.1);
+                            item.selection_set(start.1 + prefix, end.1 + prefix);
                         } else if item_id == start.0 {
-                            item.selection_set(start.1, item.selection_text_len());
+                            item.selection_set(start.1 + prefix, source_len + prefix);
                         } else if item_id == end.0 {
-                            item.selection_set(0, end.1);
+                            item.selection_set(prefix, end.1 + prefix);
                         } else {
-                            item.selection_select_all();
+                            item.selection_set(prefix, source_len + prefix);
                         }
                     } else {
                         item.selection_clear();
