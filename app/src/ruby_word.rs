@@ -48,6 +48,28 @@ pub const WORD_COLOR_PRESETS: &[(&str, Option<(f32, f32, f32)>)] = &[
     ("橙", Some(GLOSS_PRESETS[2].1)),
 ];
 
+// TextFlow 的 InlineCode 背景在矩形左右各内缩 1px 并带 2px 圆角。
+// RubyWord 是独立 run，高亮跨过它时需要覆盖这个内缩区并与相邻 run 略微重叠。
+const HIGHLIGHT_JOIN_OUTSET: f64 = 2.0;
+const HIGHLIGHT_JOIN_INSET_OVERLAP: f64 = 1.5;
+
+fn highlight_join_rects(rect: Rect) -> [Rect; 2] {
+    let join_width = HIGHLIGHT_JOIN_OUTSET + HIGHLIGHT_JOIN_INSET_OVERLAP;
+    [
+        Rect {
+            pos: dvec2(rect.pos.x - HIGHLIGHT_JOIN_OUTSET, rect.pos.y),
+            size: dvec2(join_width, rect.size.y),
+        },
+        Rect {
+            pos: dvec2(
+                rect.pos.x + rect.size.x - HIGHLIGHT_JOIN_INSET_OVERLAP,
+                rect.pos.y,
+            ),
+            size: dvec2(join_width, rect.size.y),
+        },
+    ]
+}
+
 script_mod! {
     use mod.prelude.widgets.*
 
@@ -230,6 +252,24 @@ impl Widget for RubyWord {
             self.drawn_areas = tf.areas_tracker.areas[start..end].to_vec();
         }
 
+        // `<mark>` 遇到 `<ruby>` 会被拆成 MarkSpan / RubyWord / MarkSpan
+        // 三个独立背景。InlineCode 的圆角内缩会在 RubyWord 两侧露出正文底色；
+        // 只补绘连接带，不改变 padding、游标推进或断行宽度。
+        if let Some(slot) = self.highlight_slot {
+            self.draw_fill.color = crate::mark_span::hl_color(slot);
+            for area in &self.drawn_areas {
+                let rect = area.rect(cx);
+                // inline-code 路径还会登记宽度为 0 的 padding/margin area；
+                // 只有实际背景矩形同时具有有效宽高。
+                if rect.size.x <= 0.5 || rect.size.y <= 0.5 {
+                    continue;
+                }
+                for join in highlight_join_rects(rect) {
+                    self.draw_fill.draw_abs(cx, join);
+                }
+            }
+        }
+
         if !self.gloss.is_empty() {
             // 词在行尾折行时首段是个小残段，注音要锚在最宽的那段（词的主体）上
             let widest = self
@@ -349,5 +389,27 @@ impl Widget for RubyWord {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::highlight_join_rects;
+    use makepad_widgets::{dvec2, Rect};
+
+    #[test]
+    fn ruby_highlight_join_bands_overlap_both_sdf_edges() {
+        let source = Rect {
+            pos: dvec2(10.0, 20.0),
+            size: dvec2(30.0, 18.0),
+        };
+        let [left, right] = highlight_join_rects(source);
+
+        assert_eq!(left.pos, dvec2(8.0, 20.0));
+        assert_eq!(left.size, dvec2(3.5, 18.0));
+        assert_eq!(right.pos, dvec2(38.5, 20.0));
+        assert_eq!(right.size, dvec2(3.5, 18.0));
+        assert!(left.pos.x + left.size.x > source.pos.x + 1.0);
+        assert!(right.pos.x < source.pos.x + source.size.x - 1.0);
     }
 }
