@@ -5,9 +5,14 @@ use makepad_ai::{
     AiBackend, AiEvent, AiRequest, BackendConfig, Message, OpenAiBackend, RequestId, StreamDelta,
 };
 use makepad_widgets::makepad_draw::text::geom::Point as LayoutPoint;
+use makepad_widgets::makepad_draw::text::layouter::LaidoutText;
+use makepad_widgets::makepad_draw::text::selection::{
+    Cursor as LayoutCursor, Selection as LayoutSelection,
+};
 use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Instant;
@@ -384,9 +389,26 @@ fn needs_unified_reader_hit_test(html: &str) -> bool {
     html.to_ascii_lowercase().contains("<mark")
 }
 
+fn selection_range_in_block(
+    range: TextRange,
+    block_id: usize,
+    text_len: usize,
+) -> Option<(usize, usize)> {
+    let (start, end) = range;
+    if block_id < start.0 || block_id > end.0 {
+        return None;
+    }
+    let from = if block_id == start.0 { start.1 } else { 0 }.min(text_len);
+    let to = if block_id == end.0 { end.1 } else { text_len }.min(text_len);
+    (from < to).then_some((from, to))
+}
+
 #[cfg(test)]
 mod table_block_tests {
-    use super::{is_table_block, needs_unified_reader_hit_test, textflow_selection_prefix_len};
+    use super::{
+        is_table_block, needs_unified_reader_hit_test, selection_range_in_block,
+        textflow_selection_prefix_len, visual_selection_row_bounds,
+    };
 
     #[test]
     fn recognizes_only_top_level_table_blocks() {
@@ -415,6 +437,25 @@ mod table_block_tests {
             "<p>before <MARK>selected</MARK> after</p>"
         ));
         assert!(!needs_unified_reader_hit_test("<p>ordinary text</p>"));
+    }
+
+    #[test]
+    fn cross_block_selection_projects_to_visible_text_coordinates() {
+        let range = ((2, 4), (4, 7));
+        assert_eq!(selection_range_in_block(range, 1, 20), None);
+        assert_eq!(selection_range_in_block(range, 2, 20), Some((4, 20)));
+        assert_eq!(selection_range_in_block(range, 3, 12), Some((0, 12)));
+        assert_eq!(selection_range_in_block(range, 4, 20), Some((0, 7)));
+        assert_eq!(selection_range_in_block(range, 5, 20), None);
+    }
+
+    #[test]
+    fn adjacent_selected_rows_share_the_gap_boundary() {
+        let first = visual_selection_row_bounds(None, 0.0, 10.0, Some(20.0), 2.0);
+        let second = visual_selection_row_bounds(Some(10.0), 20.0, 30.0, None, 2.0);
+        assert_eq!(first, (-2.0, 15.0));
+        assert_eq!(second, (15.0, 32.0));
+        assert_eq!(first.1, second.0);
     }
 }
 
@@ -3614,6 +3655,7 @@ script_mod! {
         font_standard_bold_italic: theme.font_bold_italic{}
         font_monospace: theme.font_code{}
         html_default_inset: theme.space_1
+        draw_reader_selection.color: #0000
         list := PortalList{
             width: Fill height: Fill
             selectable: true
@@ -5093,6 +5135,8 @@ struct ChapterList {
     font_monospace: TextStyle,
     #[live]
     html_default_inset: f64,
+    #[live]
+    draw_reader_selection: DrawColor,
     /// 选区自跟踪（PortalList 未暴露区间 API，用公开的命中接口镜像）。
     /// 普通文字与原生选区同步；注音词/链接等交互内联文字由镜像投影绘制。
     #[rust]
@@ -5105,6 +5149,31 @@ struct ChapterList {
     touch_selection_uid: Option<u64>,
     #[rust]
     compact_layout: bool,
+}
+
+struct UnifiedReaderLayout {
+    laidout: Rc<LaidoutText>,
+    origin: DVec2,
+    font_scale: f32,
+    text_len: usize,
+}
+
+/// 把每行的选区扩展到相邻字形框之间的中线。相邻两行选中时，前一行的
+/// bottom 与后一行的 top 因而完全相同，不会在行距中留下未着色的细缝。
+fn visual_selection_row_bounds(
+    previous_glyph_bottom: Option<f32>,
+    glyph_top: f32,
+    glyph_bottom: f32,
+    next_glyph_top: Option<f32>,
+    edge_padding: f32,
+) -> (f32, f32) {
+    let top = previous_glyph_bottom
+        .map(|previous_bottom| (previous_bottom + glyph_top) * 0.5)
+        .unwrap_or(glyph_top - edge_padding);
+    let bottom = next_glyph_top
+        .map(|next_top| (glyph_bottom + next_top) * 0.5)
+        .unwrap_or(glyph_bottom + edge_padding);
+    (top.min(glyph_top), bottom.max(glyph_bottom))
 }
 
 impl ChapterList {
@@ -5147,19 +5216,17 @@ impl ChapterList {
         self.view.redraw(cx);
     }
 
-    /// `<mark>` 会把同一段拆成多个 TextFlow run。Makepad 逐 run 的命中使用
-    /// 跨行整体包围框，run 重叠时会错误地总选中前一个。这里把可见正文按
-    /// 当前阅读字体统一排版，仅用于逐视觉行定位字符，不改变实际富文本绘制。
-    fn unified_markup_hit_index(
+    /// 把富文本的可见正文按当前阅读字体统一排版。实际 Html 仍按各个富文本
+    /// run 绘制；统一布局只服务于精确命中，以及注音段落连续的选区底色。
+    fn unified_markup_layout(
         &self,
         cx: &mut Cx,
         widget: &WidgetRef,
         html_source: &str,
-        abs: DVec2,
-    ) -> Option<usize> {
+    ) -> Option<UnifiedReaderLayout> {
         let plain = readwise_core::vocab::annotate::rendered_text(html_source);
         if plain.is_empty() {
-            return Some(0);
+            return None;
         }
         let html_ref = widget.widget(cx, ids!(para_html));
         let rect = html_ref.area().rect(cx);
@@ -5199,12 +5266,14 @@ impl ChapterList {
 
         let saved_style = text_flow.draw_text.text_style.clone();
         let saved_max_lines = text_flow.draw_text.max_lines;
+        let font_scale = text_flow.draw_text.font_scale;
         let mut hit_style = if trimmed.starts_with("<h") {
             text_flow.text_style_bold.clone()
         } else {
             text_flow.text_style_normal.clone()
         };
         hit_style.font_size = text_flow.font_size * heading_scale;
+        let top_drop = hit_style.top_drop;
         text_flow.draw_text.text_style = hit_style;
         text_flow.draw_text.max_lines = 0;
         let max_width = (rect.size.x - padding_left - padding_right).max(1.0) as f32;
@@ -5221,20 +5290,132 @@ impl ChapterList {
         text_flow.draw_text.max_lines = saved_max_lines;
 
         if laidout.rows.is_empty() {
-            return Some(0);
+            return None;
         }
+        // TextFlow 在排版之后才通过 temp_y_shift 应用 top_drop。统一布局的
+        // 字符位置必须补上同一偏移，否则选区会整体停在实际文字的上方。
+        let text_y_shift = laidout
+            .rows
+            .first()
+            .and_then(|row| row.glyphs.first())
+            .map(|glyph| glyph.font_size_in_lpxs * top_drop)
+            .unwrap_or(0.0) as f64;
         let origin = rect.pos
             + dvec2(
                 padding_left,
-                padding_top + text_flow.font_size as f64 * heading_scale as f64 * block_margin_top,
+                padding_top
+                    + text_flow.font_size as f64 * heading_scale as f64 * block_margin_top
+                    + text_y_shift,
             );
-        let local = LayoutPoint::new((abs.x - origin.x) as f32, (abs.y - origin.y) as f32);
+        Some(UnifiedReaderLayout {
+            laidout,
+            origin,
+            font_scale,
+            text_len: plain.len(),
+        })
+    }
+
+    /// `<mark>` 会把同一段拆成多个 TextFlow run。Makepad 逐 run 的命中使用
+    /// 跨行整体包围框，run 重叠时会错误地总选中前一个，因此命中统一布局。
+    fn unified_markup_hit_index(
+        &self,
+        cx: &mut Cx,
+        widget: &WidgetRef,
+        html_source: &str,
+        abs: DVec2,
+    ) -> Option<usize> {
+        let layout = self.unified_markup_layout(cx, widget, html_source)?;
+        let local = LayoutPoint::new(
+            ((abs.x - layout.origin.x) / layout.font_scale as f64) as f32,
+            ((abs.y - layout.origin.y) / layout.font_scale as f64) as f32,
+        );
         Some(
-            laidout
+            layout
+                .laidout
                 .point_in_lpxs_to_cursor(local)
                 .index
-                .min(plain.len()),
+                .min(layout.text_len),
         )
+    }
+
+    /// RubyWord 是独立 continuation run，Makepad 为它生成的原生选区矩形不
+    /// 与前后正文共享行基线。含注音的段落改用统一布局绘制一次连续底色。
+    fn draw_unified_selection(
+        &mut self,
+        cx: &mut Cx2d,
+        widget: &WidgetRef,
+        html_source: &str,
+        range: (usize, usize),
+    ) {
+        let Some(layout) = self.unified_markup_layout(cx, widget, html_source) else {
+            return;
+        };
+        let start = range.0.min(layout.text_len);
+        let end = range.1.min(layout.text_len);
+        if start >= end {
+            return;
+        }
+        let selection = LayoutSelection {
+            anchor: LayoutCursor {
+                index: start,
+                prefer_next_row: false,
+            },
+            cursor: LayoutCursor {
+                index: end,
+                prefer_next_row: false,
+            },
+        };
+        let start_row = layout
+            .laidout
+            .cursor_to_position(selection.start())
+            .row_index;
+        let edge_padding_in_lpxs = 2.0 / layout.font_scale.max(f32::EPSILON);
+        for (row_offset, selection_rect) in layout
+            .laidout
+            .selection_rects(selection)
+            .into_iter()
+            .enumerate()
+        {
+            let row_index = start_row + row_offset;
+            let Some(row) = layout.laidout.rows.get(row_index) else {
+                continue;
+            };
+            let glyph_top = row.origin_in_lpxs.y - row.ascender_in_lpxs;
+            let glyph_bottom = row.origin_in_lpxs.y - row.descender_in_lpxs;
+            let previous_glyph_bottom = row_index.checked_sub(1).and_then(|previous_index| {
+                layout
+                    .laidout
+                    .rows
+                    .get(previous_index)
+                    .map(|previous| previous.origin_in_lpxs.y - previous.descender_in_lpxs)
+            });
+            let next_glyph_top = layout
+                .laidout
+                .rows
+                .get(row_index + 1)
+                .map(|next| next.origin_in_lpxs.y - next.ascender_in_lpxs);
+            let (visual_top, visual_bottom) = visual_selection_row_bounds(
+                previous_glyph_bottom,
+                glyph_top,
+                glyph_bottom,
+                next_glyph_top,
+                edge_padding_in_lpxs,
+            );
+            self.draw_reader_selection.draw_abs(
+                cx,
+                Rect {
+                    pos: layout.origin
+                        + dvec2(
+                            (selection_rect.rect_in_lpxs.origin.x * layout.font_scale) as f64,
+                            (visual_top * layout.font_scale) as f64,
+                        ),
+                    size: dvec2(
+                        (selection_rect.rect_in_lpxs.size.width * layout.font_scale) as f64,
+                        ((visual_bottom - visual_top) * layout.font_scale) as f64,
+                    ),
+                },
+            );
+        }
     }
 
     /// 命中可见块的 (块id, 正文字符下标)。点位在视口外或块间隙时吸附到
@@ -5527,6 +5708,7 @@ impl Widget for ChapterList {
             3 => 0xd9c9_6a88,
             _ => 0x7fb2_a688,
         });
+        self.draw_reader_selection.color = selection_color;
         let selection_range = *SEL_RANGE.read().unwrap();
         let normal_family = if reader_font == ReaderFont::Monospace {
             self.font_monospace.font_family.clone()
@@ -5597,7 +5779,15 @@ impl Widget for ChapterList {
                             inner.text_flow.font_size = reader_font_size;
                             inner.text_flow.font_color = reader_text_color;
                             inner.text_flow.draw_text.color = reader_text_color;
-                            inner.text_flow.draw_selection.color = selection_color;
+                            // RubyWord is drawn as a separate continuation run. Its
+                            // native selection rect can use a different row origin
+                            // from neighboring text, so gloss paragraphs draw one
+                            // unified selection overlay after the Html pass instead.
+                            inner.text_flow.draw_selection.color = if has_gloss {
+                                Vec4f::default()
+                            } else {
+                                selection_color
+                            };
                             inner.text_flow.draw_block.table_header_bg_color = reader_scene.field;
                             inner.text_flow.draw_block.table_border_color = reader_scene.border;
                             inner.text_flow.text_style_normal.font_family = normal_family.clone();
@@ -5630,6 +5820,17 @@ impl Widget for ChapterList {
                         item.selection_clear();
                     }
                     item.draw_all_unscoped(cx);
+                    if has_gloss {
+                        if let Some(range) = selection_range.and_then(|range| {
+                            selection_range_in_block(
+                                range,
+                                item_id,
+                                readwise_core::vocab::annotate::rendered_text(para).len(),
+                            )
+                        }) {
+                            self.draw_unified_selection(cx, &item, para, range);
+                        }
+                    }
                 }
             }
         }
