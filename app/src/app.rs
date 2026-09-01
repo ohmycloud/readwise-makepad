@@ -1879,6 +1879,10 @@ const SELECTION_POPUP_MAX_WIDTH: f64 = 520.0;
 const SELECTION_POPUP_SIDE_INSET: f64 = 12.0;
 const SELECTION_POPUP_GAP: f64 = 10.0;
 const SELECTION_POPUP_ESTIMATED_HEIGHT: f64 = 56.0;
+const WORD_CARD_MAX_WIDTH: f64 = 420.0;
+const WORD_CARD_SIDE_INSET: f64 = 12.0;
+const WORD_CARD_GAP: f64 = 10.0;
+const WORD_CARD_ESTIMATED_HEIGHT: f64 = 116.0;
 const LIBRARY_ACTION_MENU_MAX_WIDTH: f64 = 238.0;
 const LIBRARY_ACTION_MENU_ESTIMATED_HEIGHT: f64 = 238.0;
 
@@ -1904,6 +1908,29 @@ fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) ->
         above.clamp(min_y, max_y)
     };
     (dvec2(x, y), popup_width)
+}
+
+fn word_card_geometry(viewport: Rect, anchor: DVec2, card_height: f64) -> (DVec2, f64) {
+    let horizontal_inset = WORD_CARD_SIDE_INSET.min(viewport.size.x.max(0.0) * 0.25);
+    let vertical_inset = WORD_CARD_SIDE_INSET.min(viewport.size.y.max(0.0) * 0.25);
+    let card_width = WORD_CARD_MAX_WIDTH.min((viewport.size.x - horizontal_inset * 2.0).max(1.0));
+    let min_x = viewport.pos.x + horizontal_inset;
+    let max_x = (viewport.pos.x + viewport.size.x - horizontal_inset - card_width).max(min_x);
+    let x = (anchor.x - card_width * 0.5).clamp(min_x, max_x);
+
+    let card_height = card_height.max(1.0);
+    let min_y = viewport.pos.y + vertical_inset;
+    let max_y = (viewport.pos.y + viewport.size.y - vertical_inset - card_height).max(min_y);
+    let above = anchor.y - card_height - WORD_CARD_GAP;
+    let below = anchor.y + WORD_CARD_GAP;
+    let y = if above >= min_y {
+        above
+    } else if below <= max_y {
+        below
+    } else {
+        above.clamp(min_y, max_y)
+    };
+    (dvec2(x, y), card_width)
 }
 
 fn library_action_menu_geometry(viewport: Rect, anchor: Rect, menu_height: f64) -> (DVec2, f64) {
@@ -2431,6 +2458,28 @@ mod selection_popup_tests {
         };
         let (position, _) = selection_popup_geometry(viewport, dvec2(130.0, 50.0), 90.0);
         assert_eq!(position.y, 12.0);
+    }
+
+    #[test]
+    fn word_card_stays_near_the_clicked_word() {
+        let viewport = Rect {
+            pos: dvec2(100.0, 80.0),
+            size: dvec2(800.0, 600.0),
+        };
+        let (position, width) = word_card_geometry(viewport, dvec2(500.0, 400.0), 116.0);
+        assert_eq!(width, 420.0);
+        assert_eq!(position, dvec2(290.0, 274.0));
+    }
+
+    #[test]
+    fn word_card_flips_below_and_shrinks_on_mobile() {
+        let viewport = Rect {
+            pos: dvec2(20.0, 40.0),
+            size: dvec2(320.0, 500.0),
+        };
+        let (position, width) = word_card_geometry(viewport, dvec2(28.0, 55.0), 116.0);
+        assert_eq!(width, 296.0);
+        assert_eq!(position, dvec2(32.0, 65.0));
     }
 
     #[test]
@@ -4006,42 +4055,47 @@ script_mod! {
                                         }
                                     }
                                 }
-                            }
-                            word_card := RoundedView{
-                                visible: false
-                                width: Fill height: Fit
-                                margin: Inset{ left: 16 right: 16 bottom: 12 top: 4 }
-                                padding: 14
-                                flow: Down spacing: 10
-                                draw_bg.color: theme.color_bg_container
-                                draw_bg.border_radius: 10.0
-                                card_head := View{
-                                    width: Fill height: Fit
-                                    spacing: 14
-                                    align: Align{ y: 0.5 }
-                                    card_word := Label{
-                                        text: ""
-                                        draw_text.text_style.font_size: 17
-                                    }
-                                    card_gloss := Label{
+                                word_card := RoundedShadowView{
+                                    visible: false
+                                    width: 420 height: Fit
+                                    new_batch: true
+                                    padding: 14
+                                    flow: Down spacing: 10
+                                    draw_bg.color: theme.color_bg_container
+                                    draw_bg.border_color: theme.color_bg_highlight_inline
+                                    draw_bg.border_radius: 10.0
+                                    draw_bg.shadow_color: #0004
+                                    draw_bg.shadow_radius: 12.0
+                                    draw_bg.shadow_offset: vec2(0, 4)
+                                    card_head := View{
                                         width: Fill
-                                        text: ""
-                                        draw_text.color: theme.color_highlight
-                                        draw_text.text_style.font_size: 13
+                                        height: Fit
+                                        spacing: 14
+                                        align: Align{ y: 0.5 }
+                                        card_word := Label{
+                                            text: ""
+                                            draw_text.text_style.font_size: 17
+                                        }
+                                        card_gloss := Label{
+                                            width: Fill
+                                            text: ""
+                                            draw_text.color: theme.color_highlight
+                                            draw_text.text_style.font_size: 13
+                                        }
+                                        close_card_btn := ButtonFlat{ text: "关闭" }
                                     }
-                                    close_card_btn := ButtonFlat{ text: "关闭" }
-                                }
-                                card_foot := View{
-                                    width: Fill height: Fit
-                                    spacing: 14
-                                    align: Align{ y: 0.5 }
-                                    add_vocab_btn := ButtonFlat{ text: "加入生词本" }
-                                    know_btn := ButtonFlat{ text: "标为已认识" }
-                                    card_hint := Label{
-                                        width: Fill
-                                        text: ""
-                                        draw_text.color: theme.color_label_inner_inactive
-                                        draw_text.text_style.font_size: 9
+                                    card_foot := View{
+                                        width: Fill height: Fit
+                                        spacing: 14
+                                        align: Align{ y: 0.5 }
+                                        add_vocab_btn := ButtonFlat{ text: "加入生词本" }
+                                        know_btn := ButtonFlat{ text: "标为已认识" }
+                                        card_hint := Label{
+                                            width: Fill
+                                            text: ""
+                                            draw_text.color: theme.color_label_inner_inactive
+                                            draw_text.text_style.font_size: 9
+                                        }
                                     }
                                 }
                             }
@@ -6098,6 +6152,11 @@ pub struct App {
     selection_popup_anchor: Option<DVec2>,
     #[rust]
     pending_selection_popup_layout: bool,
+    /// 生词释义卡片与选区工具条一样由阅读器覆盖层定位，避免参与纵向正文布局。
+    #[rust]
+    word_card_anchor: Option<DVec2>,
+    #[rust]
+    pending_word_card_layout: bool,
     #[rust]
     on_reader_page: bool,
     #[rust]
@@ -8500,6 +8559,7 @@ impl App {
         };
         let restored_scroll = if scroll.is_finite() { scroll } else { 0.0 };
         self.clear_reader_selection(cx);
+        self.close_word_card(cx);
         self.close_note_composer(cx);
         self.chapter_idx = idx;
         CURRENT_CHAPTER.store(idx, std::sync::atomic::Ordering::Relaxed);
@@ -8979,6 +9039,52 @@ impl App {
         changed
     }
 
+    /// 将生词卡片锚定到被点击的注音词附近，并限制在正文视口内。
+    /// 首帧使用估算高度，绘制完成后再按卡片真实高度校正，避免闪到阅读器底部。
+    fn position_word_card(&self, cx: &mut Cx, use_measured_height: bool) -> bool {
+        let Some(anchor) = self.word_card_anchor else {
+            return false;
+        };
+        let viewport = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .area()
+            .clipped_rect(cx);
+        if viewport.size.x <= 0.0 || viewport.size.y <= 0.0 {
+            return false;
+        }
+        let card = self.ui.view(cx, ids!(word_card));
+        let measured_height = card.area().rect(cx).size.y;
+        let card_height = if use_measured_height && measured_height > 0.0 {
+            measured_height
+        } else {
+            WORD_CARD_ESTIMATED_HEIGHT
+        };
+        let (position, width) = word_card_geometry(viewport, anchor, card_height);
+        let Some(mut inner) = card.borrow_mut() else {
+            return false;
+        };
+        let old_position = inner.walk.abs_pos;
+        let old_width = match inner.walk.width {
+            Size::Fixed(value) => value,
+            _ => -1.0,
+        };
+        let changed = old_position
+            .map(|old| (old.x - position.x).abs() > 0.5 || (old.y - position.y).abs() > 0.5)
+            .unwrap_or(true)
+            || (old_width - width).abs() > 0.5;
+        inner.walk.abs_pos = Some(position);
+        inner.walk.width = Size::Fixed(width);
+        changed
+    }
+
+    fn close_word_card(&mut self, cx: &mut Cx) {
+        self.card = None;
+        self.word_card_anchor = None;
+        self.pending_word_card_layout = false;
+        self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
+    }
+
     fn clear_reader_selection(&mut self, cx: &mut Cx) {
         *SEL_RANGE.write().unwrap() = None;
         SELECTED_TEXT.write().unwrap().clear();
@@ -9268,6 +9374,7 @@ impl MatchEvent for App {
             && CURRENT_BOOK.read().unwrap().is_some()
             && chapter_list.scrolled(actions)
         {
+            self.close_word_card(cx);
             self.update_progress_label(cx);
             self.debounce_reader_progress_save(cx);
         }
@@ -9823,14 +9930,16 @@ impl MatchEvent for App {
                             localized("生词本里已有这个词", "This word is already in Vocabulary")
                         };
                         self.ui.label(cx, ids!(card_hint)).set_text(cx, hint);
+                        if self.word_card_anchor.is_some() {
+                            self.pending_word_card_layout = true;
+                        }
                         self.set_selection_hint(cx, hint);
                         if *added {
                             spawn_load_vocab();
                         }
                     }
                     CardAction::MarkedKnown => {
-                        self.card = None;
-                        self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
+                        self.close_word_card(cx);
                         self.refresh_current_chapter(cx);
                     }
                 }
@@ -10240,7 +10349,12 @@ impl MatchEvent for App {
                     self.ui.label(cx, ids!(status)).set_text(cx, &status);
                 }
             }
-            if let RubyWordAction::Clicked { word, gloss } = action.cast() {
+            if let RubyWordAction::Clicked {
+                word,
+                gloss,
+                anchor,
+            } = action.cast()
+            {
                 let word = word
                     .trim_end_matches(['.', ',', ';', ':', '!', '?'])
                     .to_string();
@@ -10249,6 +10363,9 @@ impl MatchEvent for App {
                 self.ui.label(cx, ids!(card_gloss)).set_text(cx, &gloss);
                 self.ui.label(cx, ids!(card_hint)).set_text(cx, "");
                 self.ui.widget(cx, ids!(word_card)).set_visible(cx, true);
+                self.word_card_anchor = Some(anchor);
+                self.position_word_card(cx, false);
+                self.pending_word_card_layout = true;
                 self.card = Some((word, lemma, gloss));
                 self.ui.redraw(cx);
             }
@@ -11014,8 +11131,7 @@ impl MatchEvent for App {
             self.sync_reader_panel_layout(cx);
         }
         if self.ui.button(cx, ids!(close_card_btn)).clicked(actions) {
-            self.card = None;
-            self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
+            self.close_word_card(cx);
             self.ui.redraw(cx);
         }
         if self.ui.button(cx, ids!(add_vocab_btn)).clicked(actions) {
@@ -11586,6 +11702,9 @@ impl AppMain for App {
                 if self.selection_popup_anchor.is_some() {
                     self.pending_selection_popup_layout = true;
                 }
+                if self.word_card_anchor.is_some() {
+                    self.pending_word_card_layout = true;
+                }
                 if self.library_action_anchor.is_some() {
                     self.pending_library_action_layout = true;
                 }
@@ -11642,6 +11761,12 @@ impl AppMain for App {
             if self.pending_selection_popup_layout {
                 self.pending_selection_popup_layout = false;
                 if self.position_selection_popup(cx, true) {
+                    self.ui.redraw(cx);
+                }
+            }
+            if self.pending_word_card_layout {
+                self.pending_word_card_layout = false;
+                if self.position_word_card(cx, true) {
                     self.ui.redraw(cx);
                 }
             }

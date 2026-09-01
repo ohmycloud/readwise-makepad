@@ -71,6 +71,8 @@ pub enum RubyWordAction {
     Clicked {
         word: String,
         gloss: String,
+        /// 点击/长按发生时的屏幕坐标，供阅读器覆盖层就近摆放释义卡片。
+        anchor: DVec2,
     },
 }
 
@@ -314,12 +316,13 @@ impl Widget for RubyWord {
                 Hit::FingerHoverIn(_) => {
                     cx.set_cursor(MouseCursor::Hand);
                 }
-                Hit::FingerLongPress(_) => {
+                Hit::FingerLongPress(lp) => {
                     cx.widget_action(
                         self.widget_uid(),
                         RubyWordAction::Clicked {
                             word: self.word.clone(),
                             gloss: self.gloss.clone(),
+                            anchor: lp.abs,
                         },
                     );
                 }
@@ -330,6 +333,7 @@ impl Widget for RubyWord {
                             RubyWordAction::Clicked {
                                 word: self.word.clone(),
                                 gloss: self.gloss.clone(),
+                                anchor: fu.abs,
                             },
                         );
                     }
