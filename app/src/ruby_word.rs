@@ -192,19 +192,27 @@ impl Widget for RubyWord {
             });
         }
         tf.areas_tracker.push_tracker();
-        let word_background = self
-            .highlight_slot
-            .map(crate::mark_span::hl_color)
-            .or_else(|| {
-                WORD_BG.read().unwrap().map(|(r, g, b, a)| Vec4f {
+        if let Some(slot) = self.highlight_slot {
+            crate::mark_span::draw_text_with_background(
+                tf,
+                cx,
+                &self.word,
+                crate::mark_span::hl_color(slot),
+                true,
+            );
+        } else if let Some((r, g, b, a)) = *WORD_BG.read().unwrap() {
+            crate::mark_span::draw_text_with_background(
+                tf,
+                cx,
+                &self.word,
+                Vec4f {
                     x: r,
                     y: g,
                     z: b,
                     w: a,
-                })
-            });
-        if let Some(background) = word_background {
-            crate::mark_span::draw_text_with_background(tf, cx, &self.word, background);
+                },
+                false,
+            );
         } else {
             tf.draw_text(cx, &self.word);
         }
