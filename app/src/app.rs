@@ -385,54 +385,47 @@ fn textflow_selection_prefix_len(html: &str) -> usize {
     ))
 }
 
-fn needs_unified_reader_hit_test(html: &str) -> bool {
+/// 连续正文使用一次稳定的纯文本布局做鼠标命中，避免 TextFlow 按行内 run
+/// 记录的 SelectionTracker Area 在选区重绘/窗口缩放后出现重叠或旧引用。
+/// 表格、列表、引用和图片有额外的几何结构，仍交给实际 widget 命中。
+fn supports_unified_reader_hit_test(html: &str) -> bool {
     let mut remaining = html;
-    let mut has_fragmented_text = false;
-    let mut has_embedded_visual = false;
     while let Some(tag_start) = remaining.find('<') {
         remaining = &remaining[tag_start + 1..];
-        let candidate = remaining
-            .trim_start()
-            .strip_prefix('/')
-            .unwrap_or(remaining.trim_start())
-            .trim_start();
+        let trimmed = remaining.trim_start();
+        let candidate = trimmed.strip_prefix('/').unwrap_or(trimmed).trim_start();
         let name_end = candidate
             .find(|ch: char| !ch.is_ascii_alphanumeric())
             .unwrap_or(candidate.len());
-        let name = &candidate[..name_end];
-        let name = name.to_ascii_lowercase();
-        if matches!(name.as_str(), "img" | "image" | "svg") {
-            // A plain-text layout cannot represent the horizontal space
-            // occupied by an inline visual. Keep the widget-aware path for
-            // these mixed-media blocks instead of shifting every later index.
-            has_embedded_visual = true;
-        } else if matches!(
+        let name = candidate[..name_end].to_ascii_lowercase();
+        if matches!(
             name.as_str(),
-            // Each of these changes TextFlow state or enters a custom/link
-            // widget, splitting one visual line into independently laid-out
-            // selection segments.
-            "a" | "b"
-                | "strong"
-                | "i"
-                | "em"
-                | "code"
-                | "u"
-                | "del"
-                | "s"
-                | "strike"
-                | "sub"
-                | "sup"
-                | "mark"
-                | "ruby"
+            "img"
+                | "image"
+                | "svg"
+                | "table"
+                | "thead"
+                | "tbody"
+                | "tr"
+                | "th"
+                | "td"
+                | "ul"
+                | "ol"
+                | "li"
+                | "blockquote"
+                | "pre"
+                | "hr"
+                | "details"
+                | "summary"
         ) {
-            has_fragmented_text = true;
+            return false;
         }
         let Some(tag_end) = remaining.find('>') else {
             break;
         };
         remaining = &remaining[tag_end + 1..];
     }
-    has_fragmented_text && !has_embedded_visual
+    true
 }
 
 fn selection_range_in_block(
@@ -475,7 +468,7 @@ fn highlight_range_in_block(
 #[cfg(test)]
 mod table_block_tests {
     use super::{
-        is_table_block, needs_unified_reader_hit_test, selection_range_in_block,
+        is_table_block, selection_range_in_block, supports_unified_reader_hit_test,
         textflow_selection_prefix_len, visual_selection_row_bounds,
     };
 
@@ -501,25 +494,36 @@ mod table_block_tests {
     }
 
     #[test]
-    fn fragmented_inline_runs_use_unified_reader_hit_testing() {
-        assert!(needs_unified_reader_hit_test(
+    fn continuous_reader_blocks_use_stable_unified_hit_testing() {
+        assert!(supports_unified_reader_hit_test(
             "<p>before <MARK>selected</MARK> after</p>"
         ));
-        assert!(needs_unified_reader_hit_test(
+        assert!(supports_unified_reader_hit_test(
             "<p>before <em>italic</em> after</p>"
         ));
-        assert!(needs_unified_reader_hit_test(
+        assert!(supports_unified_reader_hit_test(
             "<p>before <ruby t='word'>vocabulary</ruby> after</p>"
         ));
-        assert!(needs_unified_reader_hit_test(
+        assert!(supports_unified_reader_hit_test(
             "<p>before <a href='chapter.xhtml'>link</a> after</p>"
         ));
-        assert!(!needs_unified_reader_hit_test("<p>ordinary text</p>"));
-        assert!(!needs_unified_reader_hit_test(
+        assert!(supports_unified_reader_hit_test("<p>ordinary text</p>"));
+        assert!(supports_unified_reader_hit_test("plain text"));
+        assert!(supports_unified_reader_hit_test(
+            "<strong>standalone text</strong>"
+        ));
+        assert!(!supports_unified_reader_hit_test(
             "<p>before <image>name</image> after</p>"
         ));
-        assert!(!needs_unified_reader_hit_test(
+        assert!(!supports_unified_reader_hit_test(
             "<p><em>caption</em><img src='figure.png'/></p>"
+        ));
+        assert!(!supports_unified_reader_hit_test(
+            "<blockquote><p>quoted</p></blockquote>"
+        ));
+        assert!(!supports_unified_reader_hit_test("<ul><li>item</li></ul>"));
+        assert!(!supports_unified_reader_hit_test(
+            "<table><tr><td>cell</td></tr></table>"
         ));
     }
 
@@ -2062,6 +2066,15 @@ const WORD_CARD_ESTIMATED_HEIGHT: f64 = 116.0;
 const LIBRARY_ACTION_MENU_MAX_WIDTH: f64 = 238.0;
 const LIBRARY_ACTION_MENU_ESTIMATED_HEIGHT: f64 = 238.0;
 
+fn selection_popup_captures_pointer(
+    popup_open: bool,
+    selection_exists: bool,
+    popup_rect: Rect,
+    abs: DVec2,
+) -> bool {
+    popup_open && selection_exists && popup_rect.contains(abs)
+}
+
 fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) -> (DVec2, f64) {
     let horizontal_inset = SELECTION_POPUP_SIDE_INSET.min(viewport.size.x.max(0.0) * 0.25);
     let vertical_inset = SELECTION_POPUP_SIDE_INSET.min(viewport.size.y.max(0.0) * 0.25);
@@ -2587,6 +2600,24 @@ mod highlight_overlap_tests {
 #[cfg(test)]
 mod selection_popup_tests {
     use super::*;
+
+    #[test]
+    fn hidden_popup_never_captures_using_its_stale_draw_rect() {
+        let stale_rect = Rect {
+            pos: dvec2(100.0, 100.0),
+            size: dvec2(520.0, 56.0),
+        };
+        let pointer = dvec2(200.0, 120.0);
+        assert!(!selection_popup_captures_pointer(
+            false, true, stale_rect, pointer,
+        ));
+        assert!(selection_popup_captures_pointer(
+            true, true, stale_rect, pointer,
+        ));
+        assert!(!selection_popup_captures_pointer(
+            true, false, stale_rect, pointer,
+        ));
+    }
 
     #[test]
     fn popup_prefers_above_selection_and_stays_inside_viewport() {
@@ -5245,6 +5276,13 @@ fn visual_selection_row_bounds(
 }
 
 impl ChapterList {
+    fn reset_selection_gesture(&mut self) {
+        self.sel_anchor = None;
+        self.selecting = false;
+        self.last_abs = None;
+        self.touch_selection_uid = None;
+    }
+
     fn set_compact_layout(&mut self, cx: &mut Cx, compact_layout: bool) {
         if self.compact_layout == compact_layout {
             return;
@@ -5276,8 +5314,7 @@ impl ChapterList {
             inner.selectable = !compact_layout;
             inner.clear_selection(cx);
         }
-        self.selecting = false;
-        self.touch_selection_uid = None;
+        self.reset_selection_gesture();
         *SEL_RANGE.write().unwrap() = None;
         SELECTED_TEXT.write().unwrap().clear();
         Cx::post_action(SelAction::Hide);
@@ -5383,9 +5420,8 @@ impl ChapterList {
         })
     }
 
-    /// 斜体、粗体、链接、注音和 `<mark>` 都会把同一段拆成多个 TextFlow run。
-    /// Makepad 逐 run 的命中使用跨行整体包围框，run 重叠时会错误地总选中
-    /// 前一个，因此这些段落统一按连续的可见正文布局命中。
+    /// 正文统一按连续的可见文本布局命中，不读取 TextFlow 每次重绘生成的
+    /// SelectionTracker Area。这样重复选择、取消和窗口缩放都使用同一套坐标。
     fn unified_markup_hit_index(
         &self,
         cx: &mut Cx,
@@ -5526,7 +5562,7 @@ impl ChapterList {
                     .get(*id)
                     .and_then(Option::as_ref)
                     .is_some();
-                let char_idx = if needs_unified_reader_hit_test(paragraph) && !is_code {
+                let char_idx = if supports_unified_reader_hit_test(paragraph) && !is_code {
                     self.unified_markup_hit_index(cx, widget, paragraph, abs)?
                 } else {
                     widget
@@ -5628,8 +5664,7 @@ impl ChapterList {
     }
 
     fn finish_selection(&mut self) {
-        self.selecting = false;
-        self.touch_selection_uid = None;
+        let popup_anchor = self.last_abs;
         let range = *SEL_RANGE.read().unwrap();
         let non_empty = range.map(|(a, b)| a != b).unwrap_or(false);
         if let Some(range) = range.filter(|(a, b)| a != b) {
@@ -5639,12 +5674,10 @@ impl ChapterList {
                     range,
                 );
         }
-        if std::env::var("SEL_DEBUG").is_ok() {
-            eprintln!("[SEL] up: range={:?} show={}", range, non_empty);
-        }
+        self.reset_selection_gesture();
         Cx::post_action(if non_empty {
             SelAction::Show {
-                anchor: self.last_abs,
+                anchor: popup_anchor,
             }
         } else {
             SelAction::Hide
@@ -5661,24 +5694,20 @@ impl ChapterList {
                 if !list.area().rect(cx).contains(e.abs) {
                     return;
                 }
-                if std::env::var("SEL_DEBUG").is_ok() {
-                    eprintln!("[SEL] down abs={:?}", e.abs);
-                }
                 *SEL_RANGE.write().unwrap() = None;
                 SELECTED_TEXT.write().unwrap().clear();
-                self.selecting = false;
-                self.sel_anchor = None;
+                self.reset_selection_gesture();
                 self.last_abs = Some(e.abs);
                 Cx::post_action(SelAction::Hide);
+                // 清除上一轮原生选区的 item 状态后再建立新锚点，避免快速
+                // “选择→取消→再选择”时旧选区 Area 留到下一次完整 Draw。
+                self.apply_visible_selection(cx);
                 // Inline text widgets (ruby words and links) must keep receiving
                 // clicks, but they are also valid text-selection starting points.
                 // Their FingerUp `was_tap()` check distinguishes a click from a drag.
                 if let Some(hit) = self.hit_block_char(cx, e.abs) {
                     self.sel_anchor = Some(hit);
                     self.selecting = true;
-                }
-                if std::env::var("SEL_DEBUG").is_ok() {
-                    eprintln!("[SEL] down: anchor={:?}", self.sel_anchor);
                 }
             }
             Event::MouseMove(e) => {
@@ -9585,14 +9614,16 @@ impl App {
     fn clear_reader_selection(&mut self, cx: &mut Cx) {
         *SEL_RANGE.write().unwrap() = None;
         SELECTED_TEXT.write().unwrap().clear();
+        SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
         self.selection_popup_anchor = None;
         self.pending_selection_popup_layout = false;
         self.reset_selection_action_hover(cx);
         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
-        let list = self
-            .ui
-            .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list));
+        let chapter_list = self.ui.widget(cx, ids!(chapter_list));
+        if let Some(mut inner) = chapter_list.borrow_mut::<ChapterList>() {
+            inner.reset_selection_gesture();
+        }
+        let list = chapter_list.portal_list(cx, ids!(list));
         if let Some(mut inner) = list.borrow_mut() {
             inner.clear_selection(cx);
         };
@@ -10464,6 +10495,7 @@ impl MatchEvent for App {
                         self.set_selection_hint(cx, "");
                     }
                     SelAction::Hide => {
+                        SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
                         self.selection_popup_anchor = None;
                         self.pending_selection_popup_layout = false;
                         self.reset_selection_action_hover(cx);
@@ -12062,13 +12094,20 @@ impl AppMain for App {
         }
         let reader_swipe = self.track_reader_swipe(cx, event);
         if let Event::MouseDown(e) = event {
-            let popup_captures_pointer = SEL_RANGE.read().unwrap().is_some()
-                && self
-                    .ui
-                    .widget(cx, ids!(selection_popup))
-                    .area()
-                    .clipped_rect(cx)
-                    .contains(e.abs);
+            let selection_popup_open = self.selection_popup_anchor.is_some()
+                && self.ui.widget(cx, ids!(sel_bar)).visible();
+            let selection_popup_rect = self
+                .ui
+                .widget(cx, ids!(selection_popup))
+                .area()
+                .clipped_rect(cx);
+            let selection_exists = SEL_RANGE.read().unwrap().is_some();
+            let popup_captures_pointer = selection_popup_captures_pointer(
+                selection_popup_open,
+                selection_exists,
+                selection_popup_rect,
+                e.abs,
+            );
             SELECTION_POPUP_POINTER.store(popup_captures_pointer, Ordering::Relaxed);
         }
         let wire_outcome = self
