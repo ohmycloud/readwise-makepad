@@ -6,12 +6,10 @@ use makepad_ai::{
 };
 use makepad_widgets::makepad_draw::text::geom::Point as LayoutPoint;
 use makepad_widgets::makepad_draw::text::layouter::LaidoutText;
-use makepad_widgets::makepad_draw::text::selection::{
-    Cursor as LayoutCursor, Selection as LayoutSelection,
-};
 use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
@@ -442,6 +440,42 @@ fn selection_range_in_block(
     (from < to).then_some((from, to))
 }
 
+fn ordered_selection_range(anchor: TextPoint, cursor: TextPoint) -> TextRange {
+    if cursor < anchor {
+        (cursor, anchor)
+    } else {
+        (anchor, cursor)
+    }
+}
+
+/// Choose between TextFlow's real rich-text hit and the continuous fallback.
+///
+/// The native result owns normal movement because it was produced by the exact
+/// runs that are visible on screen. The fallback is only allowed to take over
+/// when the native result moves backwards (or remains stuck despite a real
+/// pointer move) while the gesture is moving forwards, and vice versa. This
+/// preserves exact visual-line mapping without getting trapped at an italic,
+/// link, mark, or RubyWord run boundary.
+fn choose_reader_hit_index(
+    native: usize,
+    fallback: usize,
+    previous: usize,
+    forward: bool,
+    pointer_moved: bool,
+) -> usize {
+    if forward {
+        if native > previous || (native == previous && !pointer_moved) {
+            native
+        } else {
+            fallback.max(previous)
+        }
+    } else if native < previous || (native == previous && !pointer_moved) {
+        native
+    } else {
+        fallback.min(previous)
+    }
+}
+
 fn highlight_range_in_block(
     highlight: &readwise_core::books::Highlight,
     block_id: usize,
@@ -468,9 +502,12 @@ fn highlight_range_in_block(
 #[cfg(test)]
 mod table_block_tests {
     use super::{
-        is_table_block, selection_range_in_block, supports_unified_reader_hit_test,
+        choose_reader_hit_index, is_table_block, normalize_rich_selection_rects,
+        ordered_selection_range, reader_geometry_capture_policy, reader_geometry_width_is_stable,
+        reader_markup_available_width, selection_range_in_block, supports_unified_reader_hit_test,
         textflow_selection_prefix_len, visual_selection_row_bounds,
     };
+    use makepad_widgets::{dvec2, Rect};
 
     #[test]
     fn recognizes_only_top_level_table_blocks() {
@@ -538,12 +575,129 @@ mod table_block_tests {
     }
 
     #[test]
+    fn release_cursor_replaces_a_stale_last_move_across_blocks() {
+        let anchor = (2, 4);
+        let stale_move = (2, 18);
+        let release = (4, 7);
+        assert_eq!(
+            ordered_selection_range(anchor, stale_move),
+            (anchor, stale_move)
+        );
+
+        let final_range = ordered_selection_range(anchor, release);
+        assert_eq!(final_range, (anchor, release));
+        assert_eq!(selection_range_in_block(final_range, 2, 20), Some((4, 20)));
+        assert_eq!(selection_range_in_block(final_range, 3, 12), Some((0, 12)));
+        assert_eq!(selection_range_in_block(final_range, 4, 20), Some((0, 7)));
+    }
+
+    #[test]
+    fn real_rich_text_hit_owns_visual_line_changes() {
+        // The continuous fallback still thinks the pointer is on the preceding
+        // visual line. A progressing native hit must win.
+        assert_eq!(choose_reader_hit_index(42, 31, 30, true, true), 42);
+    }
+
+    #[test]
+    fn continuous_fallback_only_bridges_a_stuck_inline_run() {
+        assert_eq!(choose_reader_hit_index(30, 36, 30, true, true), 36);
+        assert_eq!(choose_reader_hit_index(30, 36, 30, true, false), 30);
+        assert_eq!(choose_reader_hit_index(30, 24, 30, false, true), 24);
+    }
+
+    #[test]
+    fn rich_selection_merges_and_bottom_aligns_a_raised_ruby_fragment() {
+        let rects = normalize_rich_selection_rects(&[
+            Rect {
+                pos: dvec2(10.0, 20.0),
+                size: dvec2(30.0, 14.0),
+            },
+            Rect {
+                pos: dvec2(40.0, 12.0),
+                size: dvec2(20.0, 14.0),
+            },
+            Rect {
+                pos: dvec2(60.0, 20.0),
+                size: dvec2(35.0, 14.0),
+            },
+        ]);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].pos, dvec2(10.0, 18.0));
+        assert_eq!(rects[0].size, dvec2(85.0, 18.0));
+    }
+
+    #[test]
+    fn rich_selection_joins_the_vertical_gap_between_actual_wrapped_rows() {
+        let rects = normalize_rich_selection_rects(&[
+            Rect {
+                pos: dvec2(50.0, 20.0),
+                size: dvec2(50.0, 14.0),
+            },
+            Rect {
+                pos: dvec2(10.0, 40.0),
+                size: dvec2(70.0, 14.0),
+            },
+        ]);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].pos.y + rects[0].size.y, rects[1].pos.y);
+    }
+
+    #[test]
+    fn resized_portal_item_must_stabilize_before_geometry_is_cached() {
+        assert!(!reader_geometry_width_is_stable(720.0, 540.0));
+        assert!(!reader_geometry_width_is_stable(0.0, 540.0));
+        assert!(reader_geometry_width_is_stable(540.0, 540.25));
+    }
+
+    #[test]
+    fn live_drag_paints_immediately_while_persistent_cache_waits() {
+        let current = Some((12, 38));
+        assert_eq!(
+            reader_geometry_capture_policy(current, current, false),
+            (true, false)
+        );
+        assert_eq!(
+            reader_geometry_capture_policy(current, current, true),
+            (true, true)
+        );
+    }
+
+    #[test]
     fn adjacent_selected_rows_share_the_gap_boundary() {
         let first = visual_selection_row_bounds(None, 0.0, 10.0, Some(20.0), 2.0);
         let second = visual_selection_row_bounds(Some(10.0), 20.0, 30.0, None, 2.0);
         assert_eq!(first, (-2.0, 15.0));
         assert_eq!(second, (15.0, 32.0));
         assert_eq!(first.1, second.0);
+    }
+
+    #[test]
+    fn reader_overlay_uses_fill_host_when_html_area_is_content_sized() {
+        let host = Rect {
+            pos: dvec2(40.0, 20.0),
+            size: dvec2(720.0, 120.0),
+        };
+        let stale_content_area = Rect {
+            pos: dvec2(40.0, 20.0),
+            size: dvec2(318.0, 120.0),
+        };
+        assert_eq!(
+            reader_markup_available_width(host, stale_content_area, 0.0, 0.0),
+            720.0
+        );
+    }
+
+    #[test]
+    fn reader_overlay_keeps_html_width_when_it_extends_past_host() {
+        let host = Rect {
+            pos: dvec2(40.0, 20.0),
+            size: dvec2(640.0, 120.0),
+        };
+        let html = Rect {
+            pos: dvec2(48.0, 20.0),
+            size: dvec2(660.0, 120.0),
+        };
+        assert_eq!(reader_markup_available_width(host, html, 8.0, 8.0), 644.0);
     }
 }
 
@@ -5241,6 +5395,10 @@ struct ChapterList {
     #[rust]
     sel_anchor: Option<(usize, usize)>,
     #[rust]
+    sel_cursor: Option<(usize, usize)>,
+    #[rust]
+    sel_anchor_abs: Option<DVec2>,
+    #[rust]
     selecting: bool,
     #[rust]
     last_abs: Option<DVec2>,
@@ -5248,6 +5406,200 @@ struct ChapterList {
     touch_selection_uid: Option<u64>,
     #[rust]
     compact_layout: bool,
+    /// TextFlow 本帧真实选区矩形，按正文块/范围/排版签名缓存为 item 相对坐标。
+    /// 当前选区与保存后的永久高亮共用它，禁止再用另一套纯文本重排几何。
+    #[rust]
+    range_geometry_cache: HashMap<ReaderRangeGeometryKey, Vec<Rect>>,
+    /// 上一次完成绘制后各段落的真实宽度。PortalList 当前重绘开始后，旧 Area
+    /// 可能暂时失效，因此不能直接把 Area 当作可靠的上一帧宽度来源。
+    #[rust]
+    item_layout_widths: HashMap<(usize, usize), f64>,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct ReaderRangeGeometryKey {
+    chapter: usize,
+    block: usize,
+    start: usize,
+    end: usize,
+    viewport_width_half_px: i64,
+    font_size_bits: u32,
+    line_spacing_bits: u32,
+    font_kind: u8,
+    source_hash: u64,
+}
+
+fn reader_source_hash(source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn reader_range_geometry_key(
+    chapter: usize,
+    block: usize,
+    range: (usize, usize),
+    viewport_width: f64,
+    font_size: f32,
+    line_spacing: f32,
+    font: ReaderFont,
+    source: &str,
+) -> ReaderRangeGeometryKey {
+    ReaderRangeGeometryKey {
+        chapter,
+        block,
+        start: range.0,
+        end: range.1,
+        viewport_width_half_px: (viewport_width * 2.0).round() as i64,
+        font_size_bits: font_size.to_bits(),
+        line_spacing_bits: line_spacing.to_bits(),
+        font_kind: u8::from(font == ReaderFont::Monospace),
+        source_hash: reader_source_hash(source),
+    }
+}
+
+fn reader_geometry_width_is_stable(before: f64, after: f64) -> bool {
+    before > 0.0 && after > 0.0 && (before - after).abs() <= 0.5
+}
+
+fn reader_geometry_capture_policy(
+    probe: Option<(usize, usize)>,
+    current: Option<(usize, usize)>,
+    width_stable: bool,
+) -> (bool, bool) {
+    // Live selection is always drawn immediately. Only reuse across frames is
+    // gated on layout stability.
+    (current.is_some() && probe == current, width_stable)
+}
+
+/// Read the rectangle instances that TextFlow just submitted through its
+/// transparent DrawColor batch. This uses public draw-batch metadata and never
+/// reaches into TextFlow's private SelectionTracker.
+fn captured_draw_color_rects(cx: &Cx2d, draw: &DrawColor) -> Vec<Rect> {
+    let Some(many) = draw.draw_super.many_instances.as_ref() else {
+        return Vec::new();
+    };
+    let Some(shader_id) = draw.draw_super.draw_vars.draw_shader_id else {
+        return Vec::new();
+    };
+    let mapping = &cx.draw_shaders[shader_id.index].mapping;
+    let (Some(rect_pos), Some(rect_size)) = (mapping.rect_pos, mapping.rect_size) else {
+        return Vec::new();
+    };
+    let stride = mapping.instances.total_slots;
+    if stride == 0 {
+        return Vec::new();
+    }
+    let start = many.instance_area.instance_offset;
+    if start >= many.instances.len() {
+        return Vec::new();
+    }
+    let mut rects = Vec::new();
+    for base in (start..many.instances.len()).step_by(stride) {
+        if base + rect_size + 1 >= many.instances.len()
+            || base + rect_pos + 1 >= many.instances.len()
+        {
+            break;
+        }
+        let rect = Rect {
+            pos: dvec2(
+                many.instances[base + rect_pos] as f64,
+                many.instances[base + rect_pos + 1] as f64,
+            ),
+            size: dvec2(
+                many.instances[base + rect_size] as f64,
+                many.instances[base + rect_size + 1] as f64,
+            ),
+        };
+        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+            rects.push(rect);
+        }
+    }
+    rects
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReaderSelectionLine {
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+    max_height: f64,
+}
+
+/// Merge TextFlow's per-run selection rectangles into visual lines.
+///
+/// Different rich-text runs can report slightly different vertical origins
+/// (most visibly RubyWord). Source-order plus horizontal continuation tells us
+/// that they are on the same visual line. The line is then bottom-aligned and
+/// painted as one continuous strip, also filling spaces between adjacent runs.
+fn normalize_rich_selection_rects(rects: &[Rect]) -> Vec<Rect> {
+    let mut lines: Vec<ReaderSelectionLine> = Vec::new();
+    for rect in rects
+        .iter()
+        .copied()
+        .filter(|rect| rect.size.x > 0.0 && rect.size.y > 0.0)
+    {
+        let right = rect.pos.x + rect.size.x;
+        let bottom = rect.pos.y + rect.size.y;
+        if let Some(line) = lines.last_mut() {
+            let center = rect.pos.y + rect.size.y * 0.5;
+            let line_center = (line.top + line.bottom) * 0.5;
+            let vertical_tolerance = line.max_height.max(rect.size.y) * 1.05;
+            let continues_horizontally = rect.pos.x + 3.0 >= line.right;
+            if continues_horizontally && (center - line_center).abs() <= vertical_tolerance {
+                line.left = line.left.min(rect.pos.x);
+                line.right = line.right.max(right);
+                line.top = line.top.min(rect.pos.y);
+                line.bottom = line.bottom.max(bottom);
+                line.max_height = line.max_height.max(rect.size.y);
+                continue;
+            }
+        }
+        lines.push(ReaderSelectionLine {
+            left: rect.pos.x,
+            right,
+            top: rect.pos.y,
+            bottom,
+            max_height: rect.size.y,
+        });
+    }
+
+    // A ruby/italic fragment may be vertically raised, while neighboring prose
+    // gives the real baseline. Bottom-align every fragment merged into that line.
+    for line in &mut lines {
+        line.top = line.bottom - line.max_height;
+    }
+
+    let mut out = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        let previous_bottom = index.checked_sub(1).map(|i| lines[i].bottom);
+        let next_top = lines.get(index + 1).map(|next| next.top);
+        let top = previous_bottom
+            .map(|bottom| (bottom + line.top) * 0.5)
+            .unwrap_or(line.top - 2.0);
+        let bottom = next_top
+            .map(|top| (line.bottom + top) * 0.5)
+            .unwrap_or(line.bottom + 2.0);
+        out.push(Rect {
+            pos: dvec2(line.left, top.min(line.top)),
+            size: dvec2(
+                (line.right - line.left).max(1.0),
+                (bottom.max(line.bottom) - top.min(line.top)).max(1.0),
+            ),
+        });
+    }
+    out
+}
+
+fn rects_relative_to(rects: &[Rect], origin: DVec2) -> Vec<Rect> {
+    rects
+        .iter()
+        .map(|rect| Rect {
+            pos: rect.pos - origin,
+            size: rect.size,
+        })
+        .collect()
 }
 
 struct UnifiedReaderLayout {
@@ -5259,6 +5611,7 @@ struct UnifiedReaderLayout {
 
 /// 把每行的选区扩展到相邻字形框之间的中线。相邻两行选中时，前一行的
 /// bottom 与后一行的 top 因而完全相同，不会在行距中留下未着色的细缝。
+#[cfg(test)]
 fn visual_selection_row_bounds(
     previous_glyph_bottom: Option<f32>,
     glyph_top: f32,
@@ -5275,9 +5628,26 @@ fn visual_selection_row_bounds(
     (top.min(glyph_top), bottom.max(glyph_bottom))
 }
 
+/// Html/TextFlow 的 Area 在含自定义内联 widget（例如 RubyWord）时可能只反映
+/// 当前已使用的内容宽度。阅读段落自身是 Fill，统一命中/着色必须以宿主段落的
+/// 右边界为准，否则纯文本覆盖层会比正文更早换行，只覆盖视觉行的左半段。
+fn reader_markup_available_width(
+    host_rect: Rect,
+    html_rect: Rect,
+    padding_left: f64,
+    padding_right: f64,
+) -> f32 {
+    let host_right = host_rect.pos.x + host_rect.size.x;
+    let html_right = html_rect.pos.x + html_rect.size.x;
+    let content_right = host_right.max(html_right);
+    (content_right - html_rect.pos.x - padding_left - padding_right).max(1.0) as f32
+}
+
 impl ChapterList {
     fn reset_selection_gesture(&mut self) {
         self.sel_anchor = None;
+        self.sel_cursor = None;
+        self.sel_anchor_abs = None;
         self.selecting = false;
         self.last_abs = None;
         self.touch_selection_uid = None;
@@ -5335,6 +5705,7 @@ impl ChapterList {
         }
         let html_ref = widget.widget(cx, ids!(para_html));
         let rect = html_ref.area().rect(cx);
+        let host_rect = widget.area().rect(cx);
         let mut html = html_ref.borrow_mut::<Html>()?;
         let text_flow = &mut html.text_flow;
 
@@ -5381,7 +5752,7 @@ impl ChapterList {
         let top_drop = hit_style.top_drop;
         text_flow.draw_text.text_style = hit_style;
         text_flow.draw_text.max_lines = 0;
-        let max_width = (rect.size.x - padding_left - padding_right).max(1.0) as f32;
+        let max_width = reader_markup_available_width(host_rect, rect, padding_left, padding_right);
         let laidout = text_flow.draw_text.layout(
             cx,
             0.0,
@@ -5443,88 +5814,6 @@ impl ChapterList {
         )
     }
 
-    /// 按连续的可见正文坐标绘制一个不参与布局的覆盖层。RubyWord 等自定义
-    /// run 仍由原始 Html/TextFlow 排版；选区或永久高亮只在排版后增加颜色。
-    fn draw_unified_range_overlay(
-        &mut self,
-        cx: &mut Cx2d,
-        widget: &WidgetRef,
-        html_source: &str,
-        range: (usize, usize),
-        color: Vec4f,
-    ) {
-        let Some(layout) = self.unified_markup_layout(cx, widget, html_source) else {
-            return;
-        };
-        let start = range.0.min(layout.text_len);
-        let end = range.1.min(layout.text_len);
-        if start >= end {
-            return;
-        }
-        self.draw_reader_selection.color = color;
-        let selection = LayoutSelection {
-            anchor: LayoutCursor {
-                index: start,
-                prefer_next_row: false,
-            },
-            cursor: LayoutCursor {
-                index: end,
-                prefer_next_row: false,
-            },
-        };
-        let start_row = layout
-            .laidout
-            .cursor_to_position(selection.start())
-            .row_index;
-        let edge_padding_in_lpxs = 2.0 / layout.font_scale.max(f32::EPSILON);
-        for (row_offset, selection_rect) in layout
-            .laidout
-            .selection_rects(selection)
-            .into_iter()
-            .enumerate()
-        {
-            let row_index = start_row + row_offset;
-            let Some(row) = layout.laidout.rows.get(row_index) else {
-                continue;
-            };
-            let glyph_top = row.origin_in_lpxs.y - row.ascender_in_lpxs;
-            let glyph_bottom = row.origin_in_lpxs.y - row.descender_in_lpxs;
-            let previous_glyph_bottom = row_index.checked_sub(1).and_then(|previous_index| {
-                layout
-                    .laidout
-                    .rows
-                    .get(previous_index)
-                    .map(|previous| previous.origin_in_lpxs.y - previous.descender_in_lpxs)
-            });
-            let next_glyph_top = layout
-                .laidout
-                .rows
-                .get(row_index + 1)
-                .map(|next| next.origin_in_lpxs.y - next.ascender_in_lpxs);
-            let (visual_top, visual_bottom) = visual_selection_row_bounds(
-                previous_glyph_bottom,
-                glyph_top,
-                glyph_bottom,
-                next_glyph_top,
-                edge_padding_in_lpxs,
-            );
-            self.draw_reader_selection.draw_abs(
-                cx,
-                Rect {
-                    pos: layout.origin
-                        + dvec2(
-                            (selection_rect.rect_in_lpxs.origin.x * layout.font_scale) as f64,
-                            (visual_top * layout.font_scale) as f64,
-                        ),
-                    size: dvec2(
-                        (selection_rect.rect_in_lpxs.size.width * layout.font_scale) as f64,
-                        ((visual_bottom - visual_top) * layout.font_scale) as f64,
-                    ),
-                },
-            );
-        }
-    }
-
     /// 命中可见块的 (块id, 正文字符下标)。点位在视口外或块间隙时吸附到
     /// 最近边界，与 PortalList 原生选择规则保持一致。
     fn hit_block_char(&self, cx: &mut Cx, abs: DVec2) -> Option<(usize, usize)> {
@@ -5563,7 +5852,43 @@ impl ChapterList {
                     .and_then(Option::as_ref)
                     .is_some();
                 let char_idx = if supports_unified_reader_hit_test(paragraph) && !is_code {
-                    self.unified_markup_hit_index(cx, widget, paragraph, abs)?
+                    let fallback = self.unified_markup_hit_index(cx, widget, paragraph, abs)?;
+                    let prefix = textflow_selection_prefix_len(paragraph);
+                    let native = widget
+                        .selection_point_to_char_index(cx, abs)?
+                        .saturating_sub(prefix)
+                        .min(plain_len);
+                    if let (Some(previous), Some(anchor_abs)) = (
+                        self.sel_cursor.filter(|point| point.0 == *id),
+                        self.sel_anchor_abs,
+                    ) {
+                        // Italic/superscript glyph boxes can move a few pixels
+                        // vertically while still belonging to the same visual
+                        // line. Keep a generous intra-line tolerance, well below
+                        // the reader's normal baseline-to-baseline distance.
+                        let same_visual_row = (abs.y - anchor_abs.y).abs() <= 8.0;
+                        let forward = if same_visual_row {
+                            abs.x >= anchor_abs.x
+                        } else {
+                            abs.y > anchor_abs.y
+                        };
+                        let pointer_moved = self
+                            .last_abs
+                            .map(|last| (abs - last).length() > 1.0)
+                            .unwrap_or(false);
+                        choose_reader_hit_index(
+                            native,
+                            fallback.min(plain_len),
+                            previous.1,
+                            forward,
+                            pointer_moved,
+                        )
+                    } else {
+                        // Anchors must always come from the layout actually on
+                        // screen. The fallback only participates after a drag
+                        // proves that the native tracker is stuck at a run edge.
+                        native
+                    }
                 } else {
                     widget
                         .selection_point_to_char_index(cx, abs)?
@@ -5588,16 +5913,23 @@ impl ChapterList {
         Some((*first_id, 0))
     }
 
-    fn set_cursor(&self, cursor: (usize, usize)) {
+    fn set_cursor(&mut self, cursor: (usize, usize)) {
         let Some(anchor) = self.sel_anchor else {
             return;
         };
-        let range = if cursor < anchor {
-            (cursor, anchor)
-        } else {
-            (anchor, cursor)
-        };
-        *SEL_RANGE.write().unwrap() = Some(range);
+        self.sel_cursor = Some(cursor);
+        *SEL_RANGE.write().unwrap() = Some(ordered_selection_range(anchor, cursor));
+    }
+
+    /// Pointer platforms may coalesce the final move before a release. Always hit-test
+    /// the release coordinate itself so the persisted range and painted range end at the
+    /// place where the reader actually let go, rather than at an older MouseMove sample.
+    fn update_selection_cursor_at(&mut self, cx: &mut Cx, abs: DVec2) {
+        if let Some(cursor) = self.hit_block_char(cx, abs) {
+            self.set_cursor(cursor);
+            self.apply_visible_selection(cx);
+        }
+        self.last_abs = Some(abs);
     }
 
     /// PortalList 会复用/回收离屏 item，因此每次滚动与重绘都要把全局区间
@@ -5707,21 +6039,19 @@ impl ChapterList {
                 // Their FingerUp `was_tap()` check distinguishes a click from a drag.
                 if let Some(hit) = self.hit_block_char(cx, e.abs) {
                     self.sel_anchor = Some(hit);
+                    self.sel_cursor = Some(hit);
+                    self.sel_anchor_abs = Some(e.abs);
                     self.selecting = true;
                 }
             }
             Event::MouseMove(e) => {
                 if self.selecting {
-                    self.last_abs = Some(e.abs);
-                    if let Some(cur) = self.hit_block_char(cx, e.abs) {
-                        self.set_cursor(cur);
-                        self.apply_visible_selection(cx);
-                    }
+                    self.update_selection_cursor_at(cx, e.abs);
                 }
             }
             Event::Scroll(_) if self.selecting => self.extend_after_scroll(cx),
             Event::MouseUp(event) if self.selecting => {
-                self.last_abs = Some(event.abs);
+                self.update_selection_cursor_at(cx, event.abs);
                 self.finish_selection();
             }
             Event::LongPress(event) if self.compact_layout => {
@@ -5745,6 +6075,8 @@ impl ChapterList {
                     return;
                 };
                 self.sel_anchor = Some((block_id, start));
+                self.sel_cursor = Some((block_id, end));
+                self.sel_anchor_abs = Some(event.abs);
                 self.selecting = true;
                 self.touch_selection_uid = Some(event.uid);
                 self.last_abs = Some(event.abs);
@@ -5760,14 +6092,10 @@ impl ChapterList {
                 };
                 match touch.state {
                     TouchState::Move => {
-                        self.last_abs = Some(touch.abs);
-                        if let Some(cursor) = self.hit_block_char(cx, touch.abs) {
-                            self.set_cursor(cursor);
-                            self.apply_visible_selection(cx);
-                        }
+                        self.update_selection_cursor_at(cx, touch.abs);
                     }
                     TouchState::Stop => {
-                        self.last_abs = Some(touch.abs);
+                        self.update_selection_cursor_at(cx, touch.abs);
                         self.finish_selection();
                     }
                     TouchState::Start | TouchState::Stable => {}
@@ -5838,6 +6166,13 @@ impl Widget for ChapterList {
         } else {
             self.font_standard_bold_italic.font_family.clone()
         };
+        // A live drag creates a new end offset on nearly every pointer event.
+        // The cache is self-healing, so cap it instead of retaining thousands
+        // of obsolete transient ranges for the current chapter.
+        if self.range_geometry_cache.len() > 1024 {
+            self.range_geometry_cache.clear();
+        }
+        let mut needs_geometry_redraw = false;
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
@@ -5866,6 +6201,56 @@ impl Widget for ChapterList {
                         reader_spacing.plain_line_spacing()
                     };
                     let item = list.item(cx, item_id, template);
+                    let previous_layout_width = self
+                        .item_layout_widths
+                        .get(&(chapter_idx, item_id))
+                        .copied();
+                    let source_len = readwise_core::vocab::annotate::rendered_text(para).len();
+                    let current_range = selection_range
+                        .and_then(|range| selection_range_in_block(range, item_id, source_len));
+                    let highlight_ranges: Vec<_> = if code_text.is_none() {
+                        chapter_highlights
+                            .iter()
+                            .filter_map(|highlight| {
+                                let range =
+                                    highlight_range_in_block(highlight, item_id, source_len)?;
+                                Some((
+                                    range,
+                                    crate::mark_span::hl_color(crate::mark_span::hl_slot_for_name(
+                                        &highlight.color,
+                                    )),
+                                ))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let make_pre_draw_key = |range| {
+                        reader_range_geometry_key(
+                            chapter_idx,
+                            item_id,
+                            range,
+                            previous_layout_width.unwrap_or(0.0),
+                            reader_font_size,
+                            line_spacing,
+                            reader_font,
+                            para,
+                        )
+                    };
+                    let probe_range = if code_text.is_none() {
+                        current_range.or_else(|| {
+                            highlight_ranges
+                                .iter()
+                                .find(|(range, _)| {
+                                    !self
+                                        .range_geometry_cache
+                                        .contains_key(&make_pre_draw_key(*range))
+                                })
+                                .map(|(range, _)| *range)
+                        })
+                    } else {
+                        current_range
+                    };
                     if let Some(code_text) = code_text {
                         item.widget(cx, ids!(code_view)).set_text(cx, code_text);
                     } else {
@@ -5887,15 +6272,11 @@ impl Widget for ChapterList {
                             inner.text_flow.font_size = reader_font_size;
                             inner.text_flow.font_color = reader_text_color;
                             inner.text_flow.draw_text.color = reader_text_color;
-                            // RubyWord is drawn as a separate continuation run. Its
-                            // native selection rect can use a different row origin
-                            // from neighboring text, so gloss paragraphs draw one
-                            // unified selection overlay after the Html pass instead.
-                            inner.text_flow.draw_selection.color = if has_gloss {
-                                Vec4f::default()
-                            } else {
-                                selection_color
-                            };
+                            // TextFlow still computes the authoritative rich-text
+                            // rectangles, but submits them transparently. ChapterList
+                            // captures and normalizes that same batch for both the live
+                            // selection and permanent highlights.
+                            inner.text_flow.draw_selection.color = Vec4f::default();
                             inner.text_flow.draw_block.table_header_bg_color = reader_scene.field;
                             inner.text_flow.draw_block.table_border_color = reader_scene.border;
                             inner.text_flow.text_style_normal.font_family = normal_family.clone();
@@ -5910,53 +6291,125 @@ impl Widget for ChapterList {
                             inner.text_flow.text_style_fixed.line_spacing = line_spacing;
                         };
                     }
-                    if let Some((start, end)) = selection_range {
+                    if let Some((start, end)) = probe_range {
                         let prefix = textflow_selection_prefix_len(para);
-                        let source_len = readwise_core::vocab::annotate::rendered_text(para).len();
-                        if item_id < start.0 || item_id > end.0 {
-                            item.selection_clear();
-                        } else if item_id == start.0 && item_id == end.0 {
-                            item.selection_set(start.1 + prefix, end.1 + prefix);
-                        } else if item_id == start.0 {
-                            item.selection_set(start.1 + prefix, source_len + prefix);
-                        } else if item_id == end.0 {
-                            item.selection_set(prefix, end.1 + prefix);
-                        } else {
-                            item.selection_set(prefix, source_len + prefix);
-                        }
+                        item.selection_set(start + prefix, end + prefix);
                     } else {
                         item.selection_clear();
                     }
+                    let capture_geometry = code_text.is_none() && probe_range.is_some();
+                    if capture_geometry {
+                        let html = item.widget(cx, ids!(para_html));
+                        if let Some(mut inner) = html.borrow_mut::<Html>() {
+                            // Seed the batch in the current draw-call group so every
+                            // selection rectangle emitted by TextFlow lands in one
+                            // inspectable instance buffer.
+                            inner.text_flow.draw_selection.new_draw_call(cx);
+                            inner.text_flow.draw_selection.begin_many_instances(cx);
+                        };
+                    }
                     item.draw_all_unscoped(cx);
-                    let source_len = readwise_core::vocab::annotate::rendered_text(para).len();
-                    if code_text.is_none() {
-                        for highlight in &chapter_highlights {
-                            let Some(range) =
-                                highlight_range_in_block(highlight, item_id, source_len)
-                            else {
-                                continue;
-                            };
-                            let color = crate::mark_span::hl_color(
-                                crate::mark_span::hl_slot_for_name(&highlight.color),
-                            );
-                            self.draw_unified_range_overlay(cx, &item, para, range, color);
+                    let item_rect = item.area().rect(cx);
+                    let width_stable = previous_layout_width
+                        .map(|previous| reader_geometry_width_is_stable(previous, item_rect.size.x))
+                        .unwrap_or(false);
+                    self.item_layout_widths
+                        .insert((chapter_idx, item_id), item_rect.size.x);
+                    let make_geometry_key = |range| {
+                        reader_range_geometry_key(
+                            chapter_idx,
+                            item_id,
+                            range,
+                            item_rect.size.x,
+                            reader_font_size,
+                            line_spacing,
+                            reader_font,
+                            para,
+                        )
+                    };
+                    let current_key = current_range.map(make_geometry_key);
+                    let highlight_entries: Vec<_> = highlight_ranges
+                        .iter()
+                        .map(|(range, color)| (*range, make_geometry_key(*range), *color))
+                        .collect();
+                    let mut captured_current_geometry = None;
+                    if capture_geometry {
+                        let html = item.widget(cx, ids!(para_html));
+                        if let Some(mut inner) = html.borrow_mut::<Html>() {
+                            let raw =
+                                captured_draw_color_rects(cx, &inner.text_flow.draw_selection);
+                            inner.text_flow.draw_selection.end_many_instances(cx);
+                            let normalized = normalize_rich_selection_rects(&raw);
+                            let (draw_current_now, cache_for_reuse) =
+                                reader_geometry_capture_policy(
+                                    probe_range,
+                                    current_range,
+                                    width_stable,
+                                );
+                            if draw_current_now {
+                                // Live selection is transient UI, not persistent cache.
+                                // Paint this frame immediately even while a resized item
+                                // is waiting for its next stable-width frame.
+                                captured_current_geometry = Some(normalized.clone());
+                            }
+                            if cache_for_reuse {
+                                if let Some(key) = probe_range.map(make_geometry_key) {
+                                    self.range_geometry_cache
+                                        .insert(key, rects_relative_to(&normalized, item_rect.pos));
+                                }
+                            } else {
+                                // The PortalList item was still transitioning from the
+                                // old window width. Never poison the new-width cache with
+                                // this frame; request one stable redraw instead.
+                                needs_geometry_redraw = true;
+                            }
+                        };
+                    }
+
+                    // Permanent highlights and the current selection are drawn from
+                    // exactly the same captured rich-text geometry. Translate cached
+                    // item-relative rectangles so PortalList scrolling cannot stale it.
+                    for (_, key, color) in &highlight_entries {
+                        if let Some(rects) = self.range_geometry_cache.get(key).cloned() {
+                            self.draw_reader_selection.color = *color;
+                            for rect in rects {
+                                self.draw_reader_selection.draw_abs(
+                                    cx,
+                                    Rect {
+                                        pos: rect.pos + item_rect.pos,
+                                        size: rect.size,
+                                    },
+                                );
+                            }
+                        } else {
+                            needs_geometry_redraw = true;
                         }
                     }
-                    if has_gloss {
-                        if let Some(range) = selection_range
-                            .and_then(|range| selection_range_in_block(range, item_id, source_len))
-                        {
-                            self.draw_unified_range_overlay(
-                                cx,
-                                &item,
-                                para,
-                                range,
-                                selection_color,
-                            );
+                    if let Some(key) = current_key {
+                        if let Some(rects) = captured_current_geometry {
+                            self.draw_reader_selection.color = selection_color;
+                            for rect in rects {
+                                self.draw_reader_selection.draw_abs(cx, rect);
+                            }
+                        } else if let Some(rects) = self.range_geometry_cache.get(&key).cloned() {
+                            self.draw_reader_selection.color = selection_color;
+                            for rect in rects {
+                                self.draw_reader_selection.draw_abs(
+                                    cx,
+                                    Rect {
+                                        pos: rect.pos + item_rect.pos,
+                                        size: rect.size,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
             }
+        }
+
+        if needs_geometry_redraw {
+            self.view.redraw(cx);
         }
 
         DrawStep::done()
