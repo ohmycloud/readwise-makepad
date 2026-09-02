@@ -50,29 +50,6 @@ fn uses_compact_layout(size: DVec2) -> bool {
     uses_compact_layout_for_platform(size, cfg!(any(target_os = "android", target_os = "ios")))
 }
 
-fn reader_window_size_with_minimum(size: DVec2, is_mobile: bool) -> DVec2 {
-    if is_mobile || !size.x.is_finite() || !size.y.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
-        return size;
-    }
-    dvec2(size.x.max(DESKTOP_MIN_WINDOW_WIDTH), size.y)
-}
-
-fn reader_window_resize_request(
-    target_inner_size: DVec2,
-    current_inner_size: DVec2,
-    current_outer_size: DVec2,
-    backend_expects_outer_size: bool,
-) -> DVec2 {
-    if !backend_expects_outer_size {
-        return target_inner_size;
-    }
-    let frame = dvec2(
-        (current_outer_size.x - current_inner_size.x).max(0.0),
-        (current_outer_size.y - current_inner_size.y).max(0.0),
-    );
-    target_inner_size + frame
-}
-
 fn screen_orientation_changed(old_size: DVec2, new_size: DVec2) -> bool {
     if old_size.x <= 0.0 || old_size.y <= 0.0 || new_size.x <= 0.0 || new_size.y <= 0.0 {
         return false;
@@ -1389,44 +1366,6 @@ mod responsive_layout_tests {
             false
         ));
         assert!(!uses_compact_layout_for_platform(dvec2(0.0, 0.0), true));
-    }
-
-    #[test]
-    fn desktop_window_has_a_readable_horizontal_minimum() {
-        assert_eq!(
-            reader_window_size_with_minimum(dvec2(640.0, 680.0), false),
-            dvec2(DESKTOP_MIN_WINDOW_WIDTH, 680.0)
-        );
-        assert_eq!(
-            reader_window_size_with_minimum(dvec2(960.0, 680.0), false),
-            dvec2(960.0, 680.0)
-        );
-        assert_eq!(
-            reader_window_size_with_minimum(dvec2(390.0, 844.0), true),
-            dvec2(390.0, 844.0)
-        );
-    }
-
-    #[test]
-    fn macos_minimum_width_resize_preserves_the_content_height() {
-        assert_eq!(
-            reader_window_resize_request(
-                dvec2(DESKTOP_MIN_WINDOW_WIDTH, 680.0),
-                dvec2(640.0, 680.0),
-                dvec2(640.0, 708.0),
-                true,
-            ),
-            dvec2(DESKTOP_MIN_WINDOW_WIDTH, 708.0)
-        );
-        assert_eq!(
-            reader_window_resize_request(
-                dvec2(DESKTOP_MIN_WINDOW_WIDTH, 680.0),
-                dvec2(640.0, 680.0),
-                dvec2(640.0, 708.0),
-                false,
-            ),
-            dvec2(DESKTOP_MIN_WINDOW_WIDTH, 680.0)
-        );
     }
 
     #[test]
@@ -12733,6 +12672,10 @@ impl AppMain for App {
             Event::ScriptReapply => self.restore_after_script_reload(cx),
             Event::Startup => {
                 let _ = APP_STARTED_AT.set(Instant::now());
+                #[cfg(target_os = "macos")]
+                crate::desktop_window::ensure_reader_minimum_content_width(
+                    DESKTOP_MIN_WINDOW_WIDTH,
+                );
                 self.update_responsive_layout(
                     cx,
                     cx.display_context.screen_size,
@@ -12757,26 +12700,14 @@ impl AppMain for App {
                 spawn_db_init(cx.get_data_dir().map(std::path::PathBuf::from));
             }
             Event::WindowGeomChange(event) => {
-                let main_window = self.ui.window(cx, ids!(main_window));
-                let is_main_window = main_window.window_id() == Some(event.window_id);
-                let is_mobile = cfg!(any(target_os = "android", target_os = "ios"));
-                let effective_size = if is_main_window && !event.new_geom.is_fullscreen {
-                    reader_window_size_with_minimum(event.new_geom.inner_size, is_mobile)
-                } else {
-                    event.new_geom.inner_size
-                };
-                if effective_size != event.new_geom.inner_size {
-                    // Makepad 2.0 does not currently expose a native minimum-size
-                    // property. Snap the main desktop window back to the reader's
-                    // smallest usable width and keep responsive state on that same
-                    // effective geometry during the resize event.
-                    let resize_request = reader_window_resize_request(
-                        effective_size,
-                        event.new_geom.inner_size,
-                        event.new_geom.outer_size,
-                        cfg!(target_os = "macos"),
-                    );
-                    main_window.resize(cx, resize_request);
+                #[cfg(target_os = "macos")]
+                {
+                    let main_window = self.ui.window(cx, ids!(main_window));
+                    if main_window.window_id() == Some(event.window_id) {
+                        crate::desktop_window::ensure_reader_minimum_content_width(
+                            DESKTOP_MIN_WINDOW_WIDTH,
+                        );
+                    }
                 }
                 if CURRENT_BOOK.read().unwrap().is_some() {
                     self.pending_reader_pagination_layout = true;
@@ -12792,7 +12723,7 @@ impl AppMain for App {
                 }
                 let responsive_changed = self.update_responsive_layout(
                     cx,
-                    effective_size,
+                    event.new_geom.inner_size,
                     event.new_geom.safe_area_insets,
                 );
                 let restore_mobile_geometry = cfg!(any(target_os = "android", target_os = "ios"))
