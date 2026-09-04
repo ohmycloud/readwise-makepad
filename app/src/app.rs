@@ -454,7 +454,7 @@ fn ordered_selection_range(anchor: TextPoint, cursor: TextPoint) -> TextRange {
 /// The native result owns normal movement because it was produced by the exact
 /// runs that are visible on screen. The fallback is only allowed to take over
 /// when the native result moves backwards (or remains stuck despite a real
-/// pointer move) while the gesture is moving forwards, and vice versa. This
+/// pointer move) while the pointer is moving forwards, and vice versa. This
 /// preserves exact visual-line mapping without getting trapped at an italic,
 /// link, mark, or RubyWord run boundary.
 fn choose_reader_hit_index(
@@ -474,6 +474,18 @@ fn choose_reader_hit_index(
         native
     } else {
         fallback.min(previous)
+    }
+}
+
+fn reader_drag_moves_forward(previous: DVec2, current: DVec2) -> bool {
+    // Raised inline runs can move the reported glyph box a few pixels without
+    // crossing a visual row. Compare against the previous pointer sample—not
+    // the fixed selection anchor—so reversing inside the same side of the
+    // anchor can shrink the selection again.
+    if (current.y - previous.y).abs() <= 8.0 {
+        current.x >= previous.x
+    } else {
+        current.y > previous.y
     }
 }
 
@@ -504,9 +516,10 @@ fn highlight_range_in_block(
 mod table_block_tests {
     use super::{
         choose_reader_hit_index, is_table_block, normalize_rich_selection_rects,
-        ordered_selection_range, reader_geometry_capture_policy, reader_geometry_width_is_stable,
-        reader_markup_available_width, selection_range_in_block, supports_unified_reader_hit_test,
-        textflow_selection_prefix_len, visual_selection_row_bounds,
+        ordered_selection_range, reader_drag_moves_forward, reader_geometry_capture_policy,
+        reader_geometry_width_is_stable, reader_markup_available_width, selection_range_in_block,
+        supports_unified_reader_hit_test, textflow_selection_prefix_len,
+        visual_selection_row_bounds,
     };
     use makepad_widgets::{dvec2, Rect};
 
@@ -607,6 +620,23 @@ mod table_block_tests {
     }
 
     #[test]
+    fn drag_direction_follows_the_last_pointer_sample_so_selection_can_shrink() {
+        assert!(reader_drag_moves_forward(
+            dvec2(120.0, 40.0),
+            dvec2(126.0, 43.0)
+        ));
+        assert!(!reader_drag_moves_forward(
+            dvec2(126.0, 40.0),
+            dvec2(120.0, 43.0)
+        ));
+        assert!(!reader_drag_moves_forward(
+            dvec2(120.0, 60.0),
+            dvec2(200.0, 40.0)
+        ));
+        assert_eq!(choose_reader_hit_index(34, 34, 36, false, true), 34);
+    }
+
+    #[test]
     fn rich_selection_merges_and_bottom_aligns_a_raised_ruby_fragment() {
         let rects = normalize_rich_selection_rects(&[
             Rect {
@@ -641,6 +671,23 @@ mod table_block_tests {
         ]);
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[0].pos.y + rects[0].size.y, rects[1].pos.y);
+    }
+
+    #[test]
+    fn rich_selection_rows_share_one_boundary_even_when_tall_annotations_overlap() {
+        let rects = normalize_rich_selection_rects(&[
+            Rect {
+                pos: dvec2(20.0, 20.0),
+                size: dvec2(80.0, 20.0),
+            },
+            Rect {
+                pos: dvec2(10.0, 34.0),
+                size: dvec2(90.0, 20.0),
+            },
+        ]);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].pos.y + rects[0].size.y, rects[1].pos.y);
+        assert!(rects[0].pos.y + rects[0].size.y <= 37.0);
     }
 
     #[test]
@@ -2228,10 +2275,10 @@ const LIBRARY_ACTION_MENU_ESTIMATED_HEIGHT: f64 = 238.0;
 fn selection_popup_captures_pointer(
     popup_open: bool,
     selection_exists: bool,
-    popup_rect: Rect,
+    popup_rect: impl FnOnce() -> Rect,
     abs: DVec2,
 ) -> bool {
-    popup_open && selection_exists && popup_rect.contains(abs)
+    popup_open && selection_exists && popup_rect().contains(abs)
 }
 
 fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) -> (DVec2, f64) {
@@ -2761,20 +2808,36 @@ mod selection_popup_tests {
     use super::*;
 
     #[test]
-    fn hidden_popup_never_captures_using_its_stale_draw_rect() {
+    fn hidden_popup_never_reads_its_stale_draw_rect() {
+        use std::cell::Cell;
+
         let stale_rect = Rect {
             pos: dvec2(100.0, 100.0),
             size: dvec2(520.0, 56.0),
         };
         let pointer = dvec2(200.0, 120.0);
+        let area_read = Cell::new(false);
         assert!(!selection_popup_captures_pointer(
-            false, true, stale_rect, pointer,
+            false,
+            true,
+            || {
+                area_read.set(true);
+                stale_rect
+            },
+            pointer,
         ));
+        assert!(!area_read.get());
         assert!(selection_popup_captures_pointer(
-            true, true, stale_rect, pointer,
+            true,
+            true,
+            || stale_rect,
+            pointer,
         ));
         assert!(!selection_popup_captures_pointer(
-            true, false, stale_rect, pointer,
+            true,
+            false,
+            || stale_rect,
+            pointer,
         ));
     }
 
@@ -3615,21 +3678,45 @@ script_mod! {
         active_bg: theme.color_bg_highlight_inline
         inactive_bg: theme.color_bg_app
         text_color: theme.color_text
-        button_hover: theme.color_bg_highlight
-        button_pressed: theme.color_bg_highlight_inline
         list := PortalList{
             width: Fill height: Fill
             padding: Inset{ left: 8 right: 8 top: 8 bottom: 8 }
             spacing: 2
-            scroll_bar: ScrollBar{}
+            // The reader owns its complete color scene. Keep the idle track
+            // transparent and use a restrained, theme-independent handle while
+            // it is hovered or dragged instead of inheriting the app's gray.
+            scroll_bar: ScrollBar{
+                draw_bg +: {
+                    color: #0000
+                    color_hover: #x66877c88
+                    color_drag: #x4f776cbb
+                    border_color: #0000
+                    border_color_hover: #0000
+                    border_color_drag: #0000
+                }
+            }
             TocItem := SolidView{
                 width: Fill height: Fit
+                flow: Overlay
                 draw_bg.color: theme.color_bg_app
-                toc_item_btn := ButtonFlat{
-                    width: Fill
-                    align: Align{x: 0.0 y: 0.5}
-                    label_walk: Walk{width: Fill height: Fit}
+                toc_item_label := Label{
+                    width: Fill height: Fit
+                    padding: Inset{left: 12 right: 12 top: 8 bottom: 8}
                     text: ""
+                }
+                toc_item_btn := ButtonFlat{
+                    width: Fill height: Fill
+                    text: ""
+                    draw_bg +: {
+                        color: #0000
+                        color_hover: #x66877c20
+                        color_down: #x4f776c30
+                        color_focus: #x66877c20
+                        border_color: #0000
+                        border_color_hover: #0000
+                        border_color_down: #0000
+                        border_color_focus: #0000
+                    }
                 }
             }
         }
@@ -3867,11 +3954,53 @@ script_mod! {
             draw_text +: {
                 text_style +: {font_size: 10.5 line_spacing: 1.35}
             }
+            // CodeView is read-only in the reader. Its upstream insertion caret
+            // is always white, so suppress that editing affordance while retaining
+            // the normal text pointer and selection interaction.
+            draw_cursor +: {color: #0000}
+            // Upstream mixes generic app-theme uniforms here; those can be too
+            // close to an EPUB code surface. Preserve its connected-row geometry
+            // but give it an explicit reader-grade contrast.
+            draw_selection +: {
+                color: uniform(#x6aa9ff88)
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.rect_pos + self.pos * self.rect_size)
+                    sdf.box(
+                        self.rect_pos.x,
+                        self.rect_pos.y,
+                        self.rect_size.x,
+                        self.rect_size.y,
+                        self.border_radius
+                    )
+                    if self.prev_w > 0.0 {
+                        sdf.box(
+                            self.prev_x,
+                            self.rect_pos.y - self.rect_size.y,
+                            self.prev_w,
+                            self.rect_size.y,
+                            self.border_radius
+                        )
+                        sdf.gloop(self.gloopiness)
+                    }
+                    if self.next_w > 0.0 {
+                        sdf.box(
+                            self.next_x,
+                            self.rect_pos.y + self.rect_size.y,
+                            self.next_w,
+                            self.rect_size.y,
+                            self.border_radius
+                        )
+                        sdf.gloop(self.gloopiness)
+                    }
+                    return sdf.fill(self.color)
+                }
+            }
         }
     }
 
     let ReaderCodeViewLight = ReaderCodeView{
         editor +: {
+            draw_selection +: {color: uniform(#x3478c988)}
             token_colors +: {
                 whitespace: #7b746b
                 delimiter: #2b2925
@@ -5402,8 +5531,6 @@ struct ChapterList {
     #[rust]
     sel_cursor: Option<(usize, usize)>,
     #[rust]
-    sel_anchor_abs: Option<DVec2>,
-    #[rust]
     selecting: bool,
     #[rust]
     last_abs: Option<DVec2>,
@@ -5576,22 +5703,28 @@ fn normalize_rich_selection_rects(rects: &[Rect]) -> Vec<Rect> {
         line.top = line.bottom - line.max_height;
     }
 
+    // Every adjacent pair must use the exact same boundary. A tall annotation
+    // can make the raw glyph bands overlap; expanding each row back to its own
+    // raw bounds would then paint that overlap twice as a darker stripe.
+    let boundaries: Vec<f64> = lines
+        .windows(2)
+        .map(|pair| {
+            let upper_center = (pair[0].top + pair[0].bottom) * 0.5;
+            let lower_center = (pair[1].top + pair[1].bottom) * 0.5;
+            (upper_center + lower_center) * 0.5
+        })
+        .collect();
+
     let mut out = Vec::with_capacity(lines.len());
     for (index, line) in lines.iter().enumerate() {
-        let previous_bottom = index.checked_sub(1).map(|i| lines[i].bottom);
-        let next_top = lines.get(index + 1).map(|next| next.top);
-        let top = previous_bottom
-            .map(|bottom| (bottom + line.top) * 0.5)
+        let top = index
+            .checked_sub(1)
+            .and_then(|previous| boundaries.get(previous).copied())
             .unwrap_or(line.top - 2.0);
-        let bottom = next_top
-            .map(|top| (line.bottom + top) * 0.5)
-            .unwrap_or(line.bottom + 2.0);
+        let bottom = boundaries.get(index).copied().unwrap_or(line.bottom + 2.0);
         out.push(Rect {
-            pos: dvec2(line.left, top.min(line.top)),
-            size: dvec2(
-                (line.right - line.left).max(1.0),
-                (bottom.max(line.bottom) - top.min(line.top)).max(1.0),
-            ),
+            pos: dvec2(line.left, top),
+            size: dvec2((line.right - line.left).max(1.0), (bottom - top).max(1.0)),
         });
     }
     out
@@ -5652,7 +5785,6 @@ impl ChapterList {
     fn reset_selection_gesture(&mut self) {
         self.sel_anchor = None;
         self.sel_cursor = None;
-        self.sel_anchor_abs = None;
         self.selecting = false;
         self.last_abs = None;
         self.touch_selection_uid = None;
@@ -5863,20 +5995,10 @@ impl ChapterList {
                         .selection_point_to_char_index(cx, abs)?
                         .saturating_sub(prefix)
                         .min(plain_len);
-                    if let (Some(previous), Some(anchor_abs)) = (
+                    if let (Some(previous), Some(previous_abs)) = (
                         self.sel_cursor.filter(|point| point.0 == *id),
-                        self.sel_anchor_abs,
+                        self.last_abs,
                     ) {
-                        // Italic/superscript glyph boxes can move a few pixels
-                        // vertically while still belonging to the same visual
-                        // line. Keep a generous intra-line tolerance, well below
-                        // the reader's normal baseline-to-baseline distance.
-                        let same_visual_row = (abs.y - anchor_abs.y).abs() <= 8.0;
-                        let forward = if same_visual_row {
-                            abs.x >= anchor_abs.x
-                        } else {
-                            abs.y > anchor_abs.y
-                        };
                         let pointer_moved = self
                             .last_abs
                             .map(|last| (abs - last).length() > 1.0)
@@ -5885,7 +6007,7 @@ impl ChapterList {
                             native,
                             fallback.min(plain_len),
                             previous.1,
-                            forward,
+                            reader_drag_moves_forward(previous_abs, abs),
                             pointer_moved,
                         )
                     } else {
@@ -6045,7 +6167,6 @@ impl ChapterList {
                 if let Some(hit) = self.hit_block_char(cx, e.abs) {
                     self.sel_anchor = Some(hit);
                     self.sel_cursor = Some(hit);
-                    self.sel_anchor_abs = Some(e.abs);
                     self.selecting = true;
                 }
             }
@@ -6081,7 +6202,6 @@ impl ChapterList {
                 };
                 self.sel_anchor = Some((block_id, start));
                 self.sel_cursor = Some((block_id, end));
-                self.sel_anchor_abs = Some(event.abs);
                 self.selecting = true;
                 self.touch_selection_uid = Some(event.uid);
                 self.last_abs = Some(event.abs);
@@ -6456,10 +6576,6 @@ struct TocList {
     inactive_bg: Vec4f,
     #[live]
     text_color: Vec4f,
-    #[live]
-    button_hover: Vec4f,
-    #[live]
-    button_pressed: Vec4f,
 }
 
 impl Widget for TocList {
@@ -6480,40 +6596,24 @@ impl Widget for TocList {
                     };
                     let item = list.item(cx, item_id, id!(TocItem));
                     let text = format!("{}. {}", item_id + 1, title);
-                    let mut item_mut = item.clone();
-                    let mut button = item.widget(cx, ids!(toc_item_btn));
-                    button.set_text(cx, &text);
-                    let text_color = self.text_color;
-                    let button_hover = self.button_hover;
-                    let button_pressed = self.button_pressed;
-                    script_apply_eval!(cx, button, {
-                        draw_text +: {
-                            color: #(text_color)
-                            color_hover: #(text_color)
-                            color_down: #(text_color)
-                            color_focus: #(text_color)
-                        }
-                        draw_bg +: {
-                            color: #0000
-                            color_hover: #(button_hover)
-                            color_down: #(button_pressed)
-                            color_focus: #(button_hover)
-                            border_color: #0000
-                            border_color_hover: #0000
-                            border_color_down: #0000
-                            border_color_focus: #0000
-                        }
-                    });
-                    if item_id == current {
-                        let color = self.active_bg;
-                        script_apply_eval!(cx, item_mut, {
-                            draw_bg.color: #(color)
-                        });
-                    } else {
-                        let color = self.inactive_bg;
-                        script_apply_eval!(cx, item_mut, {
-                            draw_bg.color: #(color)
-                        });
+                    let label = item.label(cx, ids!(toc_item_label));
+                    if label.text() != text {
+                        label.set_text(cx, &text);
+                    }
+                    if let Some(mut inner) = label.borrow_mut() {
+                        inner.draw_text.color = self.text_color;
+                    }
+                    if let Some(mut inner) = item.borrow_mut::<View>() {
+                        let color = if item_id == current {
+                            self.active_bg
+                        } else {
+                            self.inactive_bg
+                        };
+                        inner.draw_bg.draw_vars.set_dyn_instance(
+                            cx,
+                            id!(color),
+                            &[color.x, color.y, color.z, color.w],
+                        );
                     }
                     item.draw_all_unscoped(cx);
                 }
@@ -7208,6 +7308,13 @@ impl App {
     }
 
     fn activate_page(&mut self, cx: &mut Cx, page: AppPage) {
+        if self.on_reader_page && page != AppPage::Reader {
+            // Reader overlays retain their own local visibility even after the
+            // whole reader page is hidden. Clear them before another page gets
+            // pointer events so no stale Area from the old draw list survives.
+            self.clear_reader_selection(cx);
+            self.close_word_card(cx);
+        }
         if page != AppPage::Library && self.library_action_book_id.is_some() {
             self.close_library_action_menu(cx);
         }
@@ -7859,8 +7966,6 @@ impl App {
             toc.active_bg = palette.field;
             toc.inactive_bg = palette.surface;
             toc.text_color = palette.text;
-            toc.button_hover = palette.hover;
-            toc.button_pressed = palette.pressed;
         }
         self.apply_navigation_palette(cx, self.active_page);
         self.ui.widget(cx, ids!(main_column)).redraw(cx);
@@ -8348,21 +8453,28 @@ impl App {
             .widget(cx, ids!(reader_ai_panel))
             .set_visible(cx, self.reader_ai_open);
 
-        let mut toc_panel = self.ui.widget(cx, ids!(toc_panel));
-        let mut note_panel = self.ui.widget(cx, ids!(note_panel));
-        let mut reader_ai_panel = self.ui.widget(cx, ids!(reader_ai_panel));
-        let mut selection_popup = self.ui.widget(cx, ids!(selection_popup));
-        if self.compact_layout {
-            let fill = Size::fill();
-            script_apply_eval!(cx, toc_panel, {width: #(fill)});
-            script_apply_eval!(cx, note_panel, {width: #(fill)});
-            script_apply_eval!(cx, reader_ai_panel, {width: #(fill)});
-            script_apply_eval!(cx, selection_popup, {width: #(fill)});
+        let widths = if self.compact_layout {
+            [Size::fill(); 4]
         } else {
-            script_apply_eval!(cx, toc_panel, {width: 260});
-            script_apply_eval!(cx, note_panel, {width: 320});
-            script_apply_eval!(cx, reader_ai_panel, {width: 360});
-            script_apply_eval!(cx, selection_popup, {width: 520});
+            [
+                Size::Fixed(260.0),
+                Size::Fixed(320.0),
+                Size::Fixed(360.0),
+                Size::Fixed(520.0),
+            ]
+        };
+        for (widget, width) in [
+            self.ui.widget(cx, ids!(toc_panel)),
+            self.ui.widget(cx, ids!(note_panel)),
+            self.ui.widget(cx, ids!(reader_ai_panel)),
+            self.ui.widget(cx, ids!(selection_popup)),
+        ]
+        .into_iter()
+        .zip(widths)
+        {
+            if let Some(mut inner) = widget.borrow_mut::<View>() {
+                inner.walk.width = width;
+            }
         }
         self.invalidate_reader_pagination_layout(cx);
     }
@@ -10938,6 +11050,14 @@ impl MatchEvent for App {
             if let Some(sel) = action.downcast_ref::<SelAction>() {
                 match sel {
                     SelAction::Show { anchor } => {
+                        if !self.on_reader_page || SEL_RANGE.read().unwrap().is_none() {
+                            SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
+                            self.selection_popup_anchor = None;
+                            self.pending_selection_popup_layout = false;
+                            self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
+                            self.ui.redraw(cx);
+                            continue;
+                        }
                         let viewport = self
                             .ui
                             .widget(cx, ids!(chapter_list))
@@ -12552,18 +12672,19 @@ impl AppMain for App {
         }
         let reader_swipe = self.track_reader_swipe(cx, event);
         if let Event::MouseDown(e) = event {
-            let selection_popup_open = self.selection_popup_anchor.is_some()
+            let selection_popup_open = self.on_reader_page
+                && self.selection_popup_anchor.is_some()
                 && self.ui.widget(cx, ids!(sel_bar)).visible();
-            let selection_popup_rect = self
-                .ui
-                .widget(cx, ids!(selection_popup))
-                .area()
-                .clipped_rect(cx);
             let selection_exists = SEL_RANGE.read().unwrap().is_some();
             let popup_captures_pointer = selection_popup_captures_pointer(
                 selection_popup_open,
                 selection_exists,
-                selection_popup_rect,
+                || {
+                    self.ui
+                        .widget(cx, ids!(selection_popup))
+                        .area()
+                        .clipped_rect(cx)
+                },
                 e.abs,
             );
             SELECTION_POPUP_POINTER.store(popup_captures_pointer, Ordering::Relaxed);
