@@ -5,6 +5,7 @@
 
 - 里程碑规划：[docs/MILESTONES.md](docs/MILESTONES.md)
 - 开发日志：[docs/DEVLOG.md](docs/DEVLOG.md)
+- 有道 PDF 生词导入：[docs/IMPORT_YOUDAO_PDF.md](docs/IMPORT_YOUDAO_PDF.md)
 
 ## 工程结构
 
