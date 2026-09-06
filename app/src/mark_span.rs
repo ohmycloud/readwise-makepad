@@ -113,7 +113,7 @@ impl Widget for MarkSpan {
             return DrawStep::done();
         };
         tf.areas_tracker.push_tracker();
-        tf.draw_text(cx, &self.text);
+        crate::reader_hit::draw_text(tf, cx, &self.text);
         let (start, end) = tf.areas_tracker.pop_tracker();
         if self.drawn_areas.len() == end - start {
             for i in 0..end - start {

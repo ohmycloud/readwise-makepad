@@ -58,7 +58,7 @@ fn draw_word_with_background(tf: &mut TextFlow, cx: &mut Cx2d, text: &str, color
     tf.inline_code_padding = Inset::default();
     tf.inline_code_margin = Inset::default();
     tf.inline_code.push();
-    tf.draw_text(cx, text);
+    crate::reader_hit::draw_text(tf, cx, text);
     tf.inline_code.pop();
     tf.draw_block.code_color = old_color;
     tf.inline_code_padding = old_padding;
@@ -213,7 +213,7 @@ impl Widget for RubyWord {
                 },
             );
         } else {
-            tf.draw_text(cx, &self.word);
+            crate::reader_hit::draw_text(tf, cx, &self.word);
         }
         let (start, end) = tf.areas_tracker.pop_tracker();
         if word_color.is_some() {

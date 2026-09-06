@@ -4062,6 +4062,7 @@ script_mod! {
                     a.pressed_color: theme.color_text_focus
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
+                    reader_run := mod.widgets.ReaderRun{}
                 }
             }
             GlossPara := View{
@@ -4080,6 +4081,7 @@ script_mod! {
                     a.hover_color: theme.color_text_hover
                     a.pressed_color: theme.color_text_focus
                     ruby := mod.widgets.RubyWord{}
+                    reader_run := mod.widgets.ReaderRun{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                 }
@@ -5546,6 +5548,8 @@ struct ChapterList {
     /// 可能暂时失效，因此不能直接把 Area 当作可靠的上一帧宽度来源。
     #[rust]
     item_layout_widths: HashMap<(usize, usize), f64>,
+    #[rust]
+    hit_runs: HashMap<usize, (u64, Vec<crate::reader_hit::HitRun>)>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -5982,6 +5986,18 @@ impl ChapterList {
                 let paragraphs = PARAGRAPHS.read().unwrap();
                 let paragraph = paragraphs.get(*id)?;
                 let plain_len = readwise_core::vocab::annotate::rendered_text(paragraph).len();
+                if let Some((source_hash, runs)) = self.hit_runs.get(id) {
+                    if *source_hash == reader_source_hash(paragraph) {
+                        if let Some(index) = crate::reader_hit::hit_index(runs, abs - rect.pos) {
+                            return Some((
+                                *id,
+                                index
+                                    .saturating_sub(textflow_selection_prefix_len(paragraph))
+                                    .min(plain_len),
+                            ));
+                        }
+                    }
+                }
                 let is_code = CODE_BLOCKS
                     .read()
                     .unwrap()
@@ -6301,12 +6317,17 @@ impl Widget for ChapterList {
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                self.hit_runs.clear();
                 list.set_item_range(cx, 0, paragraphs.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
                     let Some(para) = paragraphs.get(item_id) else {
                         continue;
                     };
                     let code_text = code_blocks.get(item_id).and_then(Option::as_deref);
+                    let tracked = code_text
+                        .is_none()
+                        .then(|| crate::reader_hit::tracked_html(para))
+                        .flatten();
                     let has_gloss = para.contains("<ruby");
                     let is_table = is_table_block(para);
                     let template = if code_text.is_some() {
@@ -6380,8 +6401,9 @@ impl Widget for ChapterList {
                         item.widget(cx, ids!(code_view)).set_text(cx, code_text);
                     } else {
                         let html = item.widget(cx, ids!(para_html));
+                        let display_html = tracked.as_deref().unwrap_or(para);
                         if let Some(mut inner) = html.borrow_mut::<Html>() {
-                            if inner.body.as_ref() != para {
+                            if inner.body.as_ref() != display_html {
                                 // Html assigns anonymous custom tags (`mark`, `ruby`,
                                 // links) positional IDs. Adding/removing a mark can
                                 // therefore move a RubyWord onto an ID previously owned
@@ -6391,7 +6413,7 @@ impl Widget for ChapterList {
                                 // Rebuild only when the document actually changes; steady
                                 // frames keep their widgets and area references.
                                 inner.text_flow.clear_items();
-                                inner.set_text(cx, para);
+                                inner.set_text(cx, display_html);
                             }
                             inner.text_flow.selectable = !self.compact_layout;
                             inner.text_flow.font_size = reader_font_size;
@@ -6433,8 +6455,16 @@ impl Widget for ChapterList {
                             inner.text_flow.draw_selection.begin_many_instances(cx);
                         };
                     }
+                    crate::reader_hit::begin_capture();
                     item.draw_all_unscoped(cx);
                     let item_rect = item.area().rect(cx);
+                    let runs = crate::reader_hit::end_capture(item_rect.pos);
+                    if tracked.is_some() {
+                        self.hit_runs
+                            .insert(item_id, (reader_source_hash(para), runs));
+                    } else {
+                        self.hit_runs.remove(&item_id);
+                    }
                     let width_stable = previous_layout_width
                         .map(|previous| reader_geometry_width_is_stable(previous, item_rect.size.x))
                         .unwrap_or(false);
@@ -7268,14 +7298,11 @@ impl App {
     fn project_db_ready_status(&self, cx: &mut Cx, vocab_count: usize, known_count: usize) {
         let status = if app_language() == AppLanguage::English {
             format!(
-                "Database ready\nVocabulary {} · Known {}",
+                "Database ready\nVocabulary {}\nKnown {}",
                 vocab_count, known_count
             )
         } else {
-            format!(
-                "数据库就绪\n生词本 {} · 已认识 {}",
-                vocab_count, known_count
-            )
+            format!("数据库就绪\n生词本 {}\n已认识 {}", vocab_count, known_count)
         };
         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
         let summary = if app_language() == AppLanguage::English {
@@ -12658,12 +12685,38 @@ impl AppMain for App {
         makepad_widgets::widgets_mod(vm);
         makepad_code_editor::script_mod(vm);
         crate::ruby_word::script_mod(vm);
+        crate::reader_hit::script_mod(vm);
         crate::chapter_image::script_mod(vm);
         crate::mark_span::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Dismiss from the window-level owner, not only the shelf body's
+        // transparent overlay. Consume this press so it cannot open a book or
+        // activate a control underneath the disappearing menu.
+        if self.library_action_book_id.is_some() {
+            let press = match event {
+                Event::MouseDown(e) => Some(e.abs),
+                Event::TouchUpdate(e) => e
+                    .touches
+                    .iter()
+                    .find(|touch| touch.state == TouchState::Start)
+                    .map(|touch| touch.abs),
+                _ => None,
+            };
+            if let Some(abs) = press {
+                let menu = self
+                    .ui
+                    .widget(cx, ids!(library_action_menu))
+                    .area()
+                    .clipped_rect(cx);
+                if !menu.contains(abs) {
+                    self.close_library_action_menu(cx);
+                    return;
+                }
+            }
+        }
         if self.library_action_book_id.is_some()
             && (matches!(event, Event::KeyDown(key) if key.key_code == KeyCode::Escape)
                 || event.back_pressed())
