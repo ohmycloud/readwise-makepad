@@ -2026,6 +2026,53 @@ fn apply_reader_input_palette(cx: &mut Cx, mut widget: WidgetRef, palette: Reade
     });
 }
 
+fn apply_library_control_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
+    let surface = palette.surface;
+    let text = palette.text;
+    let muted = palette.muted;
+    let border = palette.border;
+    let accent = palette.accent;
+    let hover = palette.hover;
+    let pressed = palette.pressed;
+    // All library header controls belong to the page, not the popup layer.
+    // Apply every state after settings load/reapply; the initial template can
+    // otherwise retain the startup paper palette instead of the saved one.
+    script_apply_eval!(cx, widget, {
+        draw_bg +: {
+            color: #(surface)
+            color_active: #(surface)
+            color_focus: #(surface)
+            color_disabled: #(surface)
+            color_hover: #(hover)
+            color_down: #(pressed)
+            border_color: #(border)
+            border_color_active: #(accent)
+            border_color_2: #(border)
+            border_color_hover: #(accent)
+            border_color_2_hover: #(accent)
+            border_color_focus: #(accent)
+            border_color_2_focus: #(accent)
+            border_color_down: #(accent)
+            border_color_2_down: #(accent)
+            border_color_disabled: #(border)
+            border_color_2_disabled: #(border)
+            arrow_color: #(text)
+            arrow_color_hover: #(text)
+            arrow_color_focus: #(text)
+            arrow_color_down: #(text)
+            arrow_color_disabled: #(muted)
+        }
+        draw_text +: {
+            color: #(text)
+            color_active: #(accent)
+            color_hover: #(text)
+            color_focus: #(text)
+            color_down: #(text)
+            color_disabled: #(muted)
+        }
+    });
+}
+
 fn apply_reader_surface_palette(cx: &mut Cx, mut widget: WidgetRef, color: Vec4f, border: Vec4f) {
     script_apply_eval!(cx, widget, {
         draw_bg +: {
@@ -3508,7 +3555,9 @@ script_mod! {
         cursor: MouseCursor.Hand
         flow: Right spacing: 14 padding: 12
         align: Align{ y: 0.5 }
-        draw_bg.color: theme.color_bg_container
+        // Let the current reading surface show through, including after a
+        // palette change or PortalList item reuse. Cards are not popup panels.
+        draw_bg.color: theme.color_u_hidden
         draw_bg.border_radius: 8.0
         cover := View{
             width: 44 height: 56
@@ -3563,7 +3612,7 @@ script_mod! {
         cursor: MouseCursor.Hand
         flow: Down spacing: 5 padding: 10
         align: Align{ x: 0.5 }
-        draw_bg.color: theme.color_bg_container
+        draw_bg.color: theme.color_u_hidden
         draw_bg.border_radius: 8.0
         cover := View{
             width: 86 height: 116
@@ -4217,15 +4266,21 @@ script_mod! {
                                     }
                                     library_view_list := RadioButtonTabFlat{
                                         text: "列表"
+                                        draw_bg.color: theme.color_bg_app
+                                        draw_bg.color_active: theme.color_bg_app
                                     }
                                     library_view_grid := RadioButtonTabFlat{
                                         text: "网格"
+                                        draw_bg.color: theme.color_bg_app
+                                        draw_bg.color_active: theme.color_bg_app
                                     }
                                     import_epub_btn := ButtonFlat{
                                         // 平台能力在初始脚本对象中确定；不要依赖 Startup
                                         // 再把静态 false 改回来，ScriptReapply 会覆盖它。
                                         visible: #(cfg!(any(target_os = "android", target_os = "ios", target_os = "macos")))
                                         text: "导入 EPUB"
+                                        draw_bg.color: theme.color_bg_app
+                                        draw_bg.color_focus: theme.color_bg_app
                                     }
                                 }
                                 library_hint := Label{
@@ -4249,6 +4304,8 @@ script_mod! {
                                         // Center the label within our fixed-height field.
                                         align: Align{x: 0.0 y: 0.5}
                                         padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
+                                        draw_bg.color: theme.color_bg_app
+                                        draw_bg.color_focus: theme.color_bg_app
                                         labels: ["全部标签"]
                                         selected_item: 0
                                     }
@@ -7838,6 +7895,14 @@ impl App {
 
     fn apply_reader_background(&self, cx: &mut Cx, background: ReaderBackground) {
         let palette = reader_scene_palette(background, *READER_THEME.read().unwrap());
+        for id in [
+            id!(library_tag_filter),
+            id!(library_view_list),
+            id!(library_view_grid),
+            id!(import_epub_btn),
+        ] {
+            apply_library_control_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
 
         for id in [
             id!(main_column),
