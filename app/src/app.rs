@@ -4245,6 +4245,10 @@ script_mod! {
                                     }
                                     library_tag_filter := DropDown{
                                         width: 180 height: 32
+                                        // DropDown defaults to TopLeft for Fit height.
+                                        // Center the label within our fixed-height field.
+                                        align: Align{x: 0.0 y: 0.5}
+                                        padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
                                         labels: ["全部标签"]
                                         selected_item: 0
                                     }
