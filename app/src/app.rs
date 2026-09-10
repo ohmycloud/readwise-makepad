@@ -6804,12 +6804,10 @@ impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let data = CHAT_DATA.read().unwrap();
         let language = *APP_LANGUAGE.read().unwrap();
-        let reader_palette = self.reader_style.then(|| {
-            reader_scene_palette(
-                *READER_BACKGROUND.read().unwrap(),
-                *READER_THEME.read().unwrap(),
-            )
-        });
+        let reader_palette = Some(reader_scene_palette(
+            *READER_BACKGROUND.read().unwrap(),
+            *READER_THEME.read().unwrap(),
+        ));
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 let message_count = data.messages.len();
@@ -6851,8 +6849,9 @@ impl Widget for ChatList {
                     item.label(cx, ids!(message)).set_text(cx, &message.text);
                     if let Some(palette) = reader_palette {
                         let background = match message.role {
-                            ChatRole::User => palette.field,
+                            ChatRole::User if self.reader_style => palette.field,
                             ChatRole::Assistant => palette.surface,
+                            ChatRole::User => palette.surface,
                         };
                         apply_reader_surface_palette(cx, item.clone(), background, palette.border);
                         let message_label = item.widget(cx, ids!(message));
@@ -6938,6 +6937,25 @@ impl Widget for SkillList {
                         .set_text(cx, crate::i18n::text(language, "edit"));
                     item.widget(cx, ids!(skill_delete))
                         .set_text(cx, crate::i18n::text(language, "delete"));
+                    let skill_name = item.widget(cx, ids!(skill_name));
+                    let skill_kind = item.widget(cx, ids!(skill_kind));
+                    let skill_preview = item.widget(cx, ids!(skill_preview));
+                    let skill_active = item.widget(cx, ids!(skill_active));
+                    let skill_use = item.widget(cx, ids!(skill_use));
+                    let skill_edit = item.widget(cx, ids!(skill_edit));
+                    let skill_delete = item.widget(cx, ids!(skill_delete));
+                    let palette = reader_scene_palette(
+                        *READER_BACKGROUND.read().unwrap(),
+                        *READER_THEME.read().unwrap(),
+                    );
+                    apply_reader_surface_palette(cx, item.clone(), palette.surface, palette.border);
+                    apply_reader_label_palette(cx, skill_name, palette.text);
+                    apply_reader_label_palette(cx, skill_kind, palette.accent);
+                    apply_reader_label_palette(cx, skill_preview, palette.muted);
+                    apply_reader_button_palette(cx, skill_active, palette);
+                    apply_reader_button_palette(cx, skill_use, palette);
+                    apply_reader_button_palette(cx, skill_edit, palette);
+                    apply_reader_button_palette(cx, skill_delete, palette);
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -7051,6 +7069,25 @@ impl Widget for VocabList {
                         .set_text(cx, crate::i18n::text(language, "remove"));
                     item.widget(cx, ids!(vocab_card_bottom))
                         .set_visible(cx, true);
+                    let palette = reader_scene_palette(
+                        *READER_BACKGROUND.read().unwrap(),
+                        *READER_THEME.read().unwrap(),
+                    );
+                    apply_reader_surface_palette(cx, item.clone(), palette.surface, palette.border);
+                    let vocab_word = item.widget(cx, ids!(vocab_word));
+                    let vocab_status = item.widget(cx, ids!(vocab_status));
+                    let vocab_gloss = item.widget(cx, ids!(vocab_gloss));
+                    let vocab_context = item.widget(cx, ids!(vocab_context));
+                    let vocab_meta = item.widget(cx, ids!(vocab_meta));
+                    apply_reader_label_palette(cx, vocab_word, palette.text);
+                    apply_reader_label_palette(cx, vocab_status, palette.accent);
+                    apply_reader_label_palette(cx, vocab_gloss, palette.text);
+                    apply_reader_label_palette(cx, vocab_context, palette.muted);
+                    apply_reader_label_palette(cx, vocab_meta, palette.muted);
+                    for id in [id!(vocab_speak), id!(vocab_review), id!(vocab_toggle), id!(vocab_remove)] {
+                        let button = item.widget(cx, &[id]);
+                        apply_reader_button_palette(cx, button, palette);
+                    }
                     item.draw_all_unscoped(cx);
                 }
             }
@@ -7912,12 +7949,78 @@ impl App {
             id!(page_reader),
             id!(reader_body),
             id!(reader_surface),
+            id!(page_chat),
+            id!(page_skills),
+            id!(page_vocab),
+            id!(page_statistics),
+            id!(page_settings),
         ] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),
                 palette.surface,
                 palette.surface,
+            );
+        }
+        // These pages are built from reusable Makepad widgets whose initial
+        // draw colors are resolved before the saved reading background is
+        // loaded. Re-apply their surfaces here so no stale white/gray panels
+        // remain after navigation or a background change.
+        for id in [
+            id!(vocab_review_panel),
+            id!(stat_today_card),
+            id!(stat_total_card),
+            id!(stat_days_card),
+            id!(stat_books_card),
+            id!(reading_chart_card),
+            id!(vocab_chart_card),
+            id!(reading_chart),
+            id!(vocab_chart),
+            id!(skills_left),
+            id!(skill_editor),
+        ] {
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.surface,
+                palette.border,
+            );
+        }
+        let page_button_palette = ReaderScenePalette {
+            field: palette.surface,
+            ..palette
+        };
+        for id in [
+            id!(vocab_start_review),
+            id!(vocab_filter_all),
+            id!(vocab_filter_learning),
+            id!(vocab_filter_mastered),
+            id!(vocab_review_close),
+            id!(vocab_review_speak),
+            id!(vocab_review_reveal),
+            id!(vocab_review_again),
+            id!(vocab_review_known),
+            id!(statistics_refresh),
+            id!(skill_new),
+            id!(skill_active_edit),
+            id!(skill_cancel),
+            id!(skill_save),
+            id!(chat_send),
+            id!(chat_cancel),
+            id!(chat_clear),
+        ] {
+            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), page_button_palette);
+        }
+        for id in [
+            id!(vocab_search),
+            id!(chat_input),
+            id!(skill_name_input),
+            id!(skill_content_input),
+        ] {
+            apply_reader_input_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                page_button_palette,
             );
         }
         apply_reader_surface_palette(
@@ -12605,9 +12708,9 @@ impl AppMain for App {
                 color_bg_app: #(surface)
                 color_fg_app: #(surface)
                 color_app_caption_bar: #(surface)
-                color_bg_container: #(field)
-                color_bg_even: #(field)
-                color_bg_odd: #(field)
+                color_bg_container: #(surface)
+                color_bg_even: #(surface)
+                color_bg_odd: #(surface)
                 color_bg_highlight: #(hover)
                 color_bg_unfocussed: #(hover)
                 color_bg_highlight_inline: #(field)
@@ -12682,53 +12785,53 @@ impl AppMain for App {
                 color_bevel_outset_2_drag: #(border)
                 color_bevel_outset_2_disabled: #(border)
 
-                color_inset: #(field)
-                color_inset_hover: #(field)
+                color_inset: #(surface)
+                color_inset_hover: #(surface)
                 color_inset_down: #(pressed)
                 color_inset_active: #(field)
                 color_inset_focus: #(surface)
-                color_inset_drag: #(field)
-                color_inset_disabled: #(field)
-                color_inset_empty: #(field)
-                color_inset_1: #(field)
-                color_inset_1_hover: #(field)
+                color_inset_drag: #(surface)
+                color_inset_disabled: #(surface)
+                color_inset_empty: #(surface)
+                color_inset_1: #(surface)
+                color_inset_1_hover: #(surface)
                 color_inset_1_down: #(pressed)
                 color_inset_1_active: #(field)
                 color_inset_1_focus: #(surface)
-                color_inset_1_drag: #(field)
-                color_inset_1_disabled: #(field)
-                color_inset_1_empty: #(field)
-                color_inset_2: #(field)
-                color_inset_2_hover: #(field)
+                color_inset_1_drag: #(surface)
+                color_inset_1_disabled: #(surface)
+                color_inset_1_empty: #(surface)
+                color_inset_2: #(surface)
+                color_inset_2_hover: #(surface)
                 color_inset_2_down: #(pressed)
                 color_inset_2_active: #(field)
                 color_inset_2_focus: #(surface)
-                color_inset_2_drag: #(field)
-                color_inset_2_disabled: #(field)
-                color_inset_2_empty: #(field)
+                color_inset_2_drag: #(surface)
+                color_inset_2_disabled: #(surface)
+                color_inset_2_empty: #(surface)
 
-                color_outset: #(field)
+                color_outset: #(surface)
                 color_outset_hover: #(hover)
                 color_outset_down: #(pressed)
-                color_outset_active: #(field)
-                color_outset_focus: #(field)
+                color_outset_active: #(surface)
+                color_outset_focus: #(surface)
                 color_outset_drag: #(hover)
-                color_outset_disabled: #(field)
-                color_outset_inactive: #(field)
-                color_outset_1: #(field)
+                color_outset_disabled: #(surface)
+                color_outset_inactive: #(surface)
+                color_outset_1: #(surface)
                 color_outset_1_hover: #(hover)
                 color_outset_1_down: #(pressed)
-                color_outset_1_active: #(field)
-                color_outset_1_focus: #(field)
+                color_outset_1_active: #(surface)
+                color_outset_1_focus: #(surface)
                 color_outset_1_drag: #(hover)
-                color_outset_1_disabled: #(field)
-                color_outset_2: #(field)
+                color_outset_1_disabled: #(surface)
+                color_outset_2: #(surface)
                 color_outset_2_hover: #(hover)
                 color_outset_2_down: #(pressed)
-                color_outset_2_active: #(field)
-                color_outset_2_focus: #(field)
+                color_outset_2_active: #(surface)
+                color_outset_2_focus: #(surface)
                 color_outset_2_drag: #(hover)
-                color_outset_2_disabled: #(field)
+                color_outset_2_disabled: #(surface)
 
                 color_icon: #(muted)
                 color_icon_inactive: #(muted)
