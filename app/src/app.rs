@@ -3606,7 +3606,10 @@ script_mod! {
     }
 
     mod.widgets.BookShelfGridCard = RoundedView{
-        width: Fill height: 226
+        // Two-line titles must not push the status outside a fixed card clip.
+        // The enclosing grid cells also fit content, so the row measures the
+        // tallest complete card before placing the next row.
+        width: Fill height: Fit
         new_batch: true
         capture_overload: false
         cursor: MouseCursor.Hand
@@ -3682,19 +3685,19 @@ script_mod! {
                 width: Fill height: Fit
                 flow: Right spacing: 12
                 grid_cell_0 := View{
-                    width: Fill height: 226
+                    width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_1 := View{
-                    width: Fill height: 226
+                    width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_2 := View{
-                    width: Fill height: 226
+                    width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_3 := View{
-                    width: Fill height: 226
+                    width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
             }
@@ -3702,19 +3705,19 @@ script_mod! {
                 width: Fill height: Fit
                 flow: Right spacing: 12
                 grid_cell_0 := View{
-                    width: Fill height: 226
+                    width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_1 := View{
-                    width: Fill height: 226
+                    width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_2 := View{
-                    width: Fill height: 226
+                    width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_3 := View{
-                    width: Fill height: 226
+                    width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
             }
