@@ -3963,7 +3963,18 @@ script_mod! {
             width: Fill height: Fill
             spacing: 8
             padding: Inset{right: 8 bottom: 16}
-            scroll_bar: ScrollBar{}
+            scroll_bar: ScrollBar{
+                draw_bg +: {
+                    // The default scrollbar track is an opaque light gray;
+                    // let the reading surface show through instead.
+                    color: #0000
+                    color_hover: #x66877c88
+                    color_drag: #x4f776cbb
+                    border_color: #0000
+                    border_color_hover: #0000
+                    border_color_drag: #0000
+                }
+            }
             VocabCard := VocabCardTemplate{}
             VocabCardAlternate := VocabCardTemplate{}
         }
@@ -7992,9 +8003,6 @@ impl App {
         };
         for id in [
             id!(vocab_start_review),
-            id!(vocab_filter_all),
-            id!(vocab_filter_learning),
-            id!(vocab_filter_mastered),
             id!(vocab_review_close),
             id!(vocab_review_speak),
             id!(vocab_review_reveal),
@@ -8012,10 +8020,46 @@ impl App {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), page_button_palette);
         }
         for id in [
+            id!(vocab_filter_all),
+            id!(vocab_filter_learning),
+            id!(vocab_filter_mastered),
+        ] {
+            apply_library_control_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
+        // Settings contains many RadioButtonTabFlat/CheckBox controls whose
+        // active state otherwise falls back to the default white widget skin.
+        // Keep every setting choice in the same reading-surface scene.
+        for id in [
+            id!(language_chinese), id!(language_english), id!(theme_dark), id!(theme_light),
+            id!(reader_background_paper), id!(reader_background_sepia),
+            id!(reader_background_sage), id!(reader_background_night),
+            id!(reader_background_theme), id!(reader_font_standard), id!(reader_font_monospace),
+            id!(reader_spacing_default), id!(reader_spacing_comfortable),
+            id!(reader_spacing_relaxed), id!(gloss_enable), id!(local_ai_auto_start),
+        ] {
+            apply_library_control_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
+        for id in [
+            id!(gc0), id!(gc1), id!(gc2), id!(gc3), id!(gb0), id!(gb1), id!(gb2), id!(gb3),
+            id!(wc0), id!(wc1), id!(wc2), id!(wc3), id!(wb0), id!(wb1), id!(wb2), id!(wb3),
+            id!(sc0), id!(sc1), id!(sc2), id!(sc3), id!(hc0), id!(hc1), id!(hc2), id!(hc3),
+        ] {
+            apply_reader_surface_palette(cx, self.ui.widget(cx, &[id]), palette.surface, palette.border);
+        }
+        for id in [
+            id!(font_dec), id!(font_inc), id!(gloss_dec), id!(gloss_inc), id!(ai_save),
+            id!(reload_button), id!(local_ai_start), id!(local_ai_save), id!(local_ai_stop),
+        ] {
+            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), page_button_palette);
+        }
+        for id in [
             id!(vocab_search),
             id!(chat_input),
             id!(skill_name_input),
             id!(skill_content_input),
+            id!(ai_endpoint), id!(ai_model), id!(ai_api_key), id!(local_ai_binary),
+            id!(local_ai_model_path), id!(local_ai_port), id!(local_ai_context),
+            id!(local_ai_threads), id!(local_ai_gpu_layers),
         ] {
             apply_reader_input_palette(
                 cx,
