@@ -6403,10 +6403,12 @@ impl Widget for ChapterList {
                         continue;
                     };
                     let code_text = code_blocks.get(item_id).and_then(Option::as_deref);
-                    let tracked = code_text
+                    let with_inline_code = code_text
                         .is_none()
-                        .then(|| crate::reader_hit::tracked_html(para))
-                        .flatten();
+                        .then(|| crate::reader_inline_code::wrap_html(para));
+                    let tracked = with_inline_code
+                        .as_deref()
+                        .and_then(crate::reader_hit::tracked_html);
                     let has_gloss = para.contains("<ruby");
                     let is_table = is_table_block(para);
                     let template = if code_text.is_some() {
@@ -6480,9 +6482,10 @@ impl Widget for ChapterList {
                         item.widget(cx, ids!(code_view)).set_text(cx, code_text);
                     } else {
                         let html = item.widget(cx, ids!(para_html));
-                        let display_html = tracked.as_deref().unwrap_or(para);
-                        let with_inline_code = crate::reader_inline_code::wrap_html(display_html);
-                        let display_html = with_inline_code.as_str();
+                        let display_html = tracked
+                            .as_deref()
+                            .or(with_inline_code.as_deref())
+                            .unwrap_or(para);
                         if let Some(mut inner) = html.borrow_mut::<Html>() {
                             if inner.body.as_ref() != display_html {
                                 // Html assigns anonymous custom tags (`mark`, `ruby`,
@@ -6543,7 +6546,7 @@ impl Widget for ChapterList {
                     );
                     item.draw_all_unscoped(cx);
                     let item_rect = item.area().rect(cx);
-                    let runs = crate::reader_hit::end_capture(item_rect.pos);
+                    let runs = crate::reader_hit::end_capture(cx, item_rect.pos);
                     if tracked.is_some() {
                         self.hit_runs
                             .insert(item_id, (reader_source_hash(para), runs));

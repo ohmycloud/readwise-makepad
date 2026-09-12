@@ -181,23 +181,11 @@ impl Widget for ReaderInlineCode {
         tf.areas_tracker.push_tracker();
         tf.draw_text(cx, &self.text);
         let (area_start, area_end) = tf.areas_tracker.pop_tracker();
-        if let Some((from, to)) = range.filter(|(from, to)| *from < tf.text_len() && *to > start) {
+        let selected = range.filter(|(from, to)| *from < tf.text_len() && *to > start);
+        let capture_hit = tf.selectable && crate::reader_hit::is_capturing();
+        if tf.text_len() > start && (selected.is_some() || capture_hit) {
             let text = tf.get_text_for_range(start, tf.text_len());
-            let from = from.saturating_sub(start);
-            let to = (to - start).min(text.len());
             let dt = &tf.draw_text;
-            let native = dt.layout(
-                cx,
-                (pos.x - rect.pos.x) as f32,
-                row_height,
-                (!rect.size.x.is_nan()).then_some(rect.size.x as f32),
-                wrap,
-                dt.layout_align,
-                &text,
-            );
-            let mut tracker = SelectionTracker::default();
-            tracker.push_text(native, dvec2(rect.pos.x, pos.y), dt.font_scale, &text);
-            let native = tracker.selection_rects(from, to);
             // Margin walks have zero height; the remaining tracked rectangles
             // are precisely the inline code backgrounds, one per visual row.
             let areas: Vec<_> = tf.areas_tracker.areas[area_start..area_end]
@@ -220,7 +208,30 @@ impl Widget for ReaderInlineCode {
                     dt.layout_align,
                     &text,
                 );
-                if actual.rows.len() == areas.len() {
+                if capture_hit {
+                    crate::reader_hit::capture_code_rows(
+                        actual.clone(),
+                        &areas,
+                        padding,
+                        dt.font_scale,
+                        start,
+                    );
+                }
+                if let Some((from, to)) = selected.filter(|_| actual.rows.len() == areas.len()) {
+                    let from = from.saturating_sub(start);
+                    let to = (to - start).min(text.len());
+                    let native = dt.layout(
+                        cx,
+                        (pos.x - rect.pos.x) as f32,
+                        row_height,
+                        (!rect.size.x.is_nan()).then_some(rect.size.x as f32),
+                        wrap,
+                        dt.layout_align,
+                        &text,
+                    );
+                    let mut tracker = SelectionTracker::default();
+                    tracker.push_text(native, dvec2(rect.pos.x, pos.y), dt.font_scale, &text);
+                    let native = tracker.selection_rects(from, to);
                     let actual = selected_row_spans(&actual, from, to)
                         .into_iter()
                         .map(|(i, left, right)| {
@@ -239,6 +250,8 @@ impl Widget for ReaderInlineCode {
                             .push(Correction { native, actual })
                     });
                 }
+            } else if capture_hit {
+                crate::reader_hit::cancel_capture();
             }
         }
         tf.inline_code.pop();
