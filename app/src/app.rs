@@ -360,30 +360,6 @@ fn is_table_block(html: &str) -> bool {
             .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'>' || *byte == b'/')
 }
 
-/// Html/TextFlow inserts a selection-only newline when a top-level paragraph or
-/// heading starts. Persistent highlights, notes, and `rendered_text` use the
-/// visible source-text coordinate space, so the reader translates this prefix
-/// only at the TextFlow boundary.
-fn textflow_selection_prefix_len(html: &str) -> usize {
-    let trimmed = html.trim_start();
-    if !trimmed.starts_with('<') {
-        return 0;
-    }
-    let Some(tag_end) = trimmed.find('>') else {
-        return 0;
-    };
-    let tag = trimmed[1..tag_end]
-        .split_ascii_whitespace()
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('/')
-        .to_ascii_lowercase();
-    usize::from(matches!(
-        tag.as_str(),
-        "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-    ))
-}
-
 /// 连续正文使用一次稳定的纯文本布局做鼠标命中，避免 TextFlow 按行内 run
 /// 记录的 SelectionTracker Area 在选区重绘/窗口缩放后出现重叠或旧引用。
 /// 表格、列表、引用和图片有额外的几何结构，仍交给实际 widget 命中。
@@ -518,7 +494,7 @@ mod table_block_tests {
         choose_reader_hit_index, is_table_block, normalize_rich_selection_rects,
         ordered_selection_range, reader_drag_moves_forward, reader_geometry_capture_policy,
         reader_geometry_width_is_stable, reader_markup_available_width, selection_range_in_block,
-        supports_unified_reader_hit_test, textflow_selection_prefix_len,
+        supports_unified_reader_hit_test,
         visual_selection_row_bounds,
     };
     use makepad_widgets::{dvec2, Rect};
@@ -528,20 +504,6 @@ mod table_block_tests {
         assert!(is_table_block("  <TABLE class='data'><tr></tr></TABLE>"));
         assert!(!is_table_block("<p>Table 1</p><table></table>"));
         assert!(!is_table_block("<tableau>not a table</tableau>"));
-    }
-
-    #[test]
-    fn reader_selection_separates_textflow_prefix_from_source_offsets() {
-        assert_eq!(textflow_selection_prefix_len(" <p>words</p>"), 1);
-        assert_eq!(
-            textflow_selection_prefix_len("<H2 id='title'>Title</H2>"),
-            1
-        );
-        assert_eq!(
-            textflow_selection_prefix_len("<blockquote><p>x</p></blockquote>"),
-            0
-        );
-        assert_eq!(textflow_selection_prefix_len("plain text"), 0);
     }
 
     #[test]
@@ -5629,6 +5591,8 @@ struct ChapterList {
     item_layout_widths: HashMap<(usize, usize), f64>,
     #[rust]
     hit_runs: HashMap<usize, (u64, Vec<crate::reader_hit::HitRun>)>,
+    #[rust]
+    text_maps: HashMap<usize, (u64, crate::reader_text::TextMap)>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -5865,6 +5829,13 @@ fn reader_markup_available_width(
 }
 
 impl ChapterList {
+    fn text_map(&self, block: usize, source: &str) -> Option<&crate::reader_text::TextMap> {
+        self.text_maps
+            .get(&block)
+            .filter(|(hash, _)| *hash == reader_source_hash(source))
+            .map(|(_, map)| map)
+    }
+
     fn reset_selection_gesture(&mut self) {
         self.sel_anchor = None;
         self.sel_cursor = None;
@@ -6058,10 +6029,18 @@ impl ChapterList {
             return Some((*first_id, 0));
         }
         if abs.y > list_rect.pos.y + list_rect.size.y {
-            return Some((*last_id, last_widget.selection_text_len()));
+            let len = PARAGRAPHS
+                .read()
+                .unwrap()
+                .get(*last_id)
+                .map(|source| readwise_core::vocab::annotate::rendered_text(source).len())
+                .unwrap_or_else(|| last_widget.selection_text_len());
+            return Some((*last_id, len));
         }
         for (id, widget, rect) in &visible {
-            if rect.contains(abs) {
+            // Horizontal margin is still on this visual row. Sending it to
+            // the block/viewport start selects unrelated preceding paragraphs.
+            if crate::reader_hit::contains_row(*rect, abs.y) {
                 let paragraphs = PARAGRAPHS.read().unwrap();
                 let paragraph = paragraphs.get(*id)?;
                 let plain_len = readwise_core::vocab::annotate::rendered_text(paragraph).len();
@@ -6070,9 +6049,7 @@ impl ChapterList {
                         if let Some(index) = crate::reader_hit::hit_index(runs, abs - rect.pos) {
                             return Some((
                                 *id,
-                                index
-                                    .saturating_sub(textflow_selection_prefix_len(paragraph))
-                                    .min(plain_len),
+                                self.text_map(*id, paragraph)?.source_index(index),
                             ));
                         }
                     }
@@ -6085,11 +6062,9 @@ impl ChapterList {
                     .is_some();
                 let char_idx = if supports_unified_reader_hit_test(paragraph) && !is_code {
                     let fallback = self.unified_markup_hit_index(cx, widget, paragraph, abs)?;
-                    let prefix = textflow_selection_prefix_len(paragraph);
-                    let native = widget
-                        .selection_point_to_char_index(cx, abs)?
-                        .saturating_sub(prefix)
-                        .min(plain_len);
+                    let native = self
+                        .text_map(*id, paragraph)?
+                        .source_index(widget.selection_point_to_char_index(cx, abs)?);
                     if let (Some(previous), Some(previous_abs)) = (
                         self.sel_cursor.filter(|point| point.0 == *id),
                         self.last_abs,
@@ -6112,9 +6087,12 @@ impl ChapterList {
                         native
                     }
                 } else {
-                    widget
-                        .selection_point_to_char_index(cx, abs)?
-                        .saturating_sub(textflow_selection_prefix_len(paragraph))
+                    let native = widget.selection_point_to_char_index(cx, abs)?;
+                    if is_code {
+                        native
+                    } else {
+                        self.text_map(*id, paragraph)?.source_index(native)
+                    }
                 };
                 return Some((*id, char_idx.min(plain_len)));
             }
@@ -6167,19 +6145,25 @@ impl ChapterList {
                 continue;
             };
             let paragraph = paragraphs.get(id).map(String::as_str).unwrap_or("");
-            let prefix = textflow_selection_prefix_len(paragraph);
             let source_len = readwise_core::vocab::annotate::rendered_text(paragraph).len();
-            match range {
-                None => widget.selection_clear(),
-                Some((start, end)) if id < start.0 || id > end.0 => widget.selection_clear(),
-                Some((start, end)) if id == start.0 && id == end.0 => {
-                    widget.selection_set(start.1 + prefix, end.1 + prefix)
-                }
-                Some((start, _)) if id == start.0 => {
-                    widget.selection_set(start.1 + prefix, source_len + prefix)
-                }
-                Some((_, end)) if id == end.0 => widget.selection_set(prefix, end.1 + prefix),
-                Some(_) => widget.selection_set(prefix, source_len + prefix),
+            let is_code = CODE_BLOCKS
+                .read()
+                .unwrap()
+                .get(id)
+                .is_some_and(Option::is_some);
+            let native_range = range
+                .and_then(|range| selection_range_in_block(range, id, source_len))
+                .and_then(|range| {
+                    if is_code {
+                        Some(range)
+                    } else {
+                        self.text_map(id, paragraph)?.native_range(range)
+                    }
+                });
+            if let Some((start, end)) = native_range {
+                widget.selection_set(start, end);
+            } else {
+                widget.selection_clear();
             }
             widget.redraw(cx);
         }
@@ -6397,11 +6381,13 @@ impl Widget for ChapterList {
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 self.hit_runs.clear();
+                let mut drawn_blocks = std::collections::HashSet::new();
                 list.set_item_range(cx, 0, paragraphs.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
                     let Some(para) = paragraphs.get(item_id) else {
                         continue;
                     };
+                    drawn_blocks.insert(item_id);
                     let code_text = code_blocks.get(item_id).and_then(Option::as_deref);
                     let with_inline_code = code_text
                         .is_none()
@@ -6432,7 +6418,8 @@ impl Widget for ChapterList {
                         .item_layout_widths
                         .get(&(chapter_idx, item_id))
                         .copied();
-                    let source_len = readwise_core::vocab::annotate::rendered_text(para).len();
+                    let source_text = readwise_core::vocab::annotate::rendered_text(para);
+                    let source_len = source_text.len();
                     let current_range = selection_range
                         .and_then(|range| selection_range_in_block(range, item_id, source_len));
                     let highlight_ranges: Vec<_> = if code_text.is_none() {
@@ -6522,13 +6509,19 @@ impl Widget for ChapterList {
                             inner.text_flow.text_style_fixed.line_spacing = line_spacing;
                         };
                     }
-                    if let Some((start, end)) = probe_range {
-                        let prefix = textflow_selection_prefix_len(para);
-                        item.selection_set(start + prefix, end + prefix);
+                    let native_probe = probe_range.and_then(|range| {
+                        if code_text.is_some() {
+                            Some(range)
+                        } else {
+                            self.text_map(item_id, para)?.native_range(range)
+                        }
+                    });
+                    if let Some((start, end)) = native_probe {
+                        item.selection_set(start, end);
                     } else {
                         item.selection_clear();
                     }
-                    let capture_geometry = code_text.is_none() && probe_range.is_some();
+                    let capture_geometry = code_text.is_none() && native_probe.is_some();
                     if capture_geometry {
                         let html = item.widget(cx, ids!(para_html));
                         if let Some(mut inner) = html.borrow_mut::<Html>() {
@@ -6540,13 +6533,36 @@ impl Widget for ChapterList {
                         };
                     }
                     crate::reader_hit::begin_capture();
-                    let prefix = textflow_selection_prefix_len(para);
-                    crate::reader_inline_code::begin_capture(
-                        probe_range.map(|(start, end)| (start + prefix, end + prefix)),
-                    );
+                    crate::reader_inline_code::begin_capture(native_probe);
                     item.draw_all_unscoped(cx);
                     let item_rect = item.area().rect(cx);
                     let runs = crate::reader_hit::end_capture(cx, item_rect.pos);
+                    let mut mapping_stable = true;
+                    if code_text.is_none() {
+                        let html = item.widget(cx, ids!(para_html));
+                        let native = html
+                            .borrow::<Html>()
+                            .and_then(|inner| crate::reader_text::native_text(&inner.text_flow));
+                        mapping_stable = native.as_ref().is_some_and(|native| {
+                            self.text_map(item_id, para)
+                                .is_some_and(|map| map.matches_native(native))
+                        });
+                        if !mapping_stable {
+                            self.text_maps.remove(&item_id);
+                            if let Some(map) = native.and_then(|native| {
+                                crate::reader_text::TextMap::from_html(&source_text, para, native)
+                            }) {
+                                self.text_maps
+                                    .insert(item_id, (reader_source_hash(para), map));
+                                // Fresh/recycled HTML needs one draw to discover
+                                // all actual block breaks before probing a range.
+                                needs_geometry_redraw |= probe_range.is_some();
+                            }
+                            self.range_geometry_cache.retain(|key, _| {
+                                key.chapter != chapter_idx || key.block != item_id
+                            });
+                        }
+                    }
                     if tracked.is_some() {
                         self.hit_runs
                             .insert(item_id, (reader_source_hash(para), runs));
@@ -6588,9 +6604,9 @@ impl Widget for ChapterList {
                                 reader_geometry_capture_policy(
                                     probe_range,
                                     current_range,
-                                    width_stable,
+                                    width_stable && mapping_stable,
                                 );
-                            if draw_current_now {
+                            if draw_current_now && mapping_stable {
                                 // Live selection is transient UI, not persistent cache.
                                 // Paint this frame immediately even while a resized item
                                 // is waiting for its next stable-width frame.
@@ -6601,7 +6617,7 @@ impl Widget for ChapterList {
                                     self.range_geometry_cache
                                         .insert(key, rects_relative_to(&normalized, item_rect.pos));
                                 }
-                            } else {
+                            } else if mapping_stable || self.text_map(item_id, para).is_some() {
                                 // The PortalList item was still transitioning from the
                                 // old window width. Never poison the new-width cache with
                                 // this frame; request one stable redraw instead.
@@ -6625,7 +6641,7 @@ impl Widget for ChapterList {
                                     },
                                 );
                             }
-                        } else {
+                        } else if self.text_map(item_id, para).is_some() {
                             needs_geometry_redraw = true;
                         }
                     }
@@ -6649,6 +6665,7 @@ impl Widget for ChapterList {
                         }
                     }
                 }
+                self.text_maps.retain(|id, _| drawn_blocks.contains(id));
             }
         }
 

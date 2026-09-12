@@ -12,6 +12,7 @@ mod mark_span;
 mod mobile_import;
 mod reader_hit;
 mod reader_inline_code;
+mod reader_text;
 mod ruby_word;
 mod sample_chapter;
 

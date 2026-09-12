@@ -140,6 +140,10 @@ fn axis_distance(value: f64, low: f64, high: f64) -> f64 {
     (low - value).max(value - high).max(0.0)
 }
 
+pub fn contains_row(rect: Rect, y: f64) -> bool {
+    rect.size.y > 0.0 && y >= rect.pos.y && y < rect.pos.y + rect.size.y
+}
+
 fn nearest_row<T>(rows: impl Iterator<Item = (Rect, T)>, point: DVec2) -> Option<T> {
     let mut best: Option<(f64, f64, T)> = None;
     for (rect, value) in rows {
@@ -313,6 +317,20 @@ impl Widget for ReaderRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_margins_stay_in_the_same_block_instead_of_selecting_earlier_text() {
+        let block = Rect {
+            pos: dvec2(182.0, 120.0),
+            size: dvec2(860.0, 240.0),
+        };
+        for x in [160.0, 180.0, 182.0, 760.0, 1060.0] {
+            let pointer = dvec2(x, 334.0);
+            assert!(contains_row(block, pointer.y));
+        }
+        assert!(!contains_row(block, 119.0));
+        assert!(!contains_row(block, 360.0));
+    }
     #[test]
     fn wrapped_run_empty_space_cannot_hide_the_next_run() {
         // Run A starts late on row 1 and ends early on row 2. Its enclosing
