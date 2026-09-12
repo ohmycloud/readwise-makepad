@@ -4126,6 +4126,7 @@ script_mod! {
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                     reader_run := mod.widgets.ReaderRun{}
+                    reader_code := mod.widgets.ReaderInlineCode{}
                 }
             }
             GlossPara := View{
@@ -4145,6 +4146,7 @@ script_mod! {
                     a.pressed_color: theme.color_text_focus
                     ruby := mod.widgets.RubyWord{}
                     reader_run := mod.widgets.ReaderRun{}
+                    reader_code := mod.widgets.ReaderInlineCode{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                 }
@@ -4162,6 +4164,7 @@ script_mod! {
                     a.pressed_color: theme.color_text_focus
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
+                    reader_code := mod.widgets.ReaderInlineCode{}
                 }
             }
             TableGlossPara := View{
@@ -4183,6 +4186,7 @@ script_mod! {
                     ruby := mod.widgets.RubyWord{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
+                    reader_code := mod.widgets.ReaderInlineCode{}
                 }
             }
             CodePaper := ReaderCodePara{
@@ -6477,6 +6481,8 @@ impl Widget for ChapterList {
                     } else {
                         let html = item.widget(cx, ids!(para_html));
                         let display_html = tracked.as_deref().unwrap_or(para);
+                        let with_inline_code = crate::reader_inline_code::wrap_html(display_html);
+                        let display_html = with_inline_code.as_str();
                         if let Some(mut inner) = html.borrow_mut::<Html>() {
                             if inner.body.as_ref() != display_html {
                                 // Html assigns anonymous custom tags (`mark`, `ruby`,
@@ -6531,6 +6537,10 @@ impl Widget for ChapterList {
                         };
                     }
                     crate::reader_hit::begin_capture();
+                    let prefix = textflow_selection_prefix_len(para);
+                    crate::reader_inline_code::begin_capture(
+                        probe_range.map(|(start, end)| (start + prefix, end + prefix)),
+                    );
                     item.draw_all_unscoped(cx);
                     let item_rect = item.area().rect(cx);
                     let runs = crate::reader_hit::end_capture(item_rect.pos);
@@ -6566,8 +6576,9 @@ impl Widget for ChapterList {
                     if capture_geometry {
                         let html = item.widget(cx, ids!(para_html));
                         if let Some(mut inner) = html.borrow_mut::<Html>() {
-                            let raw =
+                            let mut raw =
                                 captured_draw_color_rects(cx, &inner.text_flow.draw_selection);
+                            crate::reader_inline_code::correct_rects(cx, &mut raw);
                             inner.text_flow.draw_selection.end_many_instances(cx);
                             let normalized = normalize_rich_selection_rects(&raw);
                             let (draw_current_now, cache_for_reuse) =
@@ -12905,6 +12916,7 @@ impl AppMain for App {
         makepad_code_editor::script_mod(vm);
         crate::ruby_word::script_mod(vm);
         crate::reader_hit::script_mod(vm);
+        crate::reader_inline_code::script_mod(vm);
         crate::chapter_image::script_mod(vm);
         crate::mark_span::script_mod(vm);
         self::script_mod(vm)

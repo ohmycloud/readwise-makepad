@@ -11,6 +11,7 @@ mod mark_span;
 #[cfg(target_os = "ios")]
 mod mobile_import;
 mod reader_hit;
+mod reader_inline_code;
 mod ruby_word;
 mod sample_chapter;
 
