@@ -6453,9 +6453,13 @@ impl Widget for ChapterList {
                     };
                     drawn_blocks.insert(item_id);
                     let code_text = code_blocks.get(item_id).and_then(Option::as_deref);
-                    let with_inline_code = code_text
-                        .is_none()
-                        .then(|| crate::reader_inline_code::wrap_html(para));
+                    // Adapt only the display HTML: list/block IDs and stored
+                    // selection/highlight offsets still use the original para.
+                    let with_inline_code = code_text.is_none().then(|| {
+                        crate::reader_inline_code::wrap_html(
+                            &crate::reader_lists::normalize_html(para),
+                        )
+                    });
                     let tracked = with_inline_code
                         .as_deref()
                         .and_then(crate::reader_hit::tracked_html);
