@@ -175,7 +175,7 @@ fn word_range_at(text: &str, byte_index: usize) -> Option<(usize, usize)> {
     }
     let is_word_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '\'' | '’' | '-');
     if !is_word_char(selected) {
-        return Some((index, index + 1));
+        return Some((byte_index, byte_index + selected.len_utf8()));
     }
     let mut start = index;
     while start > 0 && is_word_char(chars[start - 1]) {
@@ -1434,6 +1434,8 @@ mod responsive_layout_tests {
         assert_eq!(word_range_at("阅读", 3), Some((3, 6)));
         assert_eq!(word_range_at("A—can’t", 7), Some((4, 11)));
         assert_eq!(word_range_at("read wise", 4), None);
+        assert_eq!(word_range_at("阅读。", 6), Some((6, 9)));
+        assert_eq!(word_range_at("é—word", 2), Some((2, 5)));
     }
 
     #[test]
@@ -4072,8 +4074,8 @@ script_mod! {
             width: Fill height: Fill
             selectable: true
             // Desktop text selection owns pointer drags. Wheel/scrollbar
-            // scrolling remains available; compact mode enables touch drag.
-            drag_scrolling: false
+            // scrolling remains available; mobile devices enable touch drag.
+            drag_scrolling: #(cfg!(any(target_os = "android", target_os = "ios")))
             padding: Inset{ left: 32 right: 32 top: 8 bottom: 8 }
             spacing: 6
             scroll_bar: ScrollBar{}
@@ -5578,7 +5580,7 @@ struct ChapterList {
     #[rust]
     last_abs: Option<DVec2>,
     #[rust]
-    touch_selection_uid: Option<u64>,
+    touch_selection: Option<crate::reader_touch::TouchSelection>,
     #[rust]
     compact_layout: bool,
     /// TextFlow 本帧真实选区矩形，按正文块/范围/排版签名缓存为 item 相对坐标。
@@ -5841,7 +5843,7 @@ impl ChapterList {
         self.sel_cursor = None;
         self.selecting = false;
         self.last_abs = None;
-        self.touch_selection_uid = None;
+        self.touch_selection = None;
     }
 
     fn set_compact_layout(&mut self, cx: &mut Cx, compact_layout: bool) {
@@ -5864,7 +5866,7 @@ impl ChapterList {
                 bottom: 8.0,
             }
         };
-        let drag_scrolling = compact_layout;
+        let drag_scrolling = compact_layout || cfg!(any(target_os = "android", target_os = "ios"));
         let mut list_widget = self.view.widget(cx, ids!(list));
         script_apply_eval!(cx, list_widget, {
             padding: #(reader_padding)
@@ -6222,6 +6224,54 @@ impl ChapterList {
         });
     }
 
+    fn handle_child_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        scope: &mut Scope,
+        selecting_touch: bool,
+    ) {
+        if !matches!(event, Event::TouchUpdate(_) | Event::LongPress(_)) {
+            self.view.handle_event(cx, event, scope);
+            return;
+        }
+        // Keep selection metadata enabled while drawing, but let ChapterList
+        // own touch gestures. TextFlow's standalone touch handling selects on
+        // finger-down and shows a native copy toolbar, conflicting with scroll
+        // and our highlight menu. Inline widgets must still receive ordinary taps.
+        let list = self.view.portal_list(cx, ids!(list));
+        let list_selectable = list
+            .borrow_mut()
+            .map(|mut inner| std::mem::replace(&mut inner.selectable, false));
+        let mut flows = Vec::new();
+        for id in list.first_id()..list.first_id() + list.visible_items() + 1 {
+            if let Some((_, item)) = list.get_item(id) {
+                let html = item.widget(cx, ids!(para_html));
+                let previous = html.borrow_mut::<Html>().map(|mut inner| {
+                    std::mem::replace(&mut inner.text_flow.selectable, false)
+                });
+                if let Some(previous) = previous {
+                    flows.push((html, previous));
+                }
+            }
+        }
+        if selecting_touch {
+            // Deliver long-press/release for capture cleanup (including RubyWord
+            // and PortalList), without opening word cards or activating links.
+            let _ = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
+        } else {
+            self.view.handle_event(cx, event, scope);
+        }
+        for (html, previous) in flows {
+            if let Some(mut inner) = html.borrow_mut::<Html>() {
+                inner.text_flow.selectable = previous;
+            }
+        }
+        if let (Some(previous), Some(mut inner)) = (list_selectable, list.borrow_mut()) {
+            inner.selectable = previous;
+        };
+    }
+
     fn track_selection(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::MouseDown(e) => {
@@ -6259,7 +6309,7 @@ impl ChapterList {
                 self.update_selection_cursor_at(cx, event.abs);
                 self.finish_selection();
             }
-            Event::LongPress(event) if self.compact_layout => {
+            Event::LongPress(event) => {
                 let list = self.view.portal_list(cx, ids!(list));
                 if !list.area().rect(cx).contains(event.abs) {
                     return;
@@ -6282,25 +6332,39 @@ impl ChapterList {
                 self.sel_anchor = Some((block_id, start));
                 self.sel_cursor = Some((block_id, end));
                 self.selecting = true;
-                self.touch_selection_uid = Some(event.uid);
+                self.touch_selection = Some(crate::reader_touch::TouchSelection::new(
+                    event.uid,
+                    event.abs,
+                    ((block_id, start), (block_id, end)),
+                ));
                 self.last_abs = Some(event.abs);
                 *SEL_RANGE.write().unwrap() = Some(((block_id, start), (block_id, end)));
                 SELECTED_TEXT.write().unwrap().clear();
                 Cx::post_action(SelAction::Hide);
                 self.apply_visible_selection(cx);
             }
-            Event::TouchUpdate(event) if self.touch_selection_uid.is_some() => {
-                let uid = self.touch_selection_uid.unwrap();
+            Event::TouchUpdate(event) if self.touch_selection.is_some() => {
+                let uid = self.touch_selection.as_ref().unwrap().uid;
                 let Some(touch) = event.touches.iter().find(|touch| touch.uid == uid) else {
                     return;
                 };
                 match touch.state {
-                    TouchState::Move => {
-                        self.update_selection_cursor_at(cx, touch.abs);
-                    }
-                    TouchState::Stop => {
-                        self.update_selection_cursor_at(cx, touch.abs);
-                        self.finish_selection();
+                    TouchState::Move | TouchState::Stop => {
+                        if let Some(hit) = self.hit_block_char(cx, touch.abs) {
+                            let range = self
+                                .touch_selection
+                                .as_mut()
+                                .unwrap()
+                                .range_at(touch.abs, hit);
+                            self.sel_anchor = Some(range.0);
+                            self.sel_cursor = Some(range.1);
+                            *SEL_RANGE.write().unwrap() = Some(range);
+                            self.last_abs = Some(touch.abs);
+                            self.apply_visible_selection(cx);
+                        }
+                        if touch.state == TouchState::Stop {
+                            self.finish_selection();
+                        }
                     }
                     TouchState::Start | TouchState::Stable => {}
                 }
@@ -6486,7 +6550,10 @@ impl Widget for ChapterList {
                                 inner.text_flow.clear_items();
                                 inner.set_text(cx, display_html);
                             }
-                            inner.text_flow.selectable = !self.compact_layout;
+                            // Required on every platform: it builds the native
+                            // text buffer, hit tracker and selection geometry.
+                            // Touch input ownership is handled separately below.
+                            inner.text_flow.selectable = true;
                             inner.text_flow.font_size = reader_font_size;
                             inner.text_flow.font_color = reader_text_color;
                             inner.text_flow.draw_text.color = reader_text_color;
@@ -6680,24 +6747,47 @@ impl Widget for ChapterList {
         if SELECTION_POPUP_POINTER.load(Ordering::Relaxed)
             && matches!(
                 event,
-                Event::MouseDown(_) | Event::MouseMove(_) | Event::MouseUp(_)
+                Event::MouseDown(_)
+                    | Event::MouseMove(_)
+                    | Event::MouseUp(_)
+                    | Event::TouchUpdate(_)
+                    | Event::LongPress(_)
             )
         {
             return;
         }
-        if self.touch_selection_uid.is_some() && matches!(event, Event::TouchUpdate(_)) {
+        if matches!(event, Event::LongPress(_)) {
+            self.track_selection(cx, event);
+            self.handle_child_event(cx, event, scope, self.touch_selection.is_some());
+            return;
+        }
+        if self.touch_selection.is_some() && matches!(event, Event::TouchUpdate(_)) {
             let released = matches!(event, Event::TouchUpdate(event) if event.touches.iter().any(|touch| {
-                Some(touch.uid) == self.touch_selection_uid && touch.state == TouchState::Stop
+                self.touch_selection.as_ref().is_some_and(|selection| selection.uid == touch.uid)
+                    && touch.state == TouchState::Stop
             }));
             self.track_selection(cx, event);
             // Let PortalList observe the final release so its pre-long-press drag
             // state cannot leak into the next gesture. Selection moves stay local.
             if released {
-                self.view.handle_event(cx, event, scope);
+                self.handle_child_event(cx, event, scope, true);
             }
             return;
         }
-        self.view.handle_event(cx, event, scope);
+        if let Event::TouchUpdate(e) = event {
+            let list = self.view.portal_list(cx, ids!(list));
+            if e.touches.iter().any(|touch| {
+                touch.state == TouchState::Start && list.area().clipped_rect(cx).contains(touch.abs)
+            }) {
+                self.reset_selection_gesture();
+                *SEL_RANGE.write().unwrap() = None;
+                SELECTED_TEXT.write().unwrap().clear();
+                self.apply_visible_selection(cx);
+                Cx::post_action(SelAction::Hide);
+                cx.hide_clipboard_actions();
+            }
+        }
+        self.handle_child_event(cx, event, scope, false);
         self.track_selection(cx, event);
     }
 }
@@ -12975,7 +13065,16 @@ impl AppMain for App {
             self.close_library_action_menu(cx);
         }
         let reader_swipe = self.track_reader_swipe(cx, event);
-        if let Event::MouseDown(e) = event {
+        let pointer_start = match event {
+            Event::MouseDown(e) => Some(e.abs),
+            Event::TouchUpdate(e) => e
+                .touches
+                .iter()
+                .find(|touch| touch.state == TouchState::Start)
+                .map(|touch| touch.abs),
+            _ => None,
+        };
+        if let Some(abs) = pointer_start {
             let selection_popup_open = self.on_reader_page
                 && self.selection_popup_anchor.is_some()
                 && self.ui.widget(cx, ids!(sel_bar)).visible();
@@ -12989,7 +13088,7 @@ impl AppMain for App {
                         .area()
                         .clipped_rect(cx)
                 },
-                e.abs,
+                abs,
             );
             SELECTION_POPUP_POINTER.store(popup_captures_pointer, Ordering::Relaxed);
         }
@@ -13229,7 +13328,9 @@ impl AppMain for App {
                 self.page_scroll(cx, direction == ReaderSwipeDirection::Next);
             }
         }
-        if matches!(event, Event::MouseUp(_)) {
+        if matches!(event, Event::MouseUp(_))
+            || matches!(event, Event::TouchUpdate(e) if e.touches.iter().any(|t| t.state == TouchState::Stop))
+        {
             SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
         }
     }

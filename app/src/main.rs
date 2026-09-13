@@ -13,6 +13,7 @@ mod mobile_import;
 mod reader_hit;
 mod reader_inline_code;
 mod reader_text;
+mod reader_touch;
 mod ruby_word;
 mod sample_chapter;
 
