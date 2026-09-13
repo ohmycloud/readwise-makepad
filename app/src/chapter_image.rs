@@ -57,6 +57,10 @@ pub struct ChapterImage {
     #[rust]
     pixel_size: Option<(usize, usize)>,
     #[rust]
+    image_palette: Option<(Vec4f, Vec4f)>,
+    #[rust]
+    preserve_original: bool,
+    #[rust]
     press_origin: Option<DVec2>,
 }
 
@@ -87,6 +91,30 @@ impl Widget for ChapterImage {
             }
         }
         if let Some(pixel_size) = self.pixel_size {
+            // The original loader has already resolved the texture dimensions
+            // (including animation atlases). Bound extra decode/upload work.
+            if pixel_size.0.saturating_mul(pixel_size.1) > 16 * 1024 * 1024 {
+                self.preserve_original = true;
+            }
+            let palette = crate::app::current_reader_image_palette();
+            if !self.preserve_original && self.image_palette != Some(palette) {
+                self.image_palette = Some(palette);
+                if let Some(bitmap) = crate::reader_image::themed_paper_image(
+                    std::path::Path::new(&self.src),
+                    palette.0,
+                    palette.1,
+                ) {
+                    // Never replace the cached original: the image viewer and
+                    // other Image instances must still load unmodified pixels.
+                    let texture = bitmap.into_new_texture(cx);
+                    img.set_texture(cx, Some(texture));
+                } else {
+                    self.preserve_original = true;
+                    // A later read failure must not leave a texture tinted for
+                    // the previous theme. The original is still in ImageCache.
+                    let _ = img.load_image_file_by_path(cx, std::path::Path::new(&self.src));
+                }
+            }
             let available_width = cx.peek_walk_turtle(walk).size.x;
             let display =
                 inline_image_display_size(pixel_size, available_width, cx.current_dpi_factor());

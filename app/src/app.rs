@@ -1849,6 +1849,13 @@ fn reader_palette(background: ReaderBackground, theme: ReaderTheme) -> (Vec4f, V
     (Vec4f::from_u32(surface), Vec4f::from_u32(text))
 }
 
+pub(crate) fn current_reader_image_palette() -> (Vec4f, Vec4f) {
+    reader_palette(
+        *READER_BACKGROUND.read().unwrap(),
+        *READER_THEME.read().unwrap(),
+    )
+}
+
 #[derive(Clone, Copy)]
 struct ReaderScenePalette {
     surface: Vec4f,

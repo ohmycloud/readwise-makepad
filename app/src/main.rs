@@ -11,6 +11,7 @@ mod mark_span;
 #[cfg(target_os = "ios")]
 mod mobile_import;
 mod reader_hit;
+mod reader_image;
 mod reader_inline_code;
 mod reader_lists;
 mod reader_text;
