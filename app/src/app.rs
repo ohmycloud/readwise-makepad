@@ -21,6 +21,7 @@ type LibraryViewMode = readwise_core::settings::LibraryViewMode;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
 type ReaderBackground = readwise_core::settings::ReaderBackground;
+type ReaderColumns = readwise_core::settings::ReaderColumns;
 type ReaderFont = readwise_core::settings::ReaderFont;
 type ReaderSpacing = readwise_core::settings::ReaderSpacing;
 type ReaderSettings = readwise_core::settings::ReaderSettings;
@@ -112,6 +113,7 @@ struct ReaderPageSummary {
 
 /// EPUB 是可重排内容，没有出版物固有的 PDF 页码。这里以当前视口一次稳定翻过的
 /// 段落数作为页宽，为每章建立同一套虚拟页；页码与翻页目标因此始终一致。
+#[cfg(test)]
 fn reader_page_summary(
     chapter_block_counts: &[usize],
     chapter: usize,
@@ -342,6 +344,10 @@ static CODE_BLOCKS: LazyLock<RwLock<Vec<Option<String>>>> = LazyLock::new(|| {
 });
 
 fn replace_paragraphs(chunks: Vec<String>) {
+    if *PARAGRAPHS.read().unwrap() == chunks {
+        return;
+    }
+    READER_CONTENT_VERSION.fetch_add(1, Ordering::Relaxed);
     let code_blocks = chunks
         .iter()
         .map(|chunk| readwise_core::books::epub_meta::code_block_text(chunk))
@@ -494,8 +500,7 @@ mod table_block_tests {
         choose_reader_hit_index, is_table_block, normalize_rich_selection_rects,
         ordered_selection_range, reader_drag_moves_forward, reader_geometry_capture_policy,
         reader_geometry_width_is_stable, reader_markup_available_width, selection_range_in_block,
-        supports_unified_reader_hit_test,
-        visual_selection_row_bounds,
+        supports_unified_reader_hit_test, visual_selection_row_bounds,
     };
     use makepad_widgets::{dvec2, Rect};
 
@@ -1808,6 +1813,9 @@ static LIBRARY_VIEW_MODE: LazyLock<RwLock<LibraryViewMode>> =
 /// 全应用场景背景：正文、导航、窗口标题栏和其余功能页共享同一纸张配色。
 static READER_BACKGROUND: LazyLock<RwLock<ReaderBackground>> =
     LazyLock::new(|| RwLock::new(ReaderBackground::Paper));
+static READER_COLUMNS: LazyLock<RwLock<ReaderColumns>> =
+    LazyLock::new(|| RwLock::new(ReaderColumns::Auto));
+static READER_CONTENT_VERSION: AtomicU64 = AtomicU64::new(0);
 
 /// 应用界面语言；正文内容与书籍元数据保持原文。
 static APP_LANGUAGE: LazyLock<RwLock<AppLanguage>> =
@@ -2497,6 +2505,7 @@ static CURRENT_CHAPTER: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 static CURRENT_READER_BLOCK: AtomicUsize = AtomicUsize::new(0);
 /// Exact offset inside the first visible paragraph, stored as `f64::to_bits()`.
 static CURRENT_READER_SCROLL_BITS: AtomicU64 = AtomicU64::new(0.0_f64.to_bits());
+static CURRENT_READER_SOURCE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// 打开书的结果（后台 → UI）。
 #[derive(Debug)]
@@ -2554,12 +2563,14 @@ fn spawn_build_reader_pagination(book_id: String) {
     });
 }
 
-/// 持久化的阅读位置。旧版本只保存章节号；v2 额外保存首个可见段落及其滚动偏移。
+/// 持久化阅读位置：兼容旧章节号和 v2 像素偏移；v3 使用原文 UTF-8 偏移，
+/// 字号、分栏和横竖屏重排后恢复到包含该字符的行。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ReaderLocation {
     chapter: usize,
     block: usize,
     scroll: f64,
+    source: Option<usize>,
 }
 
 impl ReaderLocation {
@@ -2569,7 +2580,11 @@ impl ReaderLocation {
         } else {
             0.0
         };
-        format!("v2:{}:{}:{scroll}", self.chapter, self.block)
+        if let Some(source) = self.source {
+            format!("v3:{}:{}:{source}", self.chapter, self.block)
+        } else {
+            format!("v2:{}:{}:{scroll}", self.chapter, self.block)
+        }
     }
 
     fn decode(value: &str, chapter_count: usize) -> Self {
@@ -2584,7 +2599,11 @@ impl ReaderLocation {
                 })
                 .unwrap_or_default()
         };
-        let Some(encoded) = value.strip_prefix("v2:") else {
+        let v3 = value.starts_with("v3:");
+        let Some(encoded) = value
+            .strip_prefix("v2:")
+            .or_else(|| value.strip_prefix("v3:"))
+        else {
             return legacy();
         };
         let mut fields = encoded.split(':');
@@ -2594,7 +2613,22 @@ impl ReaderLocation {
         let Some(block) = fields.next().and_then(|field| field.parse::<usize>().ok()) else {
             return legacy();
         };
-        let Some(scroll) = fields.next().and_then(|field| field.parse::<f64>().ok()) else {
+        let Some(position) = fields.next() else {
+            return legacy();
+        };
+        let source = if v3 {
+            position.parse::<usize>().ok()
+        } else {
+            None
+        };
+        if v3 && source.is_none() {
+            return legacy();
+        }
+        let Some(scroll) = (if v3 {
+            Some(0.0)
+        } else {
+            position.parse::<f64>().ok()
+        }) else {
             return legacy();
         };
         if fields.next().is_some() || chapter >= chapter_count || !scroll.is_finite() {
@@ -2604,6 +2638,7 @@ impl ReaderLocation {
             chapter,
             block,
             scroll,
+            source,
         }
     }
 }
@@ -2618,8 +2653,24 @@ mod reader_location_tests {
             chapter: 3,
             block: 27,
             scroll: -18.75,
+            source: None,
         };
         assert_eq!(ReaderLocation::decode(&location.encode(), 8), location);
+    }
+
+    #[test]
+    fn reader_location_v3_preserves_source_anchor_independently_of_pixels() {
+        let location = ReaderLocation {
+            chapter: 3,
+            block: 27,
+            scroll: 0.0,
+            source: Some(195),
+        };
+        assert_eq!(location.encode(), "v3:3:27:195");
+        assert_eq!(ReaderLocation::decode(&location.encode(), 8), location);
+        for value in ["v3:3:27:-1", "v3:3:27:NaN", "v3:3:27:1:2", "v3:8:27:1"] {
+            assert_eq!(ReaderLocation::decode(value, 8), ReaderLocation::default());
+        }
     }
 
     #[test]
@@ -3338,6 +3389,7 @@ fn current_reader_settings() -> ReaderSettings {
         library_view_mode: *LIBRARY_VIEW_MODE.read().unwrap(),
         theme: *READER_THEME.read().unwrap(),
         background: *READER_BACKGROUND.read().unwrap(),
+        columns: *READER_COLUMNS.read().unwrap(),
         font: *READER_FONT.read().unwrap(),
         spacing: *READER_SPACING.read().unwrap(),
         font_size: *READER_FONT_SIZE.read().unwrap(),
@@ -4077,6 +4129,8 @@ script_mod! {
         font_monospace: theme.font_code{}
         html_default_inset: theme.space_1
         draw_reader_selection.color: #0000
+        list_host := View{
+        width: Fill height: Fill
         list := PortalList{
             width: Fill height: Fill
             selectable: true
@@ -4184,6 +4238,7 @@ script_mod! {
                 draw_bg +: {color: #4d4d4d border_color: #686868}
                 code_view := ReaderCodeView{}
             }
+        }
         }
     }
 
@@ -4426,12 +4481,20 @@ script_mod! {
                                         draw_bg.color: #xf7f4ea
                                         chapter_list := mod.widgets.ChapterList{}
                                         reader_footer := View{
-                                            width: Fill height: 30
-                                            flow: Overlay
+                                            width: Fill height: 48
+                                            flow: Down
                                             reader_page_center_layer := View{
-                                                width: Fill height: Fill
-                                                align: Center
-                                                reader_page_indicator := mod.widgets.ReaderPageIndicator{}
+                                                width: Fill height: 24
+                                                flow: Right
+                                                reader_page_first := View{
+                                                    width: Fill height: Fill align: Center
+                                                    reader_page_indicator := mod.widgets.ReaderPageIndicator{}
+                                                }
+                                                reader_page_second := View{
+                                                    visible: false
+                                                    width: Fill height: Fill align: Center
+                                                    reader_page_indicator_second := mod.widgets.ReaderPageIndicator{}
+                                                }
                                             }
                                             reader_page_right_layer := View{
                                                 width: Fill height: Fill
@@ -5051,6 +5114,15 @@ script_mod! {
                                 reader_background_night := RadioButtonTabFlat{text: "夜间"}
                                 reader_background_theme := RadioButtonTabFlat{text: "跟随主题"}
                             }
+                            reader_columns_row := View{
+                                width: Fill height: Fit
+                                flow: Flow.Right{wrap: true} spacing: 12
+                                align: Align{y: 0.5}
+                                reader_columns_label := Label{text: "正文分栏"}
+                                reader_columns_one := RadioButtonTabFlat{text: "单列"}
+                                reader_columns_two := RadioButtonTabFlat{text: "双列"}
+                                reader_columns_auto := RadioButtonTabFlat{text: "自动"}
+                            }
                             font_family_row := View{
                                 width: Fill height: Fit
                                 flow: Right spacing: 12
@@ -5438,6 +5510,8 @@ struct ReaderPageIndicator {
     total: usize,
     #[rust]
     hovered: bool,
+    #[rust]
+    approximate: bool,
 }
 
 impl ReaderPageIndicator {
@@ -5445,7 +5519,12 @@ impl ReaderPageIndicator {
         let text = if self.total == 0 {
             "—".to_string()
         } else if self.hovered {
-            format!("{} of {}", self.current, self.total)
+            format!(
+                "{}{} of {}",
+                if self.approximate { "≈ " } else { "" },
+                self.current,
+                self.total
+            )
         } else {
             self.current.to_string()
         };
@@ -5602,7 +5681,34 @@ struct ChapterList {
     hit_runs: HashMap<usize, (u64, Vec<crate::reader_hit::HitRun>)>,
     #[rust]
     text_maps: HashMap<usize, (u64, crate::reader_text::TextMap)>,
+    #[rust]
+    pager: ReaderPagedState,
 }
+
+#[derive(Default)]
+struct ReaderPagedState {
+    active: bool,
+    signature: u64,
+    content_version: u64,
+    layout: crate::reader_columns::ColumnLayout,
+    metrics: Vec<Option<crate::reader_columns::BlockMetrics>>,
+    anchor: crate::reader_columns::PageAnchor,
+    next: crate::reader_columns::PageAnchor,
+    drawn: Vec<(usize, WidgetRef, Rect)>,
+    pages: Vec<crate::reader_columns::PageAnchor>,
+    complete: bool,
+    pending_source: Option<(usize, usize)>,
+    requested_source: Option<(usize, usize)>,
+    last_wheel: f64,
+    measure_frame: NextFrame,
+    requested_last_page: bool,
+    extend_selection_after_draw: bool,
+    spread_ready: bool,
+    needs_page_alignment: bool,
+}
+
+#[derive(Debug)]
+struct ReaderPageTurn(bool);
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct ReaderRangeGeometryKey {
@@ -5838,6 +5944,351 @@ fn reader_markup_available_width(
 }
 
 impl ChapterList {
+    fn draw_pages(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        walk: Walk,
+        viewport: Rect,
+    ) -> DrawStep {
+        use crate::reader_columns::{compose_page, page_starts, ColumnLayout, PageAnchor};
+        let font = READER_FONT_SIZE
+            .read()
+            .unwrap()
+            .unwrap_or(self.font_default_size);
+        let layout = ColumnLayout::resolve(
+            *READER_COLUMNS.read().unwrap(),
+            viewport.size.x,
+            viewport.size.y,
+            font as f64,
+            self.pager.layout.count,
+        );
+        let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
+        let signature = reader_source_hash(&format!(
+            "{}:{:.1}:{:.1}:{:?}:{:?}:{}:{}",
+            content_version,
+            layout.width,
+            layout.height,
+            *READER_FONT.read().unwrap(),
+            *READER_SPACING.read().unwrap(),
+            font,
+            *crate::ruby_word::GLOSS_FONT_SIZE.read().unwrap()
+        ));
+        let list_ref = self.view.portal_list(cx, ids!(list));
+        let mut anchor = PageAnchor {
+            block: list_ref.first_id(),
+            y: (-list_ref.scroll_position()).max(0.0),
+        };
+        let paragraphs = PARAGRAPHS.read().unwrap();
+        let codes = CODE_BLOCKS.read().unwrap();
+        if self.pager.signature != signature || self.pager.metrics.len() != paragraphs.len() {
+            self.pager.needs_page_alignment = true;
+            if self.pager.content_version == content_version && self.pager.active {
+                self.pager.pending_source = self.pager.pending_source.or_else(|| {
+                    self.pager
+                        .metrics
+                        .get(anchor.block)
+                        .and_then(Option::as_ref)
+                        .map(|metric| (anchor.block, metric.source_at(anchor.y)))
+                });
+            } else {
+                self.pager.pending_source = None;
+            }
+            self.pager.metrics = vec![None; paragraphs.len()];
+            self.pager.pages.clear();
+            self.pager.complete = false;
+            self.pager.signature = signature;
+            self.pager.content_version = content_version;
+            if let Some(requested) = self.pager.requested_source.take() {
+                self.pager.pending_source = Some(requested);
+            }
+            self.range_geometry_cache.clear();
+            self.item_layout_widths.clear();
+            self.hit_runs.clear();
+            self.text_maps.clear();
+        }
+        self.pager.active = true;
+        if let Some(requested) = self.pager.requested_source.take() {
+            self.pager.pending_source = Some(requested);
+            self.pager.needs_page_alignment = true;
+        }
+        self.pager.pending_source = self
+            .pager
+            .pending_source
+            .filter(|(block, _)| *block < paragraphs.len());
+        self.pager.layout = layout;
+        self.pager.drawn.clear();
+        self.view.view(cx, ids!(list_host)).set_visible(cx, false);
+        let _ = self.view.draw_walk(cx, scope, walk);
+        let Some(mut pool) = list_ref.borrow_mut() else {
+            return DrawStep::done();
+        };
+        let started = Instant::now();
+        let mut measured = 0;
+        let mut pages = Vec::new();
+        loop {
+            pages.clear();
+            let mut cursor = anchor;
+            let mut missing = None;
+            if let Some((block, source)) = self.pager.pending_source {
+                if let Some(metric) = self.pager.metrics.get(block).and_then(Option::as_ref) {
+                    anchor = PageAnchor {
+                        block,
+                        y: metric.y_at(source),
+                    };
+                    cursor = anchor;
+                    pool.set_first_id_and_scroll(anchor.block, -anchor.y);
+                    self.pager.pending_source = None;
+                } else {
+                    missing = Some(block);
+                }
+            }
+            if missing.is_none() {
+                for _ in 0..layout.count {
+                    match compose_page(&self.pager.metrics, cursor, layout.height) {
+                        Ok(page) => {
+                            cursor = page.next;
+                            pages.push(page);
+                        }
+                        Err(block) => {
+                            missing = Some(block);
+                            break;
+                        }
+                    }
+                }
+            }
+            let Some(block) = missing else {
+                self.pager.next = cursor;
+                break;
+            };
+            if measured >= 8 || (measured > 0 && started.elapsed().as_millis() >= 10) {
+                pages.clear();
+                self.view.area().redraw(cx);
+                break;
+            }
+            let Some(para) = paragraphs.get(block) else {
+                break;
+            };
+            // A zero-height clipped measuring viewport uses the exact display
+            // width while keeping all measurement pixels off screen.
+            cx.begin_turtle(
+                Walk {
+                    abs_pos: Some(viewport.pos),
+                    width: Size::Fixed(layout.width),
+                    height: Size::Fixed(0.0),
+                    ..Walk::default()
+                },
+                Layout::flow_down(),
+            );
+            let metric = self.draw_reader_paragraph(
+                cx,
+                &mut pool,
+                block,
+                usize::MAX / 2 + measured,
+                para,
+                codes.get(block).and_then(Option::as_deref),
+                true,
+            );
+            cx.end_turtle();
+            self.pager.metrics[block] = Some(metric);
+            measured += 1;
+        }
+        // Fill in the chapter index progressively. UI text layout stays on the
+        // rendering thread, with bounded work per frame instead of blocking an
+        // entire chapter before showing its first page.
+        if measured < 8 && started.elapsed().as_millis() < 10 {
+            if let Some(block) = self.pager.metrics.iter().position(Option::is_none) {
+                cx.begin_turtle(
+                    Walk {
+                        abs_pos: Some(viewport.pos),
+                        width: Size::Fixed(layout.width),
+                        height: Size::Fixed(0.0),
+                        ..Walk::default()
+                    },
+                    Layout::flow_down(),
+                );
+                let metric = self.draw_reader_paragraph(
+                    cx,
+                    &mut pool,
+                    block,
+                    usize::MAX / 2 + measured,
+                    &paragraphs[block],
+                    codes.get(block).and_then(Option::as_deref),
+                    true,
+                );
+                cx.end_turtle();
+                self.pager.metrics[block] = Some(metric);
+            }
+        }
+        self.pager.anchor = anchor;
+        self.pager.spread_ready = !pages.is_empty();
+        self.hit_runs.clear();
+        for (column, page) in pages.iter().enumerate() {
+            for (slot, fragment) in page.fragments.iter().enumerate() {
+                let pos = viewport.pos
+                    + dvec2(
+                        layout.left + column as f64 * (layout.width + layout.gap),
+                        8.0 + fragment.top,
+                    );
+                let clip = Rect {
+                    pos,
+                    size: dvec2(layout.width, fragment.to - fragment.from),
+                };
+                cx.begin_turtle(
+                    Walk {
+                        abs_pos: Some(pos),
+                        width: Size::Fixed(clip.size.x),
+                        height: Size::Fixed(clip.size.y),
+                        ..Walk::default()
+                    },
+                    Layout::flow_down(),
+                );
+                cx.begin_turtle(
+                    Walk {
+                        abs_pos: Some(pos - dvec2(0.0, fragment.from)),
+                        width: Size::Fixed(layout.width),
+                        height: Size::fit(),
+                        ..Walk::default()
+                    },
+                    Layout::flow_down(),
+                );
+                // Reuse a bounded set of visible slots, not one retained widget
+                // for every paragraph ever visited in a long book.
+                let cache_id = column * 65_536 + slot;
+                self.draw_reader_paragraph(
+                    cx,
+                    &mut pool,
+                    fragment.block,
+                    cache_id,
+                    &paragraphs[fragment.block],
+                    codes.get(fragment.block).and_then(Option::as_deref),
+                    false,
+                );
+                if let Some((_, widget)) = pool.get_item(cache_id) {
+                    self.pager.drawn.push((fragment.block, widget, clip));
+                }
+                cx.end_turtle();
+                cx.end_turtle();
+            }
+        }
+        let (starts, complete) = page_starts(&self.pager.metrics, layout.height);
+        self.pager.pages = starts;
+        self.pager.complete = complete;
+        if complete && self.pager.requested_last_page {
+            let last = self.pager.pages.len().saturating_sub(1);
+            let target = self
+                .pager
+                .pages
+                .get(last / layout.count * layout.count)
+                .copied()
+                .unwrap_or_default();
+            pool.set_first_id_and_scroll(target.block, -target.y);
+            self.pager.requested_last_page = false;
+            self.pager.needs_page_alignment = false;
+            self.pager.measure_frame = cx.new_next_frame();
+        } else if complete && self.pager.needs_page_alignment {
+            // A restored source offset must remain visible, but subsequent
+            // turns must land on the same canonical page starts as the footer.
+            let index = self
+                .pager
+                .pages
+                .partition_point(|page| {
+                    page.block < anchor.block
+                        || (page.block == anchor.block && page.y <= anchor.y + 0.5)
+                })
+                .saturating_sub(1);
+            if let Some(target) = self
+                .pager
+                .pages
+                .get(index)
+                .copied()
+                .filter(|target| *target != anchor)
+            {
+                pool.set_first_id_and_scroll(target.block, -target.y);
+                self.pager.measure_frame = cx.new_next_frame();
+            }
+            self.pager.needs_page_alignment = false;
+        }
+        if !complete {
+            self.pager.measure_frame = cx.new_next_frame();
+        }
+        self.text_maps
+            .retain(|id, _| self.pager.drawn.iter().any(|(block, _, _)| block == id));
+        drop(pool);
+        drop(codes);
+        drop(paragraphs);
+        if self.pager.extend_selection_after_draw && !pages.is_empty() {
+            self.pager.extend_selection_after_draw = false;
+            if self.selecting {
+                self.extend_after_scroll(cx);
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn active_items(&self, cx: &mut Cx) -> Vec<(usize, WidgetRef, Rect)> {
+        if self.pager.active {
+            return self.pager.drawn.clone();
+        }
+        let list = self.view.portal_list(cx, ids!(list));
+        (list.first_id()..list.first_id() + list.visible_items() + 1)
+            .filter_map(|id| {
+                list.get_item(id).map(|(_, item)| {
+                    let clip = item.area().clipped_rect(cx);
+                    (id, item, clip)
+                })
+            })
+            .collect()
+    }
+
+    fn reader_rect(&self, cx: &mut Cx) -> Rect {
+        if self.pager.active {
+            self.view.area().rect(cx)
+        } else {
+            self.view.portal_list(cx, ids!(list)).area().rect(cx)
+        }
+    }
+
+    /// Returns false only at an actual chapter boundary. Missing measurements
+    /// keep the current page in place until the next draw completes them.
+    fn turn_page(&mut self, cx: &mut Cx, forward: bool) -> bool {
+        use crate::reader_columns::PageAnchor;
+        if !self.pager.spread_ready {
+            self.pager.measure_frame = cx.new_next_frame();
+            return true;
+        }
+        let target = if forward {
+            if self.pager.next.block >= self.pager.metrics.len() {
+                return false;
+            }
+            self.pager.next
+        } else {
+            if self.pager.anchor == PageAnchor::default() {
+                return false;
+            }
+            let current = self.pager.pages.partition_point(|a| {
+                a.block < self.pager.anchor.block
+                    || (a.block == self.pager.anchor.block && a.y < self.pager.anchor.y - 0.5)
+            });
+            if current == 0 && !self.pager.complete {
+                self.view.redraw(cx);
+                return true;
+            }
+            self.pager
+                .pages
+                .get(current.saturating_sub(self.pager.layout.count))
+                .copied()
+                .unwrap_or_default()
+        };
+        self.view
+            .portal_list(cx, ids!(list))
+            .set_first_id_and_scroll(target.block, -target.y);
+        self.pager.anchor = target;
+        self.pager.extend_selection_after_draw = self.selecting;
+        self.view.redraw(cx);
+        true
+    }
+
     fn text_map(&self, block: usize, source: &str) -> Option<&crate::reader_text::TextMap> {
         self.text_maps
             .get(&block)
@@ -6017,35 +6468,41 @@ impl ChapterList {
     /// 命中可见块的 (块id, 正文字符下标)。点位在视口外或块间隙时吸附到
     /// 最近边界，与 PortalList 原生选择规则保持一致。
     fn hit_block_char(&self, cx: &mut Cx, abs: DVec2) -> Option<(usize, usize)> {
-        let list = self.view.portal_list(cx, ids!(list));
-        let first = list.first_id();
-        let vis = list.visible_items() + 1;
-        let list_rect = list.area().rect(cx);
-        let mut visible = Vec::new();
-        for id in first..first + vis {
-            let Some((_, widget)) = list.get_item(id) else {
-                continue;
-            };
-            let rect = widget.area().rect(cx);
-            if rect.size.y > 0.0 {
-                visible.push((id, widget, rect));
-            }
+        let mut abs = abs;
+        let mut items = self.active_items(cx);
+        if self.pager.active {
+            let closest = items
+                .iter()
+                .map(|(_, _, clip)| {
+                    (clip.pos.x - abs.x)
+                        .max(abs.x - clip.pos.x - clip.size.x)
+                        .max(0.0)
+                })
+                .fold(f64::INFINITY, f64::min);
+            items.retain(|(_, _, clip)| {
+                (clip.pos.x - abs.x)
+                    .max(abs.x - clip.pos.x - clip.size.x)
+                    .max(0.0)
+                    <= closest + 0.5
+            });
+            let (_, _, nearest) = items.iter().min_by(|a, b| {
+                let distance =
+                    |r: &Rect| (r.pos.y - abs.y).max(abs.y - r.pos.y - r.size.y).max(0.0);
+                distance(&a.2).total_cmp(&distance(&b.2))
+            })?;
+            abs.y = abs
+                .y
+                .clamp(nearest.pos.y + 0.1, nearest.pos.y + nearest.size.y - 0.1);
         }
+        let mut visible: Vec<_> = items
+            .into_iter()
+            .map(|(id, widget, _)| {
+                let rect = widget.area().rect(cx);
+                (id, widget, rect)
+            })
+            .collect();
         visible.sort_by_key(|(id, _, _)| *id);
         let (first_id, _, _) = visible.first()?;
-        let (last_id, last_widget, _) = visible.last()?;
-        if abs.y < list_rect.pos.y {
-            return Some((*first_id, 0));
-        }
-        if abs.y > list_rect.pos.y + list_rect.size.y {
-            let len = PARAGRAPHS
-                .read()
-                .unwrap()
-                .get(*last_id)
-                .map(|source| readwise_core::vocab::annotate::rendered_text(source).len())
-                .unwrap_or_else(|| last_widget.selection_text_len());
-            return Some((*last_id, len));
-        }
         for (id, widget, rect) in &visible {
             // Horizontal margin is still on this visual row. Sending it to
             // the block/viewport start selects unrelated preceding paragraphs.
@@ -6056,10 +6513,7 @@ impl ChapterList {
                 if let Some((source_hash, runs)) = self.hit_runs.get(id) {
                     if *source_hash == reader_source_hash(paragraph) {
                         if let Some(index) = crate::reader_hit::hit_index(runs, abs - rect.pos) {
-                            return Some((
-                                *id,
-                                self.text_map(*id, paragraph)?.source_index(index),
-                            ));
+                            return Some((*id, self.text_map(*id, paragraph)?.source_index(index)));
                         }
                     }
                 }
@@ -6143,16 +6597,11 @@ impl ChapterList {
 
     /// PortalList 会复用/回收离屏 item，因此每次滚动与重绘都要把全局区间
     /// 重新投影到当前可见 widget，而不能依赖上一次的原生选择状态。
-    fn apply_visible_selection(&self, cx: &mut Cx) {
+    fn apply_visible_selection(&mut self, cx: &mut Cx) {
         let range = *SEL_RANGE.read().unwrap();
         let paragraphs = PARAGRAPHS.read().unwrap();
         let list = self.view.portal_list(cx, ids!(list));
-        let first = list.first_id();
-        let vis = list.visible_items() + 1;
-        for id in first..first + vis {
-            let Some((_, widget)) = list.get_item(id) else {
-                continue;
-            };
+        for (id, widget, _) in self.active_items(cx) {
             let paragraph = paragraphs.get(id).map(String::as_str).unwrap_or("");
             let source_len = readwise_core::vocab::annotate::rendered_text(paragraph).len();
             let is_code = CODE_BLOCKS
@@ -6177,6 +6626,7 @@ impl ChapterList {
             widget.redraw(cx);
         }
         list.redraw(cx);
+        self.view.redraw(cx);
     }
 
     fn extend_after_scroll(&mut self, cx: &mut Cx) {
@@ -6238,6 +6688,23 @@ impl ChapterList {
         scope: &mut Scope,
         selecting_touch: bool,
     ) {
+        if self.pager.active {
+            for (_, item, _) in self.active_items(cx) {
+                let html = item.widget(cx, ids!(para_html));
+                let previous = html
+                    .borrow_mut::<Html>()
+                    .map(|mut h| std::mem::replace(&mut h.text_flow.selectable, false));
+                if selecting_touch {
+                    let _ = cx.capture_actions(|cx| item.handle_event(cx, event, scope));
+                } else {
+                    item.handle_event(cx, event, scope);
+                }
+                if let (Some(previous), Some(mut h)) = (previous, html.borrow_mut::<Html>()) {
+                    h.text_flow.selectable = previous;
+                };
+            }
+            return;
+        }
         if !matches!(event, Event::TouchUpdate(_) | Event::LongPress(_)) {
             self.view.handle_event(cx, event, scope);
             return;
@@ -6254,9 +6721,9 @@ impl ChapterList {
         for id in list.first_id()..list.first_id() + list.visible_items() + 1 {
             if let Some((_, item)) = list.get_item(id) {
                 let html = item.widget(cx, ids!(para_html));
-                let previous = html.borrow_mut::<Html>().map(|mut inner| {
-                    std::mem::replace(&mut inner.text_flow.selectable, false)
-                });
+                let previous = html
+                    .borrow_mut::<Html>()
+                    .map(|mut inner| std::mem::replace(&mut inner.text_flow.selectable, false));
                 if let Some(previous) = previous {
                     flows.push((html, previous));
                 }
@@ -6285,8 +6752,7 @@ impl ChapterList {
                 if e.button != MouseButton::PRIMARY {
                     return;
                 }
-                let list = self.view.portal_list(cx, ids!(list));
-                if !list.area().rect(cx).contains(e.abs) {
+                if !self.reader_rect(cx).contains(e.abs) {
                     return;
                 }
                 *SEL_RANGE.write().unwrap() = None;
@@ -6317,8 +6783,7 @@ impl ChapterList {
                 self.finish_selection();
             }
             Event::LongPress(event) => {
-                let list = self.view.portal_list(cx, ids!(list));
-                if !list.area().rect(cx).contains(event.abs) {
+                if !self.reader_rect(cx).contains(event.abs) {
                     return;
                 }
                 let Some((block_id, text_offset)) = self.hit_block_char(cx, event.abs) else {
@@ -6381,10 +6846,17 @@ impl ChapterList {
     }
 }
 
-impl Widget for ChapterList {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let paragraphs = PARAGRAPHS.read().unwrap();
-        let code_blocks = CODE_BLOCKS.read().unwrap();
+impl ChapterList {
+    fn draw_reader_paragraph(
+        &mut self,
+        cx: &mut Cx2d,
+        list: &mut PortalList,
+        item_id: usize,
+        cache_id: usize,
+        para: &str,
+        code_text: Option<&str>,
+        measure: bool,
+    ) -> crate::reader_columns::BlockMetrics {
         let reader_font = *READER_FONT.read().unwrap();
         let reader_spacing = *READER_SPACING.read().unwrap();
         let reader_background = *READER_BACKGROUND.read().unwrap();
@@ -6449,312 +6921,381 @@ impl Widget for ChapterList {
         }
         let mut needs_geometry_redraw = false;
 
+        // Adapt only the display HTML: list/block IDs and stored
+        // selection/highlight offsets still use the original para.
+        let with_inline_code = code_text.is_none().then(|| {
+            crate::reader_inline_code::wrap_html(&crate::reader_lists::normalize_html(para))
+        });
+        let tracked = with_inline_code
+            .as_deref()
+            .and_then(crate::reader_hit::tracked_html);
+        let has_gloss = para.contains("<ruby");
+        let is_table = is_table_block(para);
+        let template = if code_text.is_some() {
+            code_template
+        } else if is_table && has_gloss {
+            id!(TableGlossPara)
+        } else if is_table {
+            id!(TablePara)
+        } else if has_gloss {
+            id!(GlossPara)
+        } else {
+            id!(Para)
+        };
+        let line_spacing = if has_gloss {
+            reader_spacing.gloss_line_spacing()
+        } else {
+            reader_spacing.plain_line_spacing()
+        };
+        let item = list.item(cx, cache_id, template);
+        let previous_layout_width = self
+            .item_layout_widths
+            .get(&(chapter_idx, item_id))
+            .copied();
+        let source_text = readwise_core::vocab::annotate::rendered_text(para);
+        let source_len = source_text.len();
+        let current_range =
+            selection_range.and_then(|range| selection_range_in_block(range, item_id, source_len));
+        let highlight_ranges: Vec<_> = if code_text.is_none() {
+            chapter_highlights
+                .iter()
+                .filter_map(|highlight| {
+                    let range = highlight_range_in_block(highlight, item_id, source_len)?;
+                    Some((
+                        range,
+                        crate::mark_span::hl_color(crate::mark_span::hl_slot_for_name(
+                            &highlight.color,
+                        )),
+                    ))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let make_pre_draw_key = |range| {
+            reader_range_geometry_key(
+                chapter_idx,
+                item_id,
+                range,
+                previous_layout_width.unwrap_or(0.0),
+                reader_font_size,
+                line_spacing,
+                reader_font,
+                para,
+            )
+        };
+        let probe_range = if measure {
+            Some((0, source_len))
+        } else if code_text.is_none() {
+            current_range.or_else(|| {
+                highlight_ranges
+                    .iter()
+                    .find(|(range, _)| {
+                        !self
+                            .range_geometry_cache
+                            .contains_key(&make_pre_draw_key(*range))
+                    })
+                    .map(|(range, _)| *range)
+            })
+        } else {
+            current_range
+        };
+        if let Some(code_text) = code_text {
+            item.widget(cx, ids!(code_view)).set_text(cx, code_text);
+        } else {
+            let html = item.widget(cx, ids!(para_html));
+            let display_html = tracked
+                .as_deref()
+                .or(with_inline_code.as_deref())
+                .unwrap_or(para);
+            if let Some(mut inner) = html.borrow_mut::<Html>() {
+                if inner.body.as_ref() != display_html {
+                    // Html assigns anonymous custom tags (`mark`, `ruby`,
+                    // links) positional IDs. Adding/removing a mark can
+                    // therefore move a RubyWord onto an ID previously owned
+                    // by MarkSpan. TextFlow::item_with_scope does not replace
+                    // an existing item when its template changes, so retaining
+                    // the map would draw the gloss as ordinary inline content.
+                    // Rebuild only when the document actually changes; steady
+                    // frames keep their widgets and area references.
+                    inner.text_flow.clear_items();
+                    inner.set_text(cx, display_html);
+                }
+                // Required on every platform: it builds the native
+                // text buffer, hit tracker and selection geometry.
+                // Touch input ownership is handled separately below.
+                inner.text_flow.selectable = true;
+                inner.text_flow.font_size = reader_font_size;
+                inner.text_flow.font_color = reader_text_color;
+                inner.text_flow.draw_text.color = reader_text_color;
+                // TextFlow still computes the authoritative rich-text
+                // rectangles, but submits them transparently. ChapterList
+                // captures and normalizes that same batch for both the live
+                // selection and permanent highlights.
+                inner.text_flow.draw_selection.color = Vec4f::default();
+                inner.text_flow.draw_block.table_header_bg_color = reader_scene.field;
+                inner.text_flow.draw_block.table_border_color = reader_scene.border;
+                inner.text_flow.text_style_normal.font_family = normal_family.clone();
+                inner.text_flow.text_style_italic.font_family = italic_family.clone();
+                inner.text_flow.text_style_bold.font_family = bold_family.clone();
+                inner.text_flow.text_style_bold_italic.font_family = bold_italic_family.clone();
+                inner.text_flow.text_style_normal.line_spacing = line_spacing;
+                inner.text_flow.text_style_italic.line_spacing = line_spacing;
+                inner.text_flow.text_style_bold.line_spacing = line_spacing;
+                inner.text_flow.text_style_bold_italic.line_spacing = line_spacing;
+                inner.text_flow.text_style_fixed.line_spacing = line_spacing;
+            };
+        }
+        let native_probe = if measure {
+            Some((0, usize::MAX))
+        } else {
+            probe_range.and_then(|range| {
+                if code_text.is_some() {
+                    Some(range)
+                } else {
+                    self.text_map(item_id, para)?.native_range(range)
+                }
+            })
+        };
+        if let Some((start, end)) = native_probe {
+            item.selection_set(start, end);
+        } else {
+            item.selection_clear();
+        }
+        let capture_geometry = code_text.is_none() && native_probe.is_some();
+        if capture_geometry {
+            let html = item.widget(cx, ids!(para_html));
+            if let Some(mut inner) = html.borrow_mut::<Html>() {
+                // Seed the batch in the current draw-call group so every
+                // selection rectangle emitted by TextFlow lands in one
+                // inspectable instance buffer.
+                inner.text_flow.draw_selection.new_draw_call(cx);
+                inner.text_flow.draw_selection.begin_many_instances(cx);
+            };
+        }
+        crate::reader_hit::begin_capture();
+        crate::reader_inline_code::begin_capture(native_probe);
+        crate::chapter_image::with_page_height(self.pager.layout.height, || {
+            item.draw_all_unscoped(cx)
+        });
+        let item_rect = item.area().rect(cx);
+        let item_margin = item.walk(cx).margin;
+        let runs = crate::reader_hit::end_capture(cx, item_rect.pos);
+        let mut mapping_stable = true;
+        if code_text.is_none() {
+            let html = item.widget(cx, ids!(para_html));
+            let native = html
+                .borrow::<Html>()
+                .and_then(|inner| crate::reader_text::native_text(&inner.text_flow));
+            mapping_stable = native.as_ref().is_some_and(|native| {
+                self.text_map(item_id, para)
+                    .is_some_and(|map| map.matches_native(native))
+            });
+            if !mapping_stable {
+                self.text_maps.remove(&item_id);
+                if let Some(map) = native.and_then(|native| {
+                    crate::reader_text::TextMap::from_html(&source_text, para, native)
+                }) {
+                    self.text_maps
+                        .insert(item_id, (reader_source_hash(para), map));
+                    // Fresh/recycled HTML needs one draw to discover
+                    // all actual block breaks before probing a range.
+                    needs_geometry_redraw |= probe_range.is_some();
+                }
+                self.range_geometry_cache
+                    .retain(|key, _| key.chapter != chapter_idx || key.block != item_id);
+            }
+        }
+        if tracked.is_some() {
+            self.hit_runs
+                .insert(item_id, (reader_source_hash(para), runs));
+        } else {
+            self.hit_runs.remove(&item_id);
+        }
+        let width_stable = previous_layout_width
+            .map(|previous| reader_geometry_width_is_stable(previous, item_rect.size.x))
+            .unwrap_or(false);
+        self.item_layout_widths
+            .insert((chapter_idx, item_id), item_rect.size.x);
+        let make_geometry_key = |range| {
+            reader_range_geometry_key(
+                chapter_idx,
+                item_id,
+                range,
+                item_rect.size.x,
+                reader_font_size,
+                line_spacing,
+                reader_font,
+                para,
+            )
+        };
+        let current_key = current_range.map(make_geometry_key);
+        let highlight_entries: Vec<_> = highlight_ranges
+            .iter()
+            .map(|(range, color)| (*range, make_geometry_key(*range), *color))
+            .collect();
+        let mut captured_current_geometry = None;
+        let mut page_lines = Vec::new();
+        if capture_geometry {
+            let html = item.widget(cx, ids!(para_html));
+            if let Some(mut inner) = html.borrow_mut::<Html>() {
+                let mut raw = captured_draw_color_rects(cx, &inner.text_flow.draw_selection);
+                crate::reader_inline_code::correct_rects(cx, &mut raw);
+                inner.text_flow.draw_selection.end_many_instances(cx);
+                let normalized = normalize_rich_selection_rects(&raw);
+                if measure {
+                    page_lines = normalized.clone();
+                }
+                let (draw_current_now, cache_for_reuse) = reader_geometry_capture_policy(
+                    probe_range,
+                    current_range,
+                    width_stable && mapping_stable,
+                );
+                if draw_current_now && mapping_stable {
+                    // Live selection is transient UI, not persistent cache.
+                    // Paint this frame immediately even while a resized item
+                    // is waiting for its next stable-width frame.
+                    captured_current_geometry = Some(normalized.clone());
+                }
+                if cache_for_reuse {
+                    if let Some(key) = probe_range.map(make_geometry_key) {
+                        self.range_geometry_cache
+                            .insert(key, rects_relative_to(&normalized, item_rect.pos));
+                    }
+                } else if mapping_stable || self.text_map(item_id, para).is_some() {
+                    // The PortalList item was still transitioning from the
+                    // old window width. Never poison the new-width cache with
+                    // this frame; request one stable redraw instead.
+                    needs_geometry_redraw = true;
+                }
+            };
+        }
+
+        if !measure {
+            // Permanent highlights and the current selection are drawn from
+            // exactly the same captured rich-text geometry. Translate cached
+            // item-relative rectangles so PortalList scrolling cannot stale it.
+            for (_, key, color) in &highlight_entries {
+                if let Some(rects) = self.range_geometry_cache.get(key).cloned() {
+                    self.draw_reader_selection.color = *color;
+                    for rect in rects {
+                        self.draw_reader_selection.draw_abs(
+                            cx,
+                            Rect {
+                                pos: rect.pos + item_rect.pos,
+                                size: rect.size,
+                            },
+                        );
+                    }
+                } else if self.text_map(item_id, para).is_some() {
+                    needs_geometry_redraw = true;
+                }
+            }
+            if let Some(key) = current_key {
+                if let Some(rects) = captured_current_geometry {
+                    self.draw_reader_selection.color = selection_color;
+                    for rect in rects {
+                        self.draw_reader_selection.draw_abs(cx, rect);
+                    }
+                } else if let Some(rects) = self.range_geometry_cache.get(&key).cloned() {
+                    self.draw_reader_selection.color = selection_color;
+                    for rect in rects {
+                        self.draw_reader_selection.draw_abs(
+                            cx,
+                            Rect {
+                                pos: rect.pos + item_rect.pos,
+                                size: rect.size,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut boundaries = Vec::new();
+        if measure && code_text.is_some() {
+            let code = item.widget(cx, ids!(code_view));
+            if let Some(view) = code.borrow::<makepad_code_editor::code_view::CodeView>() {
+                if let Some(session) = &view.session {
+                    let native = session.layout();
+                    let rect = view.editor.area().rect(cx);
+                    let scale = rect.size.y / native.height().max(1.0);
+                    let mut source = 0;
+                    for (index, line) in native
+                        .lines(0, native.as_text().as_lines().len())
+                        .enumerate()
+                    {
+                        if index > 0 {
+                            boundaries.push(crate::reader_columns::LineBoundary {
+                                y: rect.pos.y - item_rect.pos.y
+                                    + item_margin.top
+                                    + line.y() * scale,
+                                source,
+                            });
+                        }
+                        source += line.text().len() + 1;
+                    }
+                }
+            };
+        }
+        if !is_table && code_text.is_none() {
+            for row in page_lines.iter().skip(1) {
+                let point = row.pos + dvec2(0.5, row.size.y * 0.5);
+                if let Some(native) = item.selection_point_to_char_index(cx, point) {
+                    if let Some(map) = self.text_map(item_id, para) {
+                        boundaries.push(crate::reader_columns::LineBoundary {
+                            y: (row.pos.y - item_rect.pos.y + item_margin.top).max(0.0),
+                            source: map.source_index(native),
+                        });
+                    }
+                }
+            }
+        }
+        if needs_geometry_redraw && !measure {
+            self.view.area().redraw(cx);
+        }
+        boundaries.sort_by(|a, b| a.y.total_cmp(&b.y));
+        boundaries.dedup_by(|a, b| (a.y - b.y).abs() < 0.5);
+        crate::reader_columns::BlockMetrics {
+            height: item_rect.size.y + item_margin.top + item_margin.bottom,
+            boundaries,
+            keep_together: is_table || code_text.is_some() || para.contains("<img"),
+        }
+    }
+}
+
+impl Widget for ChapterList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let viewport = cx.peek_walk_turtle(walk);
+        if viewport.size.x > 0.0 && viewport.size.y > 0.0 && viewport.size.y.is_finite() {
+            return self.draw_pages(cx, scope, walk, viewport);
+        }
+        let paragraphs = PARAGRAPHS.read().unwrap();
+        let code_blocks = CODE_BLOCKS.read().unwrap();
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 self.hit_runs.clear();
-                let mut drawn_blocks = std::collections::HashSet::new();
+                let mut drawn_blocks = HashSet::new();
                 list.set_item_range(cx, 0, paragraphs.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let Some(para) = paragraphs.get(item_id) else {
-                        continue;
-                    };
-                    drawn_blocks.insert(item_id);
-                    let code_text = code_blocks.get(item_id).and_then(Option::as_deref);
-                    // Adapt only the display HTML: list/block IDs and stored
-                    // selection/highlight offsets still use the original para.
-                    let with_inline_code = code_text.is_none().then(|| {
-                        crate::reader_inline_code::wrap_html(
-                            &crate::reader_lists::normalize_html(para),
-                        )
-                    });
-                    let tracked = with_inline_code
-                        .as_deref()
-                        .and_then(crate::reader_hit::tracked_html);
-                    let has_gloss = para.contains("<ruby");
-                    let is_table = is_table_block(para);
-                    let template = if code_text.is_some() {
-                        code_template
-                    } else if is_table && has_gloss {
-                        id!(TableGlossPara)
-                    } else if is_table {
-                        id!(TablePara)
-                    } else if has_gloss {
-                        id!(GlossPara)
-                    } else {
-                        id!(Para)
-                    };
-                    let line_spacing = if has_gloss {
-                        reader_spacing.gloss_line_spacing()
-                    } else {
-                        reader_spacing.plain_line_spacing()
-                    };
-                    let item = list.item(cx, item_id, template);
-                    let previous_layout_width = self
-                        .item_layout_widths
-                        .get(&(chapter_idx, item_id))
-                        .copied();
-                    let source_text = readwise_core::vocab::annotate::rendered_text(para);
-                    let source_len = source_text.len();
-                    let current_range = selection_range
-                        .and_then(|range| selection_range_in_block(range, item_id, source_len));
-                    let highlight_ranges: Vec<_> = if code_text.is_none() {
-                        chapter_highlights
-                            .iter()
-                            .filter_map(|highlight| {
-                                let range =
-                                    highlight_range_in_block(highlight, item_id, source_len)?;
-                                Some((
-                                    range,
-                                    crate::mark_span::hl_color(crate::mark_span::hl_slot_for_name(
-                                        &highlight.color,
-                                    )),
-                                ))
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let make_pre_draw_key = |range| {
-                        reader_range_geometry_key(
-                            chapter_idx,
-                            item_id,
-                            range,
-                            previous_layout_width.unwrap_or(0.0),
-                            reader_font_size,
-                            line_spacing,
-                            reader_font,
-                            para,
-                        )
-                    };
-                    let probe_range = if code_text.is_none() {
-                        current_range.or_else(|| {
-                            highlight_ranges
-                                .iter()
-                                .find(|(range, _)| {
-                                    !self
-                                        .range_geometry_cache
-                                        .contains_key(&make_pre_draw_key(*range))
-                                })
-                                .map(|(range, _)| *range)
-                        })
-                    } else {
-                        current_range
-                    };
-                    if let Some(code_text) = code_text {
-                        item.widget(cx, ids!(code_view)).set_text(cx, code_text);
-                    } else {
-                        let html = item.widget(cx, ids!(para_html));
-                        let display_html = tracked
-                            .as_deref()
-                            .or(with_inline_code.as_deref())
-                            .unwrap_or(para);
-                        if let Some(mut inner) = html.borrow_mut::<Html>() {
-                            if inner.body.as_ref() != display_html {
-                                // Html assigns anonymous custom tags (`mark`, `ruby`,
-                                // links) positional IDs. Adding/removing a mark can
-                                // therefore move a RubyWord onto an ID previously owned
-                                // by MarkSpan. TextFlow::item_with_scope does not replace
-                                // an existing item when its template changes, so retaining
-                                // the map would draw the gloss as ordinary inline content.
-                                // Rebuild only when the document actually changes; steady
-                                // frames keep their widgets and area references.
-                                inner.text_flow.clear_items();
-                                inner.set_text(cx, display_html);
-                            }
-                            // Required on every platform: it builds the native
-                            // text buffer, hit tracker and selection geometry.
-                            // Touch input ownership is handled separately below.
-                            inner.text_flow.selectable = true;
-                            inner.text_flow.font_size = reader_font_size;
-                            inner.text_flow.font_color = reader_text_color;
-                            inner.text_flow.draw_text.color = reader_text_color;
-                            // TextFlow still computes the authoritative rich-text
-                            // rectangles, but submits them transparently. ChapterList
-                            // captures and normalizes that same batch for both the live
-                            // selection and permanent highlights.
-                            inner.text_flow.draw_selection.color = Vec4f::default();
-                            inner.text_flow.draw_block.table_header_bg_color = reader_scene.field;
-                            inner.text_flow.draw_block.table_border_color = reader_scene.border;
-                            inner.text_flow.text_style_normal.font_family = normal_family.clone();
-                            inner.text_flow.text_style_italic.font_family = italic_family.clone();
-                            inner.text_flow.text_style_bold.font_family = bold_family.clone();
-                            inner.text_flow.text_style_bold_italic.font_family =
-                                bold_italic_family.clone();
-                            inner.text_flow.text_style_normal.line_spacing = line_spacing;
-                            inner.text_flow.text_style_italic.line_spacing = line_spacing;
-                            inner.text_flow.text_style_bold.line_spacing = line_spacing;
-                            inner.text_flow.text_style_bold_italic.line_spacing = line_spacing;
-                            inner.text_flow.text_style_fixed.line_spacing = line_spacing;
-                        };
-                    }
-                    let native_probe = probe_range.and_then(|range| {
-                        if code_text.is_some() {
-                            Some(range)
-                        } else {
-                            self.text_map(item_id, para)?.native_range(range)
-                        }
-                    });
-                    if let Some((start, end)) = native_probe {
-                        item.selection_set(start, end);
-                    } else {
-                        item.selection_clear();
-                    }
-                    let capture_geometry = code_text.is_none() && native_probe.is_some();
-                    if capture_geometry {
-                        let html = item.widget(cx, ids!(para_html));
-                        if let Some(mut inner) = html.borrow_mut::<Html>() {
-                            // Seed the batch in the current draw-call group so every
-                            // selection rectangle emitted by TextFlow lands in one
-                            // inspectable instance buffer.
-                            inner.text_flow.draw_selection.new_draw_call(cx);
-                            inner.text_flow.draw_selection.begin_many_instances(cx);
-                        };
-                    }
-                    crate::reader_hit::begin_capture();
-                    crate::reader_inline_code::begin_capture(native_probe);
-                    item.draw_all_unscoped(cx);
-                    let item_rect = item.area().rect(cx);
-                    let runs = crate::reader_hit::end_capture(cx, item_rect.pos);
-                    let mut mapping_stable = true;
-                    if code_text.is_none() {
-                        let html = item.widget(cx, ids!(para_html));
-                        let native = html
-                            .borrow::<Html>()
-                            .and_then(|inner| crate::reader_text::native_text(&inner.text_flow));
-                        mapping_stable = native.as_ref().is_some_and(|native| {
-                            self.text_map(item_id, para)
-                                .is_some_and(|map| map.matches_native(native))
-                        });
-                        if !mapping_stable {
-                            self.text_maps.remove(&item_id);
-                            if let Some(map) = native.and_then(|native| {
-                                crate::reader_text::TextMap::from_html(&source_text, para, native)
-                            }) {
-                                self.text_maps
-                                    .insert(item_id, (reader_source_hash(para), map));
-                                // Fresh/recycled HTML needs one draw to discover
-                                // all actual block breaks before probing a range.
-                                needs_geometry_redraw |= probe_range.is_some();
-                            }
-                            self.range_geometry_cache.retain(|key, _| {
-                                key.chapter != chapter_idx || key.block != item_id
-                            });
-                        }
-                    }
-                    if tracked.is_some() {
-                        self.hit_runs
-                            .insert(item_id, (reader_source_hash(para), runs));
-                    } else {
-                        self.hit_runs.remove(&item_id);
-                    }
-                    let width_stable = previous_layout_width
-                        .map(|previous| reader_geometry_width_is_stable(previous, item_rect.size.x))
-                        .unwrap_or(false);
-                    self.item_layout_widths
-                        .insert((chapter_idx, item_id), item_rect.size.x);
-                    let make_geometry_key = |range| {
-                        reader_range_geometry_key(
-                            chapter_idx,
-                            item_id,
-                            range,
-                            item_rect.size.x,
-                            reader_font_size,
-                            line_spacing,
-                            reader_font,
-                            para,
-                        )
-                    };
-                    let current_key = current_range.map(make_geometry_key);
-                    let highlight_entries: Vec<_> = highlight_ranges
-                        .iter()
-                        .map(|(range, color)| (*range, make_geometry_key(*range), *color))
-                        .collect();
-                    let mut captured_current_geometry = None;
-                    if capture_geometry {
-                        let html = item.widget(cx, ids!(para_html));
-                        if let Some(mut inner) = html.borrow_mut::<Html>() {
-                            let mut raw =
-                                captured_draw_color_rects(cx, &inner.text_flow.draw_selection);
-                            crate::reader_inline_code::correct_rects(cx, &mut raw);
-                            inner.text_flow.draw_selection.end_many_instances(cx);
-                            let normalized = normalize_rich_selection_rects(&raw);
-                            let (draw_current_now, cache_for_reuse) =
-                                reader_geometry_capture_policy(
-                                    probe_range,
-                                    current_range,
-                                    width_stable && mapping_stable,
-                                );
-                            if draw_current_now && mapping_stable {
-                                // Live selection is transient UI, not persistent cache.
-                                // Paint this frame immediately even while a resized item
-                                // is waiting for its next stable-width frame.
-                                captured_current_geometry = Some(normalized.clone());
-                            }
-                            if cache_for_reuse {
-                                if let Some(key) = probe_range.map(make_geometry_key) {
-                                    self.range_geometry_cache
-                                        .insert(key, rects_relative_to(&normalized, item_rect.pos));
-                                }
-                            } else if mapping_stable || self.text_map(item_id, para).is_some() {
-                                // The PortalList item was still transitioning from the
-                                // old window width. Never poison the new-width cache with
-                                // this frame; request one stable redraw instead.
-                                needs_geometry_redraw = true;
-                            }
-                        };
-                    }
-
-                    // Permanent highlights and the current selection are drawn from
-                    // exactly the same captured rich-text geometry. Translate cached
-                    // item-relative rectangles so PortalList scrolling cannot stale it.
-                    for (_, key, color) in &highlight_entries {
-                        if let Some(rects) = self.range_geometry_cache.get(key).cloned() {
-                            self.draw_reader_selection.color = *color;
-                            for rect in rects {
-                                self.draw_reader_selection.draw_abs(
-                                    cx,
-                                    Rect {
-                                        pos: rect.pos + item_rect.pos,
-                                        size: rect.size,
-                                    },
-                                );
-                            }
-                        } else if self.text_map(item_id, para).is_some() {
-                            needs_geometry_redraw = true;
-                        }
-                    }
-                    if let Some(key) = current_key {
-                        if let Some(rects) = captured_current_geometry {
-                            self.draw_reader_selection.color = selection_color;
-                            for rect in rects {
-                                self.draw_reader_selection.draw_abs(cx, rect);
-                            }
-                        } else if let Some(rects) = self.range_geometry_cache.get(&key).cloned() {
-                            self.draw_reader_selection.color = selection_color;
-                            for rect in rects {
-                                self.draw_reader_selection.draw_abs(
-                                    cx,
-                                    Rect {
-                                        pos: rect.pos + item_rect.pos,
-                                        size: rect.size,
-                                    },
-                                );
-                            }
-                        }
+                    if let Some(para) = paragraphs.get(item_id) {
+                        drawn_blocks.insert(item_id);
+                        let code = code_blocks.get(item_id).and_then(Option::as_deref);
+                        self.draw_reader_paragraph(
+                            cx, &mut list, item_id, item_id, para, code, false,
+                        );
                     }
                 }
                 self.text_maps.retain(|id, _| drawn_blocks.contains(id));
             }
         }
-
-        if needs_geometry_redraw {
-            self.view.redraw(cx);
-        }
-
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.pager.measure_frame.is_event(event).is_some() {
+            self.view.redraw(cx);
+        }
         if SELECTION_POPUP_POINTER.load(Ordering::Relaxed)
             && matches!(
                 event,
@@ -6766,6 +7307,34 @@ impl Widget for ChapterList {
             )
         {
             return;
+        }
+        if self.pager.active {
+            if let Event::Scroll(e) = event {
+                // Code and tables retain horizontal scrolling inside a page.
+                if e.scroll.x.abs() > e.scroll.y.abs() {
+                    for (_, item, clip) in self.active_items(cx) {
+                        if clip.contains(e.abs) {
+                            item.handle_event(cx, event, scope);
+                        }
+                    }
+                    if e.handled_x.get() {
+                        return;
+                    }
+                }
+                if self.reader_rect(cx).contains(e.abs) && !e.handled_y.get() {
+                    e.handled_y.set(true);
+                    let delta = if e.scroll.y.abs() >= e.scroll.x.abs() {
+                        e.scroll.y
+                    } else {
+                        e.scroll.x
+                    };
+                    if delta.abs() >= 1.0 && e.time - self.pager.last_wheel >= 0.25 {
+                        self.pager.last_wheel = e.time;
+                        Cx::post_action(ReaderPageTurn(delta > 0.0));
+                    }
+                    return;
+                }
+            }
         }
         if matches!(event, Event::LongPress(_)) {
             self.track_selection(cx, event);
@@ -6786,10 +7355,11 @@ impl Widget for ChapterList {
             return;
         }
         if let Event::TouchUpdate(e) = event {
-            let list = self.view.portal_list(cx, ids!(list));
-            if e.touches.iter().any(|touch| {
-                touch.state == TouchState::Start && list.area().clipped_rect(cx).contains(touch.abs)
-            }) {
+            let rect = self.reader_rect(cx);
+            if e.touches
+                .iter()
+                .any(|touch| touch.state == TouchState::Start && rect.contains(touch.abs))
+            {
                 self.reset_selection_gesture();
                 *SEL_RANGE.write().unwrap() = None;
                 SELECTED_TEXT.write().unwrap().clear();
@@ -7227,7 +7797,12 @@ impl Widget for VocabList {
                     apply_reader_label_palette(cx, vocab_gloss, palette.text);
                     apply_reader_label_palette(cx, vocab_context, palette.muted);
                     apply_reader_label_palette(cx, vocab_meta, palette.muted);
-                    for id in [id!(vocab_speak), id!(vocab_review), id!(vocab_toggle), id!(vocab_remove)] {
+                    for id in [
+                        id!(vocab_speak),
+                        id!(vocab_review),
+                        id!(vocab_toggle),
+                        id!(vocab_remove),
+                    ] {
                         let button = item.widget(cx, &[id]);
                         apply_reader_button_palette(cx, button, palette);
                     }
@@ -7493,6 +8068,8 @@ pub struct App {
     reader_page_span: usize,
     #[rust]
     pending_reader_pagination_layout: bool,
+    #[rust]
+    reader_footer_signature: u64,
     /// 选区工具条由 App 这一覆盖层所有者定位；锚点是选区手势结束的屏幕坐标。
     #[rust]
     selection_popup_anchor: Option<DVec2>,
@@ -8062,6 +8639,18 @@ impl App {
         );
     }
 
+    fn sync_reader_columns_controls(&self, cx: &mut Cx, columns: ReaderColumns) {
+        for (id, mode) in [
+            (id!(reader_columns_one), ReaderColumns::One),
+            (id!(reader_columns_two), ReaderColumns::Two),
+            (id!(reader_columns_auto), ReaderColumns::Auto),
+        ] {
+            self.ui
+                .radio_button(cx, &[id])
+                .set_active(cx, mode == columns, Animate::No);
+        }
+    }
+
     fn sync_reader_background_controls(&self, cx: &mut Cx, background: ReaderBackground) {
         for (id, option) in [
             (id!(reader_background_paper), ReaderBackground::Paper),
@@ -8162,25 +8751,71 @@ impl App {
         // active state otherwise falls back to the default white widget skin.
         // Keep every setting choice in the same reading-surface scene.
         for id in [
-            id!(language_chinese), id!(language_english), id!(theme_dark), id!(theme_light),
-            id!(reader_background_paper), id!(reader_background_sepia),
-            id!(reader_background_sage), id!(reader_background_night),
-            id!(reader_background_theme), id!(reader_font_standard), id!(reader_font_monospace),
-            id!(reader_spacing_default), id!(reader_spacing_comfortable),
-            id!(reader_spacing_relaxed), id!(gloss_enable), id!(local_ai_auto_start),
+            id!(language_chinese),
+            id!(language_english),
+            id!(theme_dark),
+            id!(theme_light),
+            id!(reader_background_paper),
+            id!(reader_background_sepia),
+            id!(reader_background_sage),
+            id!(reader_background_night),
+            id!(reader_columns_one),
+            id!(reader_columns_two),
+            id!(reader_columns_auto),
+            id!(reader_background_theme),
+            id!(reader_font_standard),
+            id!(reader_font_monospace),
+            id!(reader_spacing_default),
+            id!(reader_spacing_comfortable),
+            id!(reader_spacing_relaxed),
+            id!(gloss_enable),
+            id!(local_ai_auto_start),
         ] {
             apply_library_control_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
         for id in [
-            id!(gc0), id!(gc1), id!(gc2), id!(gc3), id!(gb0), id!(gb1), id!(gb2), id!(gb3),
-            id!(wc0), id!(wc1), id!(wc2), id!(wc3), id!(wb0), id!(wb1), id!(wb2), id!(wb3),
-            id!(sc0), id!(sc1), id!(sc2), id!(sc3), id!(hc0), id!(hc1), id!(hc2), id!(hc3),
+            id!(gc0),
+            id!(gc1),
+            id!(gc2),
+            id!(gc3),
+            id!(gb0),
+            id!(gb1),
+            id!(gb2),
+            id!(gb3),
+            id!(wc0),
+            id!(wc1),
+            id!(wc2),
+            id!(wc3),
+            id!(wb0),
+            id!(wb1),
+            id!(wb2),
+            id!(wb3),
+            id!(sc0),
+            id!(sc1),
+            id!(sc2),
+            id!(sc3),
+            id!(hc0),
+            id!(hc1),
+            id!(hc2),
+            id!(hc3),
         ] {
-            apply_reader_surface_palette(cx, self.ui.widget(cx, &[id]), palette.surface, palette.border);
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.surface,
+                palette.border,
+            );
         }
         for id in [
-            id!(font_dec), id!(font_inc), id!(gloss_dec), id!(gloss_inc), id!(ai_save),
-            id!(reload_button), id!(local_ai_start), id!(local_ai_save), id!(local_ai_stop),
+            id!(font_dec),
+            id!(font_inc),
+            id!(gloss_dec),
+            id!(gloss_inc),
+            id!(ai_save),
+            id!(reload_button),
+            id!(local_ai_start),
+            id!(local_ai_save),
+            id!(local_ai_stop),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), page_button_palette);
         }
@@ -8189,15 +8824,17 @@ impl App {
             id!(chat_input),
             id!(skill_name_input),
             id!(skill_content_input),
-            id!(ai_endpoint), id!(ai_model), id!(ai_api_key), id!(local_ai_binary),
-            id!(local_ai_model_path), id!(local_ai_port), id!(local_ai_context),
-            id!(local_ai_threads), id!(local_ai_gpu_layers),
+            id!(ai_endpoint),
+            id!(ai_model),
+            id!(ai_api_key),
+            id!(local_ai_binary),
+            id!(local_ai_model_path),
+            id!(local_ai_port),
+            id!(local_ai_context),
+            id!(local_ai_threads),
+            id!(local_ai_gpu_layers),
         ] {
-            apply_reader_input_palette(
-                cx,
-                self.ui.widget(cx, &[id]),
-                page_button_palette,
-            );
+            apply_reader_input_palette(cx, self.ui.widget(cx, &[id]), page_button_palette);
         }
         apply_reader_surface_palette(
             cx,
@@ -8544,6 +9181,16 @@ impl App {
         set_text!(reader_background_sage, "background_sage");
         set_text!(reader_background_night, "background_night");
         set_text!(reader_background_theme, "background_theme");
+        self.ui
+            .label(cx, ids!(reader_columns_label))
+            .set_text(cx, localized("正文分栏", "Columns"));
+        for (id, zh, en) in [
+            (id!(reader_columns_one), "单列", "1 column"),
+            (id!(reader_columns_two), "双列", "2 columns"),
+            (id!(reader_columns_auto), "自动", "Auto Set"),
+        ] {
+            self.ui.widget(cx, &[id]).set_text(cx, localized(zh, en));
+        }
         set_text!(font_family_label, "body_font");
         set_text!(reader_font_standard, "standard");
         set_text!(reader_font_monospace, "monospace");
@@ -9955,8 +10602,30 @@ impl App {
         let block = list.first_id().min(block_count.saturating_sub(1));
         let scroll = list.scroll_position();
         let scroll = if scroll.is_finite() { scroll } else { 0.0 };
+        let source = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow::<ChapterList>()
+            .and_then(|reader| {
+                reader
+                    .pager
+                    .requested_source
+                    .or(reader.pager.pending_source)
+                    .filter(|(id, _)| *id == block)
+                    .map(|(_, source)| source)
+                    .or_else(|| {
+                        reader
+                            .pager
+                            .metrics
+                            .get(block)
+                            .and_then(Option::as_ref)
+                            .filter(|metric| scroll >= -0.5 || !metric.boundaries.is_empty())
+                            .map(|metric| metric.source_at(-scroll))
+                    })
+            });
         CURRENT_READER_BLOCK.store(block, Ordering::Relaxed);
         CURRENT_READER_SCROLL_BITS.store(scroll.to_bits(), Ordering::Relaxed);
+        CURRENT_READER_SOURCE.store(source.unwrap_or(usize::MAX), Ordering::Relaxed);
         Some(ReaderProgressSnapshot {
             book_id,
             chapter_count,
@@ -9964,6 +10633,7 @@ impl App {
                 chapter: self.chapter_idx.min(chapter_count.saturating_sub(1)),
                 block,
                 scroll,
+                source,
             },
         })
     }
@@ -10027,6 +10697,17 @@ impl App {
         CURRENT_CHAPTER.store(idx, std::sync::atomic::Ordering::Relaxed);
         CURRENT_READER_BLOCK.store(restored_block, Ordering::Relaxed);
         CURRENT_READER_SCROLL_BITS.store(restored_scroll.to_bits(), Ordering::Relaxed);
+        CURRENT_READER_SOURCE.store(usize::MAX, Ordering::Relaxed);
+        if let Some(mut reader) = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow_mut::<ChapterList>()
+        {
+            reader.pager.requested_last_page = block == usize::MAX;
+            reader.pager.spread_ready = false;
+            reader.pager.pending_source = None;
+            reader.pager.requested_source = None;
+        }
         replace_paragraphs(chunks);
         if self.reader_chapter_block_counts.len() != total {
             self.reader_chapter_block_counts = vec![0; total];
@@ -10052,6 +10733,7 @@ impl App {
                     chapter: idx,
                     block: restored_block,
                     scroll: restored_scroll,
+                    source: None,
                 },
             });
         }
@@ -10073,43 +10755,107 @@ impl App {
         let chapter = CURRENT_CHAPTER.load(Ordering::Relaxed);
         let first_block = CURRENT_READER_BLOCK.load(Ordering::Relaxed);
         let first_scroll = f64::from_bits(CURRENT_READER_SCROLL_BITS.load(Ordering::Relaxed));
+        let source = CURRENT_READER_SOURCE.load(Ordering::Relaxed);
         self.set_chapter_at(cx, chapter, first_block, first_scroll, false);
+        if source != usize::MAX {
+            if let Some(mut reader) = self
+                .ui
+                .widget(cx, ids!(chapter_list))
+                .borrow_mut::<ChapterList>()
+            {
+                reader.pager.requested_source = Some((first_block, source));
+            }
+        }
         self.update_progress_label(cx);
     }
-
     fn update_reader_page_footer(&mut self, cx: &mut Cx) {
-        let first_block = self
-            .ui
-            .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list))
-            .first_id();
-        let summary = (self.reader_page_span > 0)
-            .then(|| {
-                reader_page_summary(
-                    &self.reader_chapter_block_counts,
-                    self.chapter_idx,
-                    first_block,
-                    self.reader_page_span,
+        let widget = self.ui.widget(cx, ids!(chapter_list));
+        let (columns, paged) = widget
+            .borrow::<ChapterList>()
+            .map(|reader| {
+                let pager = &reader.pager;
+                let page = pager
+                    .pages
+                    .partition_point(|a| {
+                        a.block < pager.anchor.block
+                            || (a.block == pager.anchor.block && a.y <= pager.anchor.y + 0.5)
+                    })
+                    .saturating_sub(1);
+                (
+                    pager.layout.count.max(1),
+                    (pager.active && pager.complete).then_some((
+                        page,
+                        pager.pages.len().max(1),
+                        pager.metrics.len().max(1),
+                    )),
                 )
             })
-            .flatten();
-        if let Some(mut indicator) = self
-            .ui
-            .widget(cx, ids!(reader_page_indicator))
-            .borrow_mut::<ReaderPageIndicator>()
+            .unwrap_or((1, None));
+        let summary = paged.map(|(page, total, blocks)| {
+            // Only the current chapter has been typeset at this width. Keep
+            // the book-wide indicator explicitly approximate until all
+            // chapters can share a measured page index.
+            let estimate = |count: usize| {
+                ((count.max(1) as f64 * total as f64 / blocks as f64).ceil() as usize).max(1)
+            };
+            let before = self
+                .reader_chapter_block_counts
+                .iter()
+                .take(self.chapter_idx)
+                .copied()
+                .map(estimate)
+                .sum::<usize>();
+            let after = self
+                .reader_chapter_block_counts
+                .iter()
+                .skip(self.chapter_idx + 1)
+                .copied()
+                .map(estimate)
+                .sum::<usize>();
+            ReaderPageSummary {
+                current: before + page + 1,
+                total: before + total + after,
+                pages_left_in_chapter: total.saturating_sub(page + columns),
+            }
+        });
+        self.ui
+            .view(cx, ids!(reader_page_second))
+            .set_visible(cx, columns == 2);
+        for (offset, id) in [
+            id!(reader_page_indicator),
+            id!(reader_page_indicator_second),
+        ]
+        .into_iter()
+        .enumerate()
         {
-            match summary {
-                Some(summary) => indicator.set_pages(cx, summary.current, summary.total),
-                None => indicator.set_pages(cx, 0, 0),
+            if let Some(mut indicator) = self
+                .ui
+                .widget(cx, &[id])
+                .borrow_mut::<ReaderPageIndicator>()
+            {
+                indicator.approximate = self.reader_chapter_block_counts.len() > 1;
+                match summary {
+                    Some(summary)
+                        if offset == 0
+                            || paged.is_some_and(|(page, total, _)| page + offset < total) =>
+                    {
+                        indicator.set_pages(cx, summary.current + offset, summary.total)
+                    }
+                    _ => indicator.set_pages(cx, 0, 0),
+                }
             }
         }
         let pages_left = match summary {
             Some(summary) if app_language() == AppLanguage::English => {
-                if summary.pages_left_in_chapter == 1 {
-                    "1 page left in chapter".to_string()
-                } else {
-                    format!("{} pages left in chapter", summary.pages_left_in_chapter)
-                }
+                format!(
+                    "{} {} left in chapter",
+                    summary.pages_left_in_chapter,
+                    if summary.pages_left_in_chapter == 1 {
+                        "page"
+                    } else {
+                        "pages"
+                    }
+                )
             }
             Some(summary) => format!("本章还剩 {} 页", summary.pages_left_in_chapter),
             None if app_language() == AppLanguage::English => "Calculating pages…".to_string(),
@@ -10128,6 +10874,32 @@ impl App {
     /// 必须在一次完整 Draw 后读取 PortalList 的真实可见项目数；提前读取会得到旧布局，
     /// 导致字号或横竖屏变化后页码与翻页步长不一致。
     fn resolve_reader_pagination_layout_after_draw(&mut self, cx: &mut Cx) {
+        let paged_signature = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow::<ChapterList>()
+            .filter(|reader| reader.pager.active)
+            .map(|reader| {
+                let pager = &reader.pager;
+                reader_source_hash(&format!(
+                    "{}:{:?}:{:?}:{}:{}:{:?}",
+                    pager.signature,
+                    pager.layout,
+                    pager.anchor,
+                    pager.pages.len(),
+                    pager.complete,
+                    self.reader_chapter_block_counts
+                ))
+            });
+        if let Some(signature) = paged_signature {
+            if self.reader_footer_signature != signature {
+                self.reader_footer_signature = signature;
+                self.update_progress_label(cx);
+                self.update_reader_page_footer(cx);
+                let _ = self.current_reader_progress_snapshot(cx);
+            }
+            return;
+        }
         if !self.pending_reader_pagination_layout || CURRENT_BOOK.read().unwrap().is_none() {
             return;
         }
@@ -10158,7 +10930,14 @@ impl App {
         CURRENT_READER_BLOCK.store(list.first_id(), Ordering::Relaxed);
         CURRENT_READER_SCROLL_BITS.store(list.scroll_position().to_bits(), Ordering::Relaxed);
         let blocks = PARAGRAPHS.read().unwrap().len().max(1);
-        let read_to = (list.first_id() + list.visible_items()).min(blocks);
+        let read_to = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow::<ChapterList>()
+            .filter(|reader| reader.pager.active)
+            .map(|reader| reader.pager.next.block + usize::from(reader.pager.next.y > 0.0))
+            .unwrap_or(list.first_id() + list.visible_items())
+            .min(blocks);
         let pct = read_to * 100 / blocks;
         let text = format!("{}/{} · {}%", self.chapter_idx + 1, total_ch, pct);
         self.ui.label(cx, ids!(chapter_pos)).set_text(cx, &text);
@@ -10167,6 +10946,29 @@ impl App {
 
     /// 视口翻屏；到底/到顶时跨章。
     fn page_scroll(&mut self, cx: &mut Cx, down: bool) {
+        let chapter_widget = self.ui.widget(cx, ids!(chapter_list));
+        let selecting = chapter_widget
+            .borrow::<ChapterList>()
+            .is_some_and(|reader| reader.selecting);
+        if !selecting {
+            self.clear_reader_selection(cx);
+            self.close_word_card(cx);
+        }
+        let paged = chapter_widget
+            .borrow_mut::<ChapterList>()
+            .and_then(|mut reader| reader.pager.active.then(|| reader.turn_page(cx, down)));
+        if let Some(turned) = paged {
+            if !turned && CURRENT_BOOK.read().unwrap().is_some() {
+                if down {
+                    self.set_chapter(cx, self.chapter_idx + 1);
+                } else if self.chapter_idx > 0 {
+                    self.set_chapter_at(cx, self.chapter_idx - 1, usize::MAX, 0.0, true);
+                }
+            }
+            self.update_progress_label(cx);
+            self.debounce_reader_progress_save(cx);
+            return;
+        }
         if CURRENT_BOOK.read().unwrap().is_none() {
             return;
         }
@@ -10205,10 +11007,7 @@ impl App {
 
     /// 阅读页快捷键：空格/PgDn/→ 下一屏，PgUp/← 上一屏，Shift+←/→ 跨章，Home 回章首。
     fn handle_reader_key(&mut self, cx: &mut Cx, ke: &KeyEvent) {
-        if !self.on_reader_page
-            || CURRENT_BOOK.read().unwrap().is_none()
-            || self.text_input_has_focus(cx)
-        {
+        if !self.on_reader_page || self.text_input_has_focus(cx) {
             return;
         }
         let shift = ke.modifiers.shift;
@@ -10356,6 +11155,7 @@ impl App {
         *LIBRARY_VIEW_MODE.write().unwrap() = settings.library_view_mode;
         *READER_THEME.write().unwrap() = settings.theme;
         *READER_BACKGROUND.write().unwrap() = settings.background;
+        *READER_COLUMNS.write().unwrap() = settings.columns;
         *READER_FONT.write().unwrap() = settings.font;
         *READER_SPACING.write().unwrap() = settings.spacing;
         *READER_FONT_SIZE.write().unwrap() = settings.font_size;
@@ -10386,6 +11186,7 @@ impl App {
         self.sync_theme_controls(cx, settings.theme);
         self.sync_library_view_controls(cx, settings.library_view_mode);
         self.sync_reader_background_controls(cx, settings.background);
+        self.sync_reader_columns_controls(cx, settings.columns);
         self.apply_reader_background(cx, settings.background);
         self.sync_app_language_controls(cx, settings.language);
         self.apply_ui_language(cx, settings.language);
@@ -10411,6 +11212,16 @@ impl App {
 
     /// 用当前章内容重建 PortalList 块（保滚动位置：块数不变时 first_id 不动）。
     fn refresh_current_chapter(&mut self, cx: &mut Cx) {
+        let location = self
+            .current_reader_progress_snapshot(cx)
+            .map(|snapshot| snapshot.location);
+        let source_text = location.and_then(|location| {
+            PARAGRAPHS
+                .read()
+                .unwrap()
+                .get(location.block)
+                .map(|text| readwise_core::vocab::annotate::rendered_text(text))
+        });
         let chunks = {
             let mut guard = CURRENT_BOOK.write().unwrap();
             guard
@@ -10419,7 +11230,21 @@ impl App {
         };
         if let Some(chunks) = chunks {
             let chapter_blocks = chunks.len().max(1);
+            let resume = location.filter(|location| {
+                chunks.get(location.block).is_some_and(|text| {
+                    source_text.as_deref()
+                        == Some(readwise_core::vocab::annotate::rendered_text(text).as_str())
+                })
+            });
             replace_paragraphs(chunks);
+            if let Some(mut reader) = self
+                .ui
+                .widget(cx, ids!(chapter_list))
+                .borrow_mut::<ChapterList>()
+            {
+                reader.pager.requested_source = resume
+                    .and_then(|location| location.source.map(|source| (location.block, source)));
+            }
             if let Some(count) = self.reader_chapter_block_counts.get_mut(self.chapter_idx) {
                 *count = chapter_blocks;
             }
@@ -10857,6 +11682,11 @@ impl MatchEvent for App {
             self.debounce_reader_progress_save(cx);
         }
         for action in actions {
+            if let Some(turn) = action.downcast_ref::<ReaderPageTurn>() {
+                if self.on_reader_page {
+                    self.page_scroll(cx, turn.0);
+                }
+            }
             #[cfg(target_os = "ios")]
             if let Some(import_action) =
                 action.downcast_ref::<crate::mobile_import::IosImportAction>()
@@ -11564,6 +12394,14 @@ impl MatchEvent for App {
                         self.reader_chapter_block_counts.clear();
                         self.reader_page_span = 0;
                         self.set_chapter_at(cx, resume.chapter, resume.block, resume.scroll, false);
+                        if let Some(mut reader) = self
+                            .ui
+                            .widget(cx, ids!(chapter_list))
+                            .borrow_mut::<ChapterList>()
+                        {
+                            reader.pager.requested_source =
+                                resume.source.map(|source| (resume.block, source));
+                        }
                         self.update_progress_label(cx);
                         if *GLOSS_ENABLED.read().unwrap() && *gloss_count == 0 {
                             self.ui.label(cx, ids!(status)).set_text(
@@ -12463,6 +13301,25 @@ impl MatchEvent for App {
                     _ => ReaderBackground::Paper,
                 },
             );
+        }
+        if let Some(index) = self
+            .ui
+            .radio_button_set(
+                cx,
+                ids_array!(reader_columns_one, reader_columns_two, reader_columns_auto),
+            )
+            .selected(cx, actions)
+        {
+            let mode = match index {
+                0 => ReaderColumns::One,
+                1 => ReaderColumns::Two,
+                _ => ReaderColumns::Auto,
+            };
+            *READER_COLUMNS.write().unwrap() = mode;
+            self.sync_reader_columns_controls(cx, mode);
+            self.clear_reader_selection(cx);
+            self.invalidate_reader_pagination_layout(cx);
+            self.persist_reader_settings(cx);
         }
         if let Some(index) = self
             .ui

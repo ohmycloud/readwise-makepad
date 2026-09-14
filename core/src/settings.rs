@@ -100,6 +100,32 @@ impl ReaderBackground {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderColumns {
+    One,
+    Two,
+    #[default]
+    Auto,
+}
+
+impl ReaderColumns {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::One => "one",
+            Self::Two => "two",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "one" => Self::One,
+            "two" => Self::Two,
+            _ => Self::Auto,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderFont {
     #[default]
     Standard,
@@ -170,6 +196,7 @@ pub struct ReaderSettings {
     pub library_view_mode: LibraryViewMode,
     pub theme: ReaderTheme,
     pub background: ReaderBackground,
+    pub columns: ReaderColumns,
     pub font: ReaderFont,
     pub spacing: ReaderSpacing,
     pub font_size: Option<f32>,
@@ -190,6 +217,7 @@ impl Default for ReaderSettings {
             library_view_mode: LibraryViewMode::List,
             theme: ReaderTheme::Dark,
             background: ReaderBackground::Paper,
+            columns: ReaderColumns::Auto,
             font: ReaderFont::Standard,
             spacing: ReaderSpacing::Default,
             font_size: None,
@@ -228,6 +256,15 @@ impl ReaderSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reader_columns_round_trip_and_unknown_defaults_to_auto() {
+        for mode in [ReaderColumns::One, ReaderColumns::Two, ReaderColumns::Auto] {
+            assert_eq!(ReaderColumns::from_str(mode.as_str()), mode);
+        }
+        assert_eq!(ReaderColumns::from_str("unknown"), ReaderColumns::Auto);
+        assert_eq!(ReaderSettings::default().columns, ReaderColumns::Auto);
+    }
 
     #[test]
     fn normalizes_corrupt_or_out_of_range_reader_settings() {

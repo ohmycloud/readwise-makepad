@@ -18,6 +18,25 @@ script_mod! {
 
 const INLINE_IMAGE_MAX_HEIGHT: f64 = 520.0;
 
+thread_local! {
+    static PAGE_HEIGHT: std::cell::Cell<f64> = const { std::cell::Cell::new(INLINE_IMAGE_MAX_HEIGHT) };
+}
+
+/// Measurement and visible drawing must use the same image size, including
+/// on a short landscape screen. The original stays available in the viewer.
+pub(crate) fn with_page_height<T>(height: f64, draw: impl FnOnce() -> T) -> T {
+    PAGE_HEIGHT.with(|limit| {
+        let previous = limit.replace(if height.is_finite() && height > 0.0 {
+            (height - 48.0).max(20.0).min(INLINE_IMAGE_MAX_HEIGHT)
+        } else {
+            INLINE_IMAGE_MAX_HEIGHT
+        });
+        let result = draw();
+        limit.set(previous);
+        result
+    })
+}
+
 fn inline_image_display_size(
     pixel_size: (usize, usize),
     available_width: f64,
@@ -32,7 +51,7 @@ fn inline_image_display_size(
     } else {
         natural_scale
     };
-    let height_scale = INLINE_IMAGE_MAX_HEIGHT / pixel_height;
+    let height_scale = PAGE_HEIGHT.get() / pixel_height;
     let scale = natural_scale.min(width_scale).min(height_scale).max(0.01);
     dvec2(pixel_width * scale, pixel_height * scale)
 }
@@ -161,6 +180,14 @@ impl Widget for ChapterImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paged_images_fit_short_viewports_and_restore_the_normal_limit() {
+        let original = inline_image_display_size((600, 1200), 500.0, 1.0);
+        let short = with_page_height(240.0, || inline_image_display_size((600, 1200), 500.0, 1.0));
+        assert_size_close(short, dvec2(96.0, 192.0));
+        assert_size_close(inline_image_display_size((600, 1200), 500.0, 1.0), original);
+    }
 
     fn assert_size_close(actual: DVec2, expected: DVec2) {
         assert!((actual.x - expected.x).abs() < 0.001, "{actual:?}");

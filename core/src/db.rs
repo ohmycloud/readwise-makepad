@@ -373,6 +373,9 @@ impl Db {
                     "reader.background" => {
                         settings.background = crate::settings::ReaderBackground::from_str(&value)
                     }
+                    "reader.columns" => {
+                        settings.columns = crate::settings::ReaderColumns::from_str(&value)
+                    }
                     "reader.font" => settings.font = crate::settings::ReaderFont::from_str(&value),
                     "reader.spacing" => {
                         settings.spacing = crate::settings::ReaderSpacing::from_str(&value)
@@ -425,6 +428,7 @@ impl Db {
             let library_view_mode = settings.library_view_mode.as_str();
             let theme = settings.theme.as_str();
             let background = settings.background.as_str();
+            let columns = settings.columns.as_str();
             let font = settings.font.as_str();
             let spacing = settings.spacing.as_str();
             let font_size = settings.font_size.map(|value| value.to_string()).unwrap_or_default();
@@ -441,6 +445,7 @@ impl Db {
                 ("reader.library_view_mode", library_view_mode),
                 ("reader.theme", theme),
                 ("reader.background", background),
+                ("reader.columns", columns),
                 ("reader.font", font),
                 ("reader.spacing", spacing),
                 ("reader.font_size", font_size.as_str()),
@@ -978,6 +983,28 @@ async fn initialize_default_skills(pool: &SqlitePool) -> Result<(), String> {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn reader_column_preference_persists_and_old_databases_default_to_auto() {
+        let (rt, pool) = runtime_and_pool();
+        rt.block_on(initialize_schema(&pool)).unwrap();
+        let db = Db {
+            rt,
+            pool,
+            data_dir: std::path::PathBuf::new(),
+        };
+        let mut settings = db.load_reader_settings().unwrap();
+        assert_eq!(settings.columns, crate::settings::ReaderColumns::Auto);
+        for columns in [
+            crate::settings::ReaderColumns::One,
+            crate::settings::ReaderColumns::Two,
+            crate::settings::ReaderColumns::Auto,
+        ] {
+            settings.columns = columns;
+            db.save_reader_settings(&settings).unwrap();
+            assert_eq!(db.load_reader_settings().unwrap().columns, columns);
+        }
+    }
 
     fn runtime_and_pool() -> (tokio::runtime::Runtime, SqlitePool) {
         let runtime = tokio::runtime::Builder::new_current_thread()
