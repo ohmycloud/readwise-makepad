@@ -100,6 +100,36 @@ impl ReaderBackground {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderTurnMode {
+    #[default]
+    Curl,
+    Slide,
+    Scroll,
+}
+
+impl ReaderTurnMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Curl => "curl",
+            Self::Slide => "slide",
+            Self::Scroll => "scroll",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "slide" => Self::Slide,
+            "scroll" => Self::Scroll,
+            _ => Self::Curl,
+        }
+    }
+
+    pub fn is_paged(self) -> bool {
+        self != Self::Scroll
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderColumns {
     One,
     Two,
@@ -197,6 +227,7 @@ pub struct ReaderSettings {
     pub theme: ReaderTheme,
     pub background: ReaderBackground,
     pub columns: ReaderColumns,
+    pub turn_mode: ReaderTurnMode,
     pub font: ReaderFont,
     pub spacing: ReaderSpacing,
     pub font_size: Option<f32>,
@@ -218,6 +249,7 @@ impl Default for ReaderSettings {
             theme: ReaderTheme::Dark,
             background: ReaderBackground::Paper,
             columns: ReaderColumns::Auto,
+            turn_mode: ReaderTurnMode::Curl,
             font: ReaderFont::Standard,
             spacing: ReaderSpacing::Default,
             font_size: None,

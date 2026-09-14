@@ -376,6 +376,9 @@ impl Db {
                     "reader.columns" => {
                         settings.columns = crate::settings::ReaderColumns::from_str(&value)
                     }
+                    "reader.turn_mode" => {
+                        settings.turn_mode = crate::settings::ReaderTurnMode::from_str(&value)
+                    }
                     "reader.font" => settings.font = crate::settings::ReaderFont::from_str(&value),
                     "reader.spacing" => {
                         settings.spacing = crate::settings::ReaderSpacing::from_str(&value)
@@ -429,6 +432,7 @@ impl Db {
             let theme = settings.theme.as_str();
             let background = settings.background.as_str();
             let columns = settings.columns.as_str();
+            let turn_mode = settings.turn_mode.as_str();
             let font = settings.font.as_str();
             let spacing = settings.spacing.as_str();
             let font_size = settings.font_size.map(|value| value.to_string()).unwrap_or_default();
@@ -446,6 +450,7 @@ impl Db {
                 ("reader.theme", theme),
                 ("reader.background", background),
                 ("reader.columns", columns),
+                ("reader.turn_mode", turn_mode),
                 ("reader.font", font),
                 ("reader.spacing", spacing),
                 ("reader.font_size", font_size.as_str()),
@@ -983,6 +988,42 @@ async fn initialize_default_skills(pool: &SqlitePool) -> Result<(), String> {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn reader_turn_modes_persist_without_changing_columns_and_default_to_curl() {
+        use crate::settings::{ReaderColumns, ReaderTurnMode};
+        let (rt, pool) = runtime_and_pool();
+        rt.block_on(initialize_schema(&pool)).unwrap();
+        let db = Db {
+            rt,
+            pool,
+            data_dir: std::path::PathBuf::new(),
+        };
+        let mut settings = db.load_reader_settings().unwrap();
+        assert_eq!(settings.turn_mode, ReaderTurnMode::Curl);
+        settings.columns = ReaderColumns::Two;
+        for mode in [
+            ReaderTurnMode::Slide,
+            ReaderTurnMode::Scroll,
+            ReaderTurnMode::Curl,
+        ] {
+            settings.turn_mode = mode;
+            db.save_reader_settings(&settings).unwrap();
+            assert_eq!(db.load_reader_settings().unwrap(), settings);
+        }
+        db.rt
+            .block_on(
+                sqlx::query(
+                    "UPDATE app_settings SET value = 'invalid' WHERE key = 'reader.turn_mode'",
+                )
+                .execute(&db.pool),
+            )
+            .unwrap();
+        assert_eq!(
+            db.load_reader_settings().unwrap().turn_mode,
+            ReaderTurnMode::Curl
+        );
+    }
 
     #[test]
     fn reader_column_preference_persists_and_old_databases_default_to_auto() {

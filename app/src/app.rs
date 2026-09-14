@@ -23,6 +23,7 @@ type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
 type ReaderBackground = readwise_core::settings::ReaderBackground;
 type ReaderColumns = readwise_core::settings::ReaderColumns;
+type ReaderTurnMode = readwise_core::settings::ReaderTurnMode;
 type ReaderFont = readwise_core::settings::ReaderFont;
 type ReaderSpacing = readwise_core::settings::ReaderSpacing;
 type ReaderSettings = readwise_core::settings::ReaderSettings;
@@ -294,12 +295,18 @@ fn reader_swipe_direction(start: DVec2, end: DVec2, elapsed: f64) -> Option<Read
 struct ReaderSwipeGesture {
     origin: Option<(u64, DVec2, f64)>,
     cancelled: bool,
+    vertical: bool,
+    allow_previous: bool,
+    allow_next: bool,
 }
 
 impl ReaderSwipeGesture {
     fn begin(&mut self, uid: u64, abs: DVec2, time: f64) {
         self.origin = Some((uid, abs, time));
         self.cancelled = false;
+        self.vertical = false;
+        self.allow_previous = true;
+        self.allow_next = true;
     }
 
     fn cancel(&mut self) {
@@ -315,7 +322,16 @@ impl ReaderSwipeGesture {
             self.cancel();
             return None;
         }
-        let delta = touch.abs - start;
+        let project = |pos: DVec2| {
+            if self.vertical {
+                dvec2(pos.y, pos.x)
+            } else {
+                pos
+            }
+        };
+        let start = project(start);
+        let end = project(touch.abs);
+        let delta = end - start;
         if touch.state == TouchState::Move
             && delta.y.abs() > READER_SWIPE_VERTICAL_CANCEL
             && delta.y.abs() > delta.x.abs()
@@ -329,7 +345,12 @@ impl ReaderSwipeGesture {
         if self.cancelled {
             return None;
         }
-        reader_swipe_direction(start, touch.abs, event_time - start_time)
+        reader_swipe_direction(start, end, event_time - start_time).filter(|direction| {
+            match direction {
+                ReaderSwipeDirection::Previous => self.allow_previous,
+                ReaderSwipeDirection::Next => self.allow_next,
+            }
+        })
     }
 }
 
@@ -1478,6 +1499,68 @@ mod responsive_layout_tests {
             None
         );
     }
+
+    #[test]
+    fn vertical_swipes_cross_only_the_edge_where_the_gesture_started() {
+        let stop = |x, y| TouchPoint {
+            state: TouchState::Stop,
+            abs: dvec2(x, y),
+            time: 1.4,
+            uid: 1,
+            rotation_angle: 0.0,
+            force: 1.0,
+            radius: dvec2(1.0, 1.0),
+            handled: Default::default(),
+            sweep_lock: Default::default(),
+        };
+        for (previous, next, end, expected) in [
+            (false, false, stop(200.0, 300.0), None),
+            (
+                false,
+                true,
+                stop(200.0, 300.0),
+                Some(ReaderSwipeDirection::Next),
+            ),
+            (false, true, stop(200.0, 500.0), None),
+            (
+                true,
+                false,
+                stop(200.0, 500.0),
+                Some(ReaderSwipeDirection::Previous),
+            ),
+            (true, true, stop(100.0, 400.0), None),
+        ] {
+            let mut gesture = ReaderSwipeGesture::default();
+            gesture.begin(1, dvec2(200.0, 400.0), 1.0);
+            gesture.vertical = true;
+            gesture.allow_previous = previous;
+            gesture.allow_next = next;
+            assert_eq!(gesture.update(&end, 1.4), expected);
+            assert_eq!(gesture.update(&end, 1.5), None);
+        }
+    }
+
+    #[test]
+    fn long_press_cancel_prevents_both_horizontal_and_vertical_page_turns() {
+        for vertical in [false, true] {
+            let mut gesture = ReaderSwipeGesture::default();
+            gesture.begin(1, dvec2(200.0, 400.0), 1.0);
+            gesture.vertical = vertical;
+            gesture.cancel();
+            let end = TouchPoint {
+                state: TouchState::Stop,
+                abs: dvec2(100.0, 300.0),
+                time: 1.4,
+                uid: 1,
+                rotation_angle: 0.0,
+                force: 1.0,
+                radius: dvec2(1.0, 1.0),
+                handled: Default::default(),
+                sweep_lock: Default::default(),
+            };
+            assert_eq!(gesture.update(&end, 1.4), None);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1816,6 +1899,8 @@ static READER_BACKGROUND: LazyLock<RwLock<ReaderBackground>> =
     LazyLock::new(|| RwLock::new(ReaderBackground::Paper));
 static READER_COLUMNS: LazyLock<RwLock<ReaderColumns>> =
     LazyLock::new(|| RwLock::new(ReaderColumns::Auto));
+static READER_TURN_MODE: LazyLock<RwLock<ReaderTurnMode>> =
+    LazyLock::new(|| RwLock::new(ReaderTurnMode::Curl));
 static READER_CONTENT_VERSION: AtomicU64 = AtomicU64::new(0);
 
 /// 应用界面语言；正文内容与书籍元数据保持原文。
@@ -3391,6 +3476,7 @@ fn current_reader_settings() -> ReaderSettings {
         theme: *READER_THEME.read().unwrap(),
         background: *READER_BACKGROUND.read().unwrap(),
         columns: *READER_COLUMNS.read().unwrap(),
+        turn_mode: *READER_TURN_MODE.read().unwrap(),
         font: *READER_FONT.read().unwrap(),
         spacing: *READER_SPACING.read().unwrap(),
         font_size: *READER_FONT_SIZE.read().unwrap(),
@@ -5116,6 +5202,20 @@ script_mod! {
                                 reader_background_night := RadioButtonTabFlat{text: "夜间"}
                                 reader_background_theme := RadioButtonTabFlat{text: "跟随主题"}
                             }
+                            reader_turn_mode_row := View{
+                                width: Fill height: Fit
+                                flow: Flow.Right{wrap: true} spacing: 12
+                                align: Align{y: 0.5}
+                                reader_turn_mode_label := Label{text: "翻页方式"}
+                                reader_turn_curl := RadioButtonTabFlat{text: "仿真翻页"}
+                                reader_turn_slide := RadioButtonTabFlat{text: "左右滑动"}
+                                reader_turn_scroll := RadioButtonTabFlat{text: "上下滚动"}
+                            }
+                            reader_scroll_hint := Label{
+                                visible: false
+                                width: Fill height: Fit
+                                text: "上下滚动使用单列连续正文，不显示页码。"
+                            }
                             reader_columns_row := View{
                                 width: Fill height: Fit
                                 flow: Flow.Right{wrap: true} spacing: 12
@@ -5689,6 +5789,8 @@ struct ChapterList {
     text_maps: HashMap<usize, (u64, crate::reader_text::TextMap)>,
     #[rust]
     pager: ReaderPagedState,
+    #[rust]
+    turn_mode: ReaderTurnMode,
 }
 
 #[derive(Default)]
@@ -5950,6 +6052,137 @@ fn reader_markup_available_width(
 }
 
 impl ChapterList {
+    fn source_anchor(&self, block: usize, scroll: f64) -> Option<(usize, usize)> {
+        self.pager
+            .requested_source
+            .or(self.pager.pending_source)
+            .filter(|(id, _)| *id == block)
+            .or_else(|| {
+                (self.pager.content_version == READER_CONTENT_VERSION.load(Ordering::Relaxed))
+                    .then(|| self.pager.metrics.get(block).and_then(Option::as_ref))
+                    .flatten()
+                    .filter(|metric| scroll >= -0.5 || !metric.boundaries.is_empty())
+                    .map(|metric| (block, metric.source_at((-scroll).max(0.0))))
+            })
+    }
+
+    fn draw_scrolling(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        walk: Walk,
+        viewport: Rect,
+    ) -> DrawStep {
+        self.page_turn.cancel();
+        let list_ref = self.view.portal_list(cx, ids!(list));
+        let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
+        let signature = reader_source_hash(&format!(
+            "scroll:{content_version}:{}:{}:{:?}:{:?}:{:?}:{}:{}",
+            viewport.size.x,
+            self.compact_layout,
+            *READER_FONT.read().unwrap(),
+            *READER_FONT_SIZE.read().unwrap(),
+            *READER_SPACING.read().unwrap(),
+            *crate::ruby_word::GLOSS_FONT_SIZE.read().unwrap(),
+            *GLOSS_ENABLED.read().unwrap()
+        ));
+        let paragraphs = PARAGRAPHS.read().unwrap();
+        let code_blocks = CODE_BLOCKS.read().unwrap();
+        if self.pager.signature != signature || self.pager.metrics.len() != paragraphs.len() {
+            // Retain the source character at the top, not an old pixel offset
+            // measured at the previous column width/font size.
+            self.pager.pending_source =
+                self.source_anchor(list_ref.first_id(), list_ref.scroll_position());
+            self.pager.metrics = vec![None; paragraphs.len()];
+            self.pager.signature = signature;
+            self.pager.content_version = content_version;
+            self.range_geometry_cache.clear();
+            self.item_layout_widths.clear();
+            self.hit_runs.clear();
+            self.text_maps.clear();
+        }
+        if let Some(source) = self.pager.requested_source.take() {
+            self.pager.pending_source = Some(source);
+        }
+        self.pager.pending_source = self
+            .pager
+            .pending_source
+            .filter(|(block, _)| *block < paragraphs.len());
+        self.pager.active = false;
+        self.pager.drawn.clear();
+        self.pager.pages.clear();
+        self.pager.complete = false;
+        self.pager.measure_frame = NextFrame::default();
+        self.view.view(cx, ids!(list_host)).set_visible(cx, true);
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                self.hit_runs.clear();
+                let mut drawn_blocks = HashSet::new();
+                list.set_item_range(cx, 0, paragraphs.len());
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    if let Some(para) = paragraphs.get(item_id) {
+                        drawn_blocks.insert(item_id);
+                        let code = code_blocks.get(item_id).and_then(Option::as_deref);
+                        let metrics = self.draw_reader_paragraph(
+                            cx, &mut list, item_id, item_id, para, code, false,
+                        );
+                        self.pager.metrics[item_id] = Some(metrics);
+                    }
+                }
+                self.text_maps.retain(|id, _| drawn_blocks.contains(id));
+            }
+        }
+        // Measure only the top/resume block, at its actual rendered width.
+        // A separate clipped slot can probe the whole paragraph without
+        // replacing the visible selection/highlight probe or its widget.
+        let block = self
+            .pager
+            .pending_source
+            .map_or(list_ref.first_id(), |(block, _)| block);
+        if self.pager.metrics.get(block).is_some_and(Option::is_none) {
+            let width = list_ref
+                .get_item(list_ref.first_id())
+                .map(|(_, item)| item.area().rect(cx).size.x)
+                .unwrap_or(0.0);
+            if width > 0.0 {
+                if let Some(mut pool) = list_ref.borrow_mut() {
+                    cx.begin_turtle(
+                        Walk {
+                            abs_pos: Some(viewport.pos),
+                            width: Size::Fixed(width),
+                            height: Size::Fixed(0.0),
+                            ..Walk::default()
+                        },
+                        Layout::flow_down(),
+                    );
+                    self.pager.metrics[block] = Some(self.draw_reader_paragraph(
+                        cx,
+                        &mut pool,
+                        block,
+                        usize::MAX / 2,
+                        &paragraphs[block],
+                        code_blocks.get(block).and_then(Option::as_deref),
+                        true,
+                    ));
+                    cx.end_turtle();
+                }
+            }
+        }
+        if self.pager.requested_last_page {
+            self.pager.requested_last_page = false;
+            self.pager.pending_source = None;
+            list_ref.scroll_to_end(cx);
+            self.pager.measure_frame = cx.new_next_frame();
+        } else if let Some((block, source)) = self.pager.pending_source {
+            if let Some(metric) = self.pager.metrics.get(block).and_then(Option::as_ref) {
+                list_ref.set_first_id_and_scroll(block, -metric.y_at(source));
+                self.pager.pending_source = None;
+                self.pager.measure_frame = cx.new_next_frame();
+            }
+        }
+        DrawStep::done()
+    }
+
     fn draw_pages(
         &mut self,
         cx: &mut Cx2d,
@@ -7087,9 +7320,12 @@ impl ChapterList {
         }
         crate::reader_hit::begin_capture();
         crate::reader_inline_code::begin_capture(native_probe);
-        crate::chapter_image::with_page_height(self.pager.layout.height, || {
-            item.draw_all_unscoped(cx)
-        });
+        let page_height = if self.pager.active {
+            self.pager.layout.height
+        } else {
+            0.0
+        };
+        crate::chapter_image::with_page_height(page_height, || item.draw_all_unscoped(cx));
         let item_rect = item.area().rect(cx);
         let item_margin = item.walk(cx).margin;
         let runs = crate::reader_hit::end_capture(cx, item_rect.pos);
@@ -7279,7 +7515,25 @@ impl ChapterList {
 impl Widget for ChapterList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let viewport = cx.peek_walk_turtle(walk);
+        let mode = *READER_TURN_MODE.read().unwrap();
+        if self.turn_mode != mode {
+            self.page_turn.cancel();
+            if self.turn_mode.is_paged() != mode.is_paged() {
+                let list = self.view.portal_list(cx, ids!(list));
+                self.pager.requested_source =
+                    self.source_anchor(list.first_id(), list.scroll_position());
+            }
+            self.turn_mode = mode;
+        }
+        if !mode.is_paged() {
+            return self.draw_scrolling(cx, scope, walk, viewport);
+        }
         if viewport.size.x > 0.0 && viewport.size.y > 0.0 && viewport.size.y.is_finite() {
+            self.draw_page_turn.slide = if mode == ReaderTurnMode::Slide {
+                1.0
+            } else {
+                0.0
+            };
             let paper = current_reader_image_palette().0;
             let appearance = reader_source_hash(&format!(
                 "{viewport:?}:{}:{paper:?}:{:?}:{:?}:{:?}:{:?}:{}:{}",
@@ -7312,25 +7566,8 @@ impl Widget for ChapterList {
             return result;
         }
         self.page_turn.cancel();
-        let paragraphs = PARAGRAPHS.read().unwrap();
-        let code_blocks = CODE_BLOCKS.read().unwrap();
-        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                self.hit_runs.clear();
-                let mut drawn_blocks = HashSet::new();
-                list.set_item_range(cx, 0, paragraphs.len());
-                while let Some(item_id) = list.next_visible_item(cx) {
-                    if let Some(para) = paragraphs.get(item_id) {
-                        drawn_blocks.insert(item_id);
-                        let code = code_blocks.get(item_id).and_then(Option::as_deref);
-                        self.draw_reader_paragraph(
-                            cx, &mut list, item_id, item_id, para, code, false,
-                        );
-                    }
-                }
-                self.text_maps.retain(|id, _| drawn_blocks.contains(id));
-            }
-        }
+        // Hidden/zero-size reader surfaces must not change the active layout
+        // or overwrite its reading anchor with a fallback rendering pass.
         DrawStep::done()
     }
 
@@ -7368,6 +7605,29 @@ impl Widget for ChapterList {
             )
         {
             return;
+        }
+        if !self.pager.active && !self.selecting {
+            if let Event::Scroll(e) = event {
+                if self.reader_rect(cx).contains(e.abs)
+                    && e.scroll.y.abs() > e.scroll.x.abs()
+                    && !e.handled_y.get()
+                {
+                    let list = self.view.portal_list(cx, ids!(list));
+                    let down = e.scroll.y > 0.0;
+                    let boundary = if down {
+                        list.is_at_end()
+                    } else {
+                        list.first_id() == 0 && list.scroll_position() >= -0.5
+                    };
+                    let new_gesture = e.time - self.pager.last_wheel > 0.2;
+                    self.pager.last_wheel = e.time;
+                    if boundary && new_gesture && e.scroll.y.abs() >= 1.0 {
+                        e.handled_y.set(true);
+                        Cx::post_action(ReaderPageTurn(down));
+                        return;
+                    }
+                }
+            }
         }
         if self.pager.active {
             if let Event::Scroll(e) = event {
@@ -8719,6 +8979,24 @@ impl App {
         }
     }
 
+    fn sync_reader_turn_controls(&self, cx: &mut Cx, mode: ReaderTurnMode) {
+        for (id, option) in [
+            (id!(reader_turn_curl), ReaderTurnMode::Curl),
+            (id!(reader_turn_slide), ReaderTurnMode::Slide),
+            (id!(reader_turn_scroll), ReaderTurnMode::Scroll),
+        ] {
+            self.ui
+                .radio_button(cx, &[id])
+                .set_active(cx, mode == option, Animate::No);
+        }
+        self.ui
+            .view(cx, ids!(reader_columns_row))
+            .set_visible(cx, mode.is_paged());
+        self.ui
+            .widget(cx, ids!(reader_scroll_hint))
+            .set_visible(cx, !mode.is_paged());
+    }
+
     fn sync_reader_background_controls(&self, cx: &mut Cx, background: ReaderBackground) {
         for (id, option) in [
             (id!(reader_background_paper), ReaderBackground::Paper),
@@ -8830,6 +9108,9 @@ impl App {
             id!(reader_columns_one),
             id!(reader_columns_two),
             id!(reader_columns_auto),
+            id!(reader_turn_curl),
+            id!(reader_turn_slide),
+            id!(reader_turn_scroll),
             id!(reader_background_theme),
             id!(reader_font_standard),
             id!(reader_font_monospace),
@@ -8958,6 +9239,7 @@ impl App {
             id!(card_word),
             id!(image_viewer_info),
             id!(library_rename_title),
+            id!(reader_turn_mode_label),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
@@ -8971,6 +9253,7 @@ impl App {
             id!(sel_hint),
             id!(card_hint),
             id!(library_rename_status),
+            id!(reader_scroll_hint),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
         }
@@ -9260,6 +9543,23 @@ impl App {
             self.ui.widget(cx, &[id]).set_text(cx, localized(zh, en));
         }
         set_text!(font_family_label, "body_font");
+        self.ui
+            .label(cx, ids!(reader_turn_mode_label))
+            .set_text(cx, localized("翻页方式", "Page turns"));
+        self.ui.label(cx, ids!(reader_scroll_hint)).set_text(
+            cx,
+            localized(
+                "上下滚动使用单列连续正文，不显示页码。",
+                "Vertical scrolling uses one continuous column without page numbers.",
+            ),
+        );
+        for (id, zh, en) in [
+            (id!(reader_turn_curl), "仿真翻页", "Page curl"),
+            (id!(reader_turn_slide), "左右滑动", "Horizontal slide"),
+            (id!(reader_turn_scroll), "上下滚动", "Vertical scroll"),
+        ] {
+            self.ui.widget(cx, &[id]).set_text(cx, localized(zh, en));
+        }
         set_text!(reader_font_standard, "standard");
         set_text!(reader_font_monospace, "monospace");
         set_text!(line_spacing_label, "line_spacing");
@@ -9458,6 +9758,7 @@ impl App {
     }
 
     fn track_reader_swipe(&mut self, cx: &mut Cx, event: &Event) -> Option<ReaderSwipeDirection> {
+        let paged = READER_TURN_MODE.read().unwrap().is_paged();
         match event {
             Event::LongPress(_) | Event::SelectionHandleDrag(_) => {
                 self.reader_swipe.cancel();
@@ -9475,10 +9776,8 @@ impl App {
                         .widget(cx, ids!(chapter_list))
                         .area()
                         .clipped_rect(cx);
-                    let can_begin = self.compact_layout
-                        && !self.virtual_keyboard_open
+                    let can_begin = !self.virtual_keyboard_open
                         && self.on_reader_page
-                        && CURRENT_BOOK.read().unwrap().is_some()
                         && !self.toc_open
                         && !self.note_open
                         && !self.reader_ai_open
@@ -9487,6 +9786,19 @@ impl App {
                         && chapter_rect.contains(touch.abs);
                     if can_begin {
                         self.reader_swipe.begin(touch.uid, touch.abs, event.time);
+                        if !paged {
+                            // Only a new swipe that STARTS at a chapter edge
+                            // crosses it. Native drag/inertia within the chapter
+                            // must not skip its final or first screen.
+                            let list = self
+                                .ui
+                                .widget(cx, ids!(chapter_list))
+                                .portal_list(cx, ids!(list));
+                            self.reader_swipe.vertical = true;
+                            self.reader_swipe.allow_next = list.is_at_end();
+                            self.reader_swipe.allow_previous =
+                                list.first_id() == 0 && list.scroll_position() >= -0.5;
+                        }
                     } else {
                         self.reader_swipe.cancel();
                     }
@@ -10676,20 +10988,8 @@ impl App {
             .borrow::<ChapterList>()
             .and_then(|reader| {
                 reader
-                    .pager
-                    .requested_source
-                    .or(reader.pager.pending_source)
-                    .filter(|(id, _)| *id == block)
+                    .source_anchor(block, scroll)
                     .map(|(_, source)| source)
-                    .or_else(|| {
-                        reader
-                            .pager
-                            .metrics
-                            .get(block)
-                            .and_then(Option::as_ref)
-                            .filter(|metric| scroll >= -0.5 || !metric.boundaries.is_empty())
-                            .map(|metric| metric.source_at(-scroll))
-                    })
             });
         CURRENT_READER_BLOCK.store(block, Ordering::Relaxed);
         CURRENT_READER_SCROLL_BITS.store(scroll.to_bits(), Ordering::Relaxed);
@@ -10838,6 +11138,13 @@ impl App {
         self.update_progress_label(cx);
     }
     fn update_reader_page_footer(&mut self, cx: &mut Cx) {
+        let paged_mode = READER_TURN_MODE.read().unwrap().is_paged();
+        self.ui
+            .view(cx, ids!(reader_footer))
+            .set_visible(cx, paged_mode);
+        if !paged_mode {
+            return;
+        }
         let widget = self.ui.widget(cx, ids!(chapter_list));
         let (columns, paged) = widget
             .borrow::<ChapterList>()
@@ -11044,36 +11351,28 @@ impl App {
             self.debounce_reader_progress_save(cx);
             return;
         }
-        if CURRENT_BOOK.read().unwrap().is_none() {
-            return;
-        }
         let list = self
             .ui
             .widget(cx, ids!(chapter_list))
             .portal_list(cx, ids!(list));
-        let total = PARAGRAPHS.read().unwrap().len();
         let first = list.first_id();
-        let vis = list.visible_items().max(1);
-        let step = if self.reader_page_span > 0 {
-            self.reader_page_span
-        } else {
-            vis.saturating_sub(1).max(1)
-        };
+        let scroll = list.scroll_position();
+        let distance = (list.area().rect(cx).size.y * 0.85).max(1.0);
         if down {
-            if first + vis >= total {
+            if list.is_at_end() {
                 let idx = self.chapter_idx + 1;
                 self.set_chapter(cx, idx);
             } else {
-                list.set_first_id_and_scroll((first + step).min(total - 1), 0.0);
+                list.set_first_id_and_scroll(first, scroll - distance);
                 self.ui.redraw(cx);
             }
-        } else if first == 0 {
+        } else if first == 0 && scroll >= -0.5 {
             if self.chapter_idx > 0 {
                 let idx = self.chapter_idx - 1;
                 self.set_chapter_at(cx, idx, usize::MAX, 0.0, true);
             }
         } else {
-            list.set_first_id_and_scroll(first.saturating_sub(step), 0.0);
+            list.set_first_id_and_scroll(first, scroll + distance);
             self.ui.redraw(cx);
         }
         self.update_progress_label(cx);
@@ -11238,6 +11537,7 @@ impl App {
         *READER_THEME.write().unwrap() = settings.theme;
         *READER_BACKGROUND.write().unwrap() = settings.background;
         *READER_COLUMNS.write().unwrap() = settings.columns;
+        *READER_TURN_MODE.write().unwrap() = settings.turn_mode;
         *READER_FONT.write().unwrap() = settings.font;
         *READER_SPACING.write().unwrap() = settings.spacing;
         *READER_FONT_SIZE.write().unwrap() = settings.font_size;
@@ -11269,6 +11569,7 @@ impl App {
         self.sync_library_view_controls(cx, settings.library_view_mode);
         self.sync_reader_background_controls(cx, settings.background);
         self.sync_reader_columns_controls(cx, settings.columns);
+        self.sync_reader_turn_controls(cx, settings.turn_mode);
         self.apply_reader_background(cx, settings.background);
         self.sync_app_language_controls(cx, settings.language);
         self.apply_ui_language(cx, settings.language);
@@ -13405,6 +13706,28 @@ impl MatchEvent for App {
         }
         if let Some(index) = self
             .ui
+            .radio_button_set(
+                cx,
+                ids_array!(reader_turn_curl, reader_turn_slide, reader_turn_scroll),
+            )
+            .selected(cx, actions)
+        {
+            let mode = match index {
+                1 => ReaderTurnMode::Slide,
+                2 => ReaderTurnMode::Scroll,
+                _ => ReaderTurnMode::Curl,
+            };
+            *READER_TURN_MODE.write().unwrap() = mode;
+            self.reader_swipe.cancel();
+            self.clear_reader_selection(cx);
+            self.close_word_card(cx);
+            self.sync_reader_turn_controls(cx, mode);
+            self.update_reader_page_footer(cx);
+            self.invalidate_reader_pagination_layout(cx);
+            self.persist_reader_settings(cx);
+        }
+        if let Some(index) = self
+            .ui
             .radio_button_set(cx, ids_array!(reader_font_standard, reader_font_monospace))
             .selected(cx, actions)
         {
@@ -14268,8 +14591,7 @@ impl AppMain for App {
         if let Some(direction) = reader_swipe {
             let selection_is_clear =
                 SEL_RANGE.read().unwrap().is_none() && SELECTED_TEXT.read().unwrap().is_empty();
-            if self.compact_layout
-                && !self.virtual_keyboard_open
+            if !self.virtual_keyboard_open
                 && self.on_reader_page
                 && !self.toc_open
                 && !self.note_open

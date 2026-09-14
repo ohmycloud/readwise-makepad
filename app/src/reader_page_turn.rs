@@ -25,6 +25,18 @@ script_mod! {
             if self.progress >= 1.0 { return next }
             if self.progress <= 0.0 { return old }
 
+            if self.slide > 0.5 {
+                // Adjacent sheets translate together, with no scaling or
+                // mirroring. UV correction also handles GL render targets.
+                let direction = mix(1.0, -1.0, self.backward)
+                let old_x = self.pos.x + direction * self.progress
+                if old_x >= 0.0 && old_x <= 1.0 {
+                    return self.outgoing.sample(self.texture_uv(vec2(old_x, self.pos.y)))
+                }
+                let next_x = self.pos.x - direction * (1.0 - self.progress)
+                return self.incoming.sample(self.texture_uv(vec2(next_x, self.pos.y)))
+            }
+
             // Backward turns run the incoming sheet's curl in reverse. Text
             // itself is never mirrored on the front of either page.
             let phase = mix(self.progress, 1.0 - self.progress, self.backward)
@@ -71,6 +83,8 @@ pub struct DrawReaderPageTurn {
     paper: Vec4f,
     #[live]
     flip_y: f32,
+    #[live]
+    pub slide: f32,
 }
 
 const TURN_SECONDS: f64 = 0.32;
