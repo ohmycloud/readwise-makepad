@@ -1,4 +1,5 @@
 use crate::chapter_image::ChapterImageAction;
+use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
 use makepad_ai::{
@@ -4129,6 +4130,7 @@ script_mod! {
         font_monospace: theme.font_code{}
         html_default_inset: theme.space_1
         draw_reader_selection.color: #0000
+        draw_page_turn: mod.draw.DrawReaderPageTurn{}
         list_host := View{
         width: Fill height: Fill
         list := PortalList{
@@ -5655,6 +5657,10 @@ struct ChapterList {
     html_default_inset: f64,
     #[live]
     draw_reader_selection: DrawColor,
+    #[live]
+    draw_page_turn: DrawReaderPageTurn,
+    #[rust]
+    page_turn: PageTurn,
     /// 选区自跟踪（PortalList 未暴露区间 API，用公开的命中接口镜像）。
     /// 普通文字与原生选区同步；注音词/链接等交互内联文字由镜像投影绘制。
     #[rust]
@@ -6253,6 +6259,9 @@ impl ChapterList {
     /// keep the current page in place until the next draw completes them.
     fn turn_page(&mut self, cx: &mut Cx, forward: bool) -> bool {
         use crate::reader_columns::PageAnchor;
+        if self.page_turn.busy() {
+            return true;
+        }
         if !self.pager.spread_ready {
             self.pager.measure_frame = cx.new_next_frame();
             return true;
@@ -6285,6 +6294,9 @@ impl ChapterList {
             .set_first_id_and_scroll(target.block, -target.y);
         self.pager.anchor = target;
         self.pager.extend_selection_after_draw = self.selecting;
+        if !self.selecting {
+            self.page_turn.request(cx, forward);
+        }
         self.view.redraw(cx);
         true
     }
@@ -7268,8 +7280,38 @@ impl Widget for ChapterList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let viewport = cx.peek_walk_turtle(walk);
         if viewport.size.x > 0.0 && viewport.size.y > 0.0 && viewport.size.y.is_finite() {
-            return self.draw_pages(cx, scope, walk, viewport);
+            let paper = current_reader_image_palette().0;
+            let appearance = reader_source_hash(&format!(
+                "{viewport:?}:{}:{paper:?}:{:?}:{:?}:{:?}:{:?}:{}:{}",
+                cx.current_dpi_factor(),
+                *READER_COLUMNS.read().unwrap(),
+                *READER_FONT.read().unwrap(),
+                *READER_FONT_SIZE.read().unwrap(),
+                *READER_SPACING.read().unwrap(),
+                *crate::ruby_word::GLOSS_FONT_SIZE.read().unwrap(),
+                *GLOSS_ENABLED.read().unwrap()
+            ));
+            if self.page_turn.can_draw_cached(appearance) {
+                // Native paragraph areas stay valid in their retained pass.
+                // Only the empty host and the snapshot quad need drawing.
+                let _ = self.view.draw_walk(cx, scope, walk);
+                self.page_turn
+                    .draw_cached(cx, &mut self.draw_page_turn, viewport, paper, true);
+                return DrawStep::done();
+            }
+            let snapshot = self.page_turn.begin(cx, viewport, appearance, paper);
+            let result = self.draw_pages(cx, scope, walk, viewport);
+            if snapshot {
+                let ready = self.pager.spread_ready
+                    && !self.pager.requested_last_page
+                    && !self.pager.needs_page_alignment
+                    && self.pager.pending_source.is_none();
+                self.page_turn
+                    .end(cx, &mut self.draw_page_turn, viewport, paper, ready);
+            }
+            return result;
         }
+        self.page_turn.cancel();
         let paragraphs = PARAGRAPHS.read().unwrap();
         let code_blocks = CODE_BLOCKS.read().unwrap();
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
@@ -7293,8 +7335,27 @@ impl Widget for ChapterList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.page_turn.handle_event(cx, event, self.view.area());
+        if matches!(event, Event::WindowGeomChange(_)) {
+            self.page_turn.cancel();
+        }
         if self.pager.measure_frame.is_event(event).is_some() {
             self.view.redraw(cx);
+        }
+        // While pixels are curled they no longer coincide with text hit areas.
+        // A completed turn restores the unmodified native selection path.
+        if self.page_turn.busy()
+            && matches!(
+                event,
+                Event::MouseDown(_)
+                    | Event::MouseMove(_)
+                    | Event::MouseUp(_)
+                    | Event::TouchUpdate(_)
+                    | Event::LongPress(_)
+                    | Event::Scroll(_)
+            )
+        {
+            return;
         }
         if SELECTION_POPUP_POINTER.load(Ordering::Relaxed)
             && matches!(
@@ -8162,6 +8223,13 @@ impl App {
             // pointer events so no stale Area from the old draw list survives.
             self.clear_reader_selection(cx);
             self.close_word_card(cx);
+            if let Some(mut reader) = self
+                .ui
+                .widget(cx, ids!(chapter_list))
+                .borrow_mut::<ChapterList>()
+            {
+                reader.page_turn.cancel();
+            }
         }
         if page != AppPage::Library && self.library_action_book_id.is_some() {
             self.close_library_action_menu(cx);
@@ -10704,6 +10772,7 @@ impl App {
             .borrow_mut::<ChapterList>()
         {
             reader.pager.requested_last_page = block == usize::MAX;
+            reader.page_turn.finish();
             reader.pager.spread_ready = false;
             reader.pager.pending_source = None;
             reader.pager.requested_source = None;
@@ -10959,10 +11028,16 @@ impl App {
             .and_then(|mut reader| reader.pager.active.then(|| reader.turn_page(cx, down)));
         if let Some(turned) = paged {
             if !turned && CURRENT_BOOK.read().unwrap().is_some() {
+                let previous_chapter = self.chapter_idx;
                 if down {
                     self.set_chapter(cx, self.chapter_idx + 1);
                 } else if self.chapter_idx > 0 {
                     self.set_chapter_at(cx, self.chapter_idx - 1, usize::MAX, 0.0, true);
+                }
+                if self.chapter_idx != previous_chapter && !selecting {
+                    if let Some(mut reader) = chapter_widget.borrow_mut::<ChapterList>() {
+                        reader.page_turn.request(cx, down);
+                    }
                 }
             }
             self.update_progress_label(cx);
@@ -11027,6 +11102,13 @@ impl App {
             KeyCode::ArrowRight => self.page_scroll(cx, true),
             KeyCode::ArrowLeft => self.page_scroll(cx, false),
             KeyCode::Home => {
+                if let Some(mut reader) = self
+                    .ui
+                    .widget(cx, ids!(chapter_list))
+                    .borrow_mut::<ChapterList>()
+                {
+                    reader.page_turn.cancel();
+                }
                 self.ui
                     .widget(cx, ids!(chapter_list))
                     .portal_list(cx, ids!(list))
@@ -13896,6 +13978,7 @@ impl AppMain for App {
         crate::reader_hit::script_mod(vm);
         crate::reader_inline_code::script_mod(vm);
         crate::chapter_image::script_mod(vm);
+        crate::reader_page_turn::script_mod(vm);
         crate::mark_span::script_mod(vm);
         self::script_mod(vm)
     }
