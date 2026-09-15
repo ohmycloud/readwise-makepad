@@ -16,6 +16,7 @@ mod reader_image;
 mod reader_inline_code;
 mod reader_lists;
 mod reader_page_turn;
+mod reader_scroll;
 mod reader_text;
 mod reader_touch;
 mod ruby_word;

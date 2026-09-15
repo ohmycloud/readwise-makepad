@@ -1785,6 +1785,55 @@ mod reader_pagination_tests {
     use super::*;
 
     #[test]
+    fn chapter_page_count_is_not_a_page_turn_readiness_gate() {
+        let mut pager = ReaderPagedState {
+            spread_ready: true,
+            needs_page_alignment: true,
+            ..Default::default()
+        };
+        assert!(!pager.page_index.complete);
+        assert!(pager.page_ready());
+        pager.pending_source = Some((5, 20));
+        assert!(!pager.page_ready());
+        pager.pending_source = None;
+        pager.requested_last_page = true;
+        assert!(!pager.page_ready());
+        pager.requested_last_page = false;
+        pager.spread_ready = false;
+        assert!(!pager.page_ready());
+    }
+
+    #[test]
+    fn rapid_turns_coalesce_and_resume_once_the_page_and_animation_are_ready() {
+        let mut pager = ReaderPagedState::default();
+        for _ in 0..100 {
+            pager.pending_turn = Some(true);
+        }
+        assert_eq!(pager.take_pending_turn(false), None);
+        assert_eq!(pager.pending_turn, Some(true));
+        pager.spread_ready = true;
+        assert_eq!(pager.take_pending_turn(true), None);
+        assert_eq!(pager.take_pending_turn(false), Some(true));
+        assert_eq!(pager.take_pending_turn(false), None);
+        assert!(!pager.page_index.complete);
+    }
+
+    #[test]
+    fn reverse_a_quick_turn_before_the_chapter_index_is_ready() {
+        use crate::reader_columns::PageAnchor;
+        let mut pager = ReaderPagedState {
+            spread_ready: true,
+            anchor: PageAnchor { block: 50, y: 40.0 },
+            pending_turn: Some(false),
+            ..Default::default()
+        };
+        // An unvisited previous page must wait for a known boundary.
+        assert_eq!(pager.take_pending_turn(false), None);
+        pager.turn_history.push(PageAnchor { block: 49, y: 10.0 });
+        assert_eq!(pager.take_pending_turn(false), Some(false));
+    }
+
+    #[test]
     fn pagination_maps_chapters_to_one_global_page_sequence() {
         let counts = [10, 5, 13];
         assert_eq!(
@@ -5803,16 +5852,38 @@ struct ReaderPagedState {
     anchor: crate::reader_columns::PageAnchor,
     next: crate::reader_columns::PageAnchor,
     drawn: Vec<(usize, WidgetRef, Rect)>,
-    pages: Vec<crate::reader_columns::PageAnchor>,
-    complete: bool,
+    page_index: crate::reader_columns::PageIndex,
     pending_source: Option<(usize, usize)>,
     requested_source: Option<(usize, usize)>,
-    last_wheel: f64,
+    scroll_gesture: crate::reader_scroll::ScrollGesture,
     measure_frame: NextFrame,
     requested_last_page: bool,
     extend_selection_after_draw: bool,
     spread_ready: bool,
     needs_page_alignment: bool,
+    // Coalesce a burst into one further turn, rather than dropping the input
+    // or replaying a long wheel-event backlog after the reader stops scrolling.
+    pending_turn: Option<bool>,
+    turn_history: Vec<crate::reader_columns::PageAnchor>,
+}
+
+impl ReaderPagedState {
+    fn page_ready(&self) -> bool {
+        self.spread_ready && !self.requested_last_page && self.pending_source.is_none()
+    }
+
+    fn take_pending_turn(&mut self, animating: bool) -> Option<bool> {
+        if animating || !self.page_ready() {
+            return None;
+        }
+        if self.pending_turn == Some(false)
+            && self.turn_history.is_empty()
+            && self.page_index.containing(self.anchor).is_none()
+        {
+            return None;
+        }
+        self.pending_turn.take()
+    }
 }
 
 #[derive(Debug)]
@@ -6110,8 +6181,9 @@ impl ChapterList {
             .filter(|(block, _)| *block < paragraphs.len());
         self.pager.active = false;
         self.pager.drawn.clear();
-        self.pager.pages.clear();
-        self.pager.complete = false;
+        self.pager.page_index = Default::default();
+        self.pager.pending_turn = None;
+        self.pager.turn_history.clear();
         self.pager.measure_frame = NextFrame::default();
         self.view.view(cx, ids!(list_host)).set_visible(cx, true);
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
@@ -6159,7 +6231,7 @@ impl ChapterList {
                         cx,
                         &mut pool,
                         block,
-                        usize::MAX / 2,
+                        paragraphs.len(),
                         &paragraphs[block],
                         code_blocks.get(block).and_then(Option::as_deref),
                         true,
@@ -6190,7 +6262,7 @@ impl ChapterList {
         walk: Walk,
         viewport: Rect,
     ) -> DrawStep {
-        use crate::reader_columns::{compose_page, page_starts, ColumnLayout, PageAnchor};
+        use crate::reader_columns::{compose_page, ColumnLayout, PageAnchor};
         let font = READER_FONT_SIZE
             .read()
             .unwrap()
@@ -6234,8 +6306,8 @@ impl ChapterList {
                 self.pager.pending_source = None;
             }
             self.pager.metrics = vec![None; paragraphs.len()];
-            self.pager.pages.clear();
-            self.pager.complete = false;
+            self.pager.page_index = Default::default();
+            self.pager.turn_history.clear();
             self.pager.signature = signature;
             self.pager.content_version = content_version;
             if let Some(requested) = self.pager.requested_source.take() {
@@ -6250,6 +6322,7 @@ impl ChapterList {
         if let Some(requested) = self.pager.requested_source.take() {
             self.pager.pending_source = Some(requested);
             self.pager.needs_page_alignment = true;
+            self.pager.turn_history.clear();
         }
         self.pager.pending_source = self
             .pager
@@ -6323,7 +6396,7 @@ impl ChapterList {
                 cx,
                 &mut pool,
                 block,
-                usize::MAX / 2 + measured,
+                measured,
                 para,
                 codes.get(block).and_then(Option::as_deref),
                 true,
@@ -6335,8 +6408,23 @@ impl ChapterList {
         // Fill in the chapter index progressively. UI text layout stays on the
         // rendering thread, with bounded work per frame instead of blocking an
         // entire chapter before showing its first page.
-        if measured < 8 && started.elapsed().as_millis() < 10 {
-            if let Some(block) = self.pager.metrics.iter().position(Option::is_none) {
+        while measured < 8 && started.elapsed().as_millis() < 10 {
+            // Warm the next spread first so a quick next turn does not wait
+            // behind measurement of unrelated blocks elsewhere in the chapter.
+            let mut cursor = self.pager.next;
+            let mut upcoming = None;
+            for _ in 0..layout.count {
+                match compose_page(&self.pager.metrics, cursor, layout.height) {
+                    Ok(page) => cursor = page.next,
+                    Err(block) => {
+                        upcoming = Some(block);
+                        break;
+                    }
+                }
+            }
+            if let Some(block) =
+                upcoming.or_else(|| self.pager.metrics.iter().position(Option::is_none))
+            {
                 cx.begin_turtle(
                     Walk {
                         abs_pos: Some(viewport.pos),
@@ -6350,13 +6438,16 @@ impl ChapterList {
                     cx,
                     &mut pool,
                     block,
-                    usize::MAX / 2 + measured,
+                    measured,
                     &paragraphs[block],
                     codes.get(block).and_then(Option::as_deref),
                     true,
                 );
                 cx.end_turtle();
                 self.pager.metrics[block] = Some(metric);
+                measured += 1;
+            } else {
+                break;
             }
         }
         self.pager.anchor = anchor;
@@ -6393,7 +6484,10 @@ impl ChapterList {
                 );
                 // Reuse a bounded set of visible slots, not one retained widget
                 // for every paragraph ever visited in a long book.
-                let cache_id = column * 65_536 + slot;
+                // Keep IDs dense: native PortalList event dispatch visits
+                // min_id..=max_id when switching back to continuous scrolling.
+                // Slots 0..8 are reserved for offscreen measurement above.
+                let cache_id = 8 + slot * 2 + column;
                 self.draw_reader_paragraph(
                     cx,
                     &mut pool,
@@ -6410,45 +6504,36 @@ impl ChapterList {
                 cx.end_turtle();
             }
         }
-        let (starts, complete) = page_starts(&self.pager.metrics, layout.height);
-        self.pager.pages = starts;
-        self.pager.complete = complete;
-        if complete && self.pager.requested_last_page {
-            let last = self.pager.pages.len().saturating_sub(1);
+        self.pager
+            .page_index
+            .advance(&self.pager.metrics, layout.height);
+        if self.pager.page_index.complete && self.pager.requested_last_page {
+            let last = self.pager.page_index.starts.len().saturating_sub(1);
             let target = self
                 .pager
-                .pages
+                .page_index
+                .starts
                 .get(last / layout.count * layout.count)
                 .copied()
                 .unwrap_or_default();
             pool.set_first_id_and_scroll(target.block, -target.y);
             self.pager.requested_last_page = false;
             self.pager.needs_page_alignment = false;
+            self.pager.spread_ready = false;
             self.pager.measure_frame = cx.new_next_frame();
-        } else if complete && self.pager.needs_page_alignment {
+        } else if self.pager.needs_page_alignment && self.pager.pending_source.is_none() {
             // A restored source offset must remain visible, but subsequent
             // turns must land on the same canonical page starts as the footer.
-            let index = self
-                .pager
-                .pages
-                .partition_point(|page| {
-                    page.block < anchor.block
-                        || (page.block == anchor.block && page.y <= anchor.y + 0.5)
-                })
-                .saturating_sub(1);
-            if let Some(target) = self
-                .pager
-                .pages
-                .get(index)
-                .copied()
-                .filter(|target| *target != anchor)
-            {
-                pool.set_first_id_and_scroll(target.block, -target.y);
-                self.pager.measure_frame = cx.new_next_frame();
+            if let Some(target) = self.pager.page_index.containing(anchor) {
+                if target != anchor {
+                    pool.set_first_id_and_scroll(target.block, -target.y);
+                    self.pager.spread_ready = false;
+                    self.pager.measure_frame = cx.new_next_frame();
+                }
+                self.pager.needs_page_alignment = false;
             }
-            self.pager.needs_page_alignment = false;
         }
-        if !complete {
+        if !self.pager.page_index.complete {
             self.pager.measure_frame = cx.new_next_frame();
         }
         self.text_maps
@@ -6492,32 +6577,41 @@ impl ChapterList {
     /// keep the current page in place until the next draw completes them.
     fn turn_page(&mut self, cx: &mut Cx, forward: bool) -> bool {
         use crate::reader_columns::PageAnchor;
-        if self.page_turn.busy() {
-            return true;
-        }
-        if !self.pager.spread_ready {
+        if self.page_turn.busy() || !self.pager.page_ready() {
+            self.pager.pending_turn = Some(forward);
             self.pager.measure_frame = cx.new_next_frame();
             return true;
         }
+        self.pager.pending_turn = None;
         let target = if forward {
             if self.pager.next.block >= self.pager.metrics.len() {
                 return false;
             }
+            self.pager.turn_history.push(self.pager.anchor);
             self.pager.next
+        } else if let Some(previous) = self.pager.turn_history.pop() {
+            previous
         } else {
             if self.pager.anchor == PageAnchor::default() {
                 return false;
             }
-            let current = self.pager.pages.partition_point(|a| {
+            if self
+                .pager
+                .page_index
+                .containing(self.pager.anchor)
+                .is_none()
+            {
+                self.pager.pending_turn = Some(false);
+                self.pager.measure_frame = cx.new_next_frame();
+                return true;
+            }
+            let current = self.pager.page_index.starts.partition_point(|a| {
                 a.block < self.pager.anchor.block
                     || (a.block == self.pager.anchor.block && a.y < self.pager.anchor.y - 0.5)
             });
-            if current == 0 && !self.pager.complete {
-                self.view.redraw(cx);
-                return true;
-            }
             self.pager
-                .pages
+                .page_index
+                .starts
                 .get(current.saturating_sub(self.pager.layout.count))
                 .copied()
                 .unwrap_or_default()
@@ -6526,6 +6620,10 @@ impl ChapterList {
             .portal_list(cx, ids!(list))
             .set_first_id_and_scroll(target.block, -target.y);
         self.pager.anchor = target;
+        // This is an intentional reading move, not a restored offset. Do not
+        // snap it backwards later when the rest of the index becomes available.
+        self.pager.needs_page_alignment = false;
+        self.pager.spread_ready = false;
         self.pager.extend_selection_after_draw = self.selecting;
         if !self.selecting {
             self.page_turn.request(cx, forward);
@@ -7518,6 +7616,7 @@ impl Widget for ChapterList {
         let mode = *READER_TURN_MODE.read().unwrap();
         if self.turn_mode != mode {
             self.page_turn.cancel();
+            self.pager.pending_turn = None;
             if self.turn_mode.is_paged() != mode.is_paged() {
                 let list = self.view.portal_list(cx, ids!(list));
                 self.pager.requested_source =
@@ -7551,17 +7650,20 @@ impl Widget for ChapterList {
                 let _ = self.view.draw_walk(cx, scope, walk);
                 self.page_turn
                     .draw_cached(cx, &mut self.draw_page_turn, viewport, paper, true);
+                if let Some(forward) = self.pager.take_pending_turn(self.page_turn.busy()) {
+                    Cx::post_action(ReaderPageTurn(forward));
+                }
                 return DrawStep::done();
             }
             let snapshot = self.page_turn.begin(cx, viewport, appearance, paper);
             let result = self.draw_pages(cx, scope, walk, viewport);
             if snapshot {
-                let ready = self.pager.spread_ready
-                    && !self.pager.requested_last_page
-                    && !self.pager.needs_page_alignment
-                    && self.pager.pending_source.is_none();
+                let ready = self.pager.page_ready();
                 self.page_turn
                     .end(cx, &mut self.draw_page_turn, viewport, paper, ready);
+            }
+            if let Some(forward) = self.pager.take_pending_turn(self.page_turn.busy()) {
+                Cx::post_action(ReaderPageTurn(forward));
             }
             return result;
         }
@@ -7575,6 +7677,7 @@ impl Widget for ChapterList {
         self.page_turn.handle_event(cx, event, self.view.area());
         if matches!(event, Event::WindowGeomChange(_)) {
             self.page_turn.cancel();
+            self.pager.pending_turn = None;
         }
         if self.pager.measure_frame.is_event(event).is_some() {
             self.view.redraw(cx);
@@ -7589,7 +7692,6 @@ impl Widget for ChapterList {
                     | Event::MouseUp(_)
                     | Event::TouchUpdate(_)
                     | Event::LongPress(_)
-                    | Event::Scroll(_)
             )
         {
             return;
@@ -7608,6 +7710,7 @@ impl Widget for ChapterList {
         }
         if !self.pager.active && !self.selecting {
             if let Event::Scroll(e) = event {
+                let turn = self.pager.scroll_gesture.on_scroll(e);
                 if self.reader_rect(cx).contains(e.abs)
                     && e.scroll.y.abs() > e.scroll.x.abs()
                     && !e.handled_y.get()
@@ -7619,9 +7722,7 @@ impl Widget for ChapterList {
                     } else {
                         list.first_id() == 0 && list.scroll_position() >= -0.5
                     };
-                    let new_gesture = e.time - self.pager.last_wheel > 0.2;
-                    self.pager.last_wheel = e.time;
-                    if boundary && new_gesture && e.scroll.y.abs() >= 1.0 {
+                    if boundary && turn.is_some() {
                         e.handled_y.set(true);
                         Cx::post_action(ReaderPageTurn(down));
                         return;
@@ -7631,30 +7732,27 @@ impl Widget for ChapterList {
         }
         if self.pager.active {
             if let Event::Scroll(e) = event {
+                let turn = self.pager.scroll_gesture.on_scroll(e);
                 // Code and tables retain horizontal scrolling inside a page.
-                if e.scroll.x.abs() > e.scroll.y.abs() {
+                if !self.page_turn.busy() && e.scroll.x.abs() > e.scroll.y.abs() {
                     for (_, item, clip) in self.active_items(cx) {
                         if clip.contains(e.abs) {
                             item.handle_event(cx, event, scope);
                         }
                     }
                     if e.handled_x.get() {
+                        self.pager.scroll_gesture.consume();
                         return;
                     }
                 }
                 if self.reader_rect(cx).contains(e.abs) && !e.handled_y.get() {
                     e.handled_y.set(true);
-                    let delta = if e.scroll.y.abs() >= e.scroll.x.abs() {
-                        e.scroll.y
-                    } else {
-                        e.scroll.x
-                    };
-                    if delta.abs() >= 1.0 && e.time - self.pager.last_wheel >= 0.25 {
-                        self.pager.last_wheel = e.time;
-                        Cx::post_action(ReaderPageTurn(delta > 0.0));
+                    if let Some(forward) = turn {
+                        Cx::post_action(ReaderPageTurn(forward));
                     }
                     return;
                 }
+                self.pager.scroll_gesture.consume();
             }
         }
         if matches!(event, Event::LongPress(_)) {
@@ -11076,6 +11174,8 @@ impl App {
             reader.pager.spread_ready = false;
             reader.pager.pending_source = None;
             reader.pager.requested_source = None;
+            reader.pager.pending_turn = None;
+            reader.pager.turn_history.clear();
         }
         replace_paragraphs(chunks);
         if self.reader_chapter_block_counts.len() != total {
@@ -11151,7 +11251,8 @@ impl App {
             .map(|reader| {
                 let pager = &reader.pager;
                 let page = pager
-                    .pages
+                    .page_index
+                    .starts
                     .partition_point(|a| {
                         a.block < pager.anchor.block
                             || (a.block == pager.anchor.block && a.y <= pager.anchor.y + 0.5)
@@ -11159,9 +11260,9 @@ impl App {
                     .saturating_sub(1);
                 (
                     pager.layout.count.max(1),
-                    (pager.active && pager.complete).then_some((
+                    (pager.active && pager.page_index.complete).then_some((
                         page,
-                        pager.pages.len().max(1),
+                        pager.page_index.starts.len().max(1),
                         pager.metrics.len().max(1),
                     )),
                 )
@@ -11262,8 +11363,8 @@ impl App {
                     pager.signature,
                     pager.layout,
                     pager.anchor,
-                    pager.pages.len(),
-                    pager.complete,
+                    pager.page_index.starts.len(),
+                    pager.page_index.complete,
                     self.reader_chapter_block_counts
                 ))
             });
@@ -11407,6 +11508,8 @@ impl App {
                     .borrow_mut::<ChapterList>()
                 {
                     reader.page_turn.cancel();
+                    reader.pager.pending_turn = None;
+                    reader.pager.turn_history.clear();
                 }
                 self.ui
                     .widget(cx, ids!(chapter_list))

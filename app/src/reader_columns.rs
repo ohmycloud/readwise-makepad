@@ -196,26 +196,126 @@ pub fn compose_page(
     Ok(page)
 }
 
-/// Build only the measured prefix; never report an estimated final page count.
-pub fn page_starts(metrics: &[Option<BlockMetrics>], height: f64) -> (Vec<PageAnchor>, bool) {
-    let mut starts = Vec::new();
-    let mut anchor = PageAnchor::default();
-    while anchor.block < metrics.len() {
-        starts.push(anchor);
-        let Ok(page) = compose_page(metrics, anchor, height) else {
-            return (starts, false);
-        };
-        if page.next == anchor {
-            return (starts, false);
+/// A chapter index advances from its measured frontier. Unmeasured pages are
+/// never counted, and a redraw does not recompose all the preceding pages.
+#[derive(Default)]
+pub struct PageIndex {
+    pub starts: Vec<PageAnchor>,
+    pub complete: bool,
+    next: PageAnchor,
+}
+
+impl PageIndex {
+    pub fn advance(&mut self, metrics: &[Option<BlockMetrics>], height: f64) {
+        if self.complete {
+            return;
         }
-        anchor = page.next;
+        while self.next.block < metrics.len() {
+            let Ok(page) = compose_page(metrics, self.next, height) else {
+                return;
+            };
+            if page.next == self.next {
+                return;
+            }
+            self.starts.push(self.next);
+            self.next = page.next;
+        }
+        self.complete = true;
     }
-    (starts, true)
+
+    /// Restoring a location needs only the prefix up to that location, not the
+    /// entire chapter. The frontier itself is already a canonical page start.
+    pub fn containing(&self, anchor: PageAnchor) -> Option<PageAnchor> {
+        if anchor == self.next {
+            return Some(anchor);
+        }
+        if !self.complete
+            && (anchor.block > self.next.block
+                || (anchor.block == self.next.block && anchor.y > self.next.y))
+        {
+            return None;
+        }
+        self.starts
+            .iter()
+            .rev()
+            .find(|page| {
+                page.block < anchor.block
+                    || (page.block == anchor.block && page.y <= anchor.y + 0.5)
+            })
+            .copied()
+    }
+}
+
+#[cfg(test)]
+fn page_starts(metrics: &[Option<BlockMetrics>], height: f64) -> (Vec<PageAnchor>, bool) {
+    let mut index = PageIndex::default();
+    index.advance(metrics, height);
+    (index.starts, index.complete)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfinished_index_does_not_block_a_measured_spread() {
+        for columns in [1, 2] {
+            let mut metrics = vec![None; 1000];
+            metrics[0] = block(100);
+            let mut index = PageIndex::default();
+            index.advance(&metrics, 100.0);
+            assert!(!index.complete);
+            let mut anchor = PageAnchor::default();
+            for _ in 0..4 {
+                assert_eq!(index.containing(anchor), Some(anchor));
+                for _ in 0..columns {
+                    let page = compose_page(&metrics, anchor, 100.0).unwrap();
+                    assert_ne!(page.next, anchor);
+                    anchor = page.next;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_index_matches_full_layout_without_counting_incomplete_pages() {
+        let full = vec![block(8), block(1), block(14), block(3)];
+        for height in [50.0, 105.0, 230.0, 900.0] {
+            let mut metrics = vec![None; full.len()];
+            let mut index = PageIndex::default();
+            index.advance(&metrics, height);
+            assert!(index.starts.is_empty());
+            assert!(!index.complete);
+            for block in [2, 0, 3, 1] {
+                let prefix = index.starts.clone();
+                metrics[block] = full[block].clone();
+                index.advance(&metrics, height);
+                assert!(index.starts.starts_with(&prefix));
+                let starts = index.starts.clone();
+                index.advance(&metrics, height);
+                assert_eq!(index.starts, starts, "redraw must not duplicate pages");
+            }
+            assert!(index.complete);
+            assert_eq!(index.starts, page_starts(&full, height).0);
+        }
+    }
+
+    #[test]
+    fn restoring_an_anchor_requires_only_its_prefix() {
+        let metrics = [block(15), None, None];
+        let mut index = PageIndex::default();
+        index.advance(&metrics, 100.0);
+        assert!(!index.complete);
+        assert_eq!(
+            index.containing(PageAnchor::default()),
+            Some(PageAnchor::default())
+        );
+        assert_eq!(
+            index.containing(PageAnchor { block: 0, y: 142.0 }),
+            Some(PageAnchor { block: 0, y: 100.0 })
+        );
+        assert_eq!(index.containing(PageAnchor { block: 2, y: 0.0 }), None);
+    }
 
     #[test]
     fn short_code_moves_whole_but_long_code_breaks_only_at_line_boundaries() {
