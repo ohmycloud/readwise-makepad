@@ -196,7 +196,9 @@ pub fn hit_index(runs: &[HitRun], point: DVec2) -> Option<usize> {
 /// Intercept text whose runs we can record completely, including paragraphs
 /// preceded by a callout image. Images retain their own drawing/click handling;
 /// code must already use the adapter that records its actually painted rows.
-/// Structured tables, code blocks and links keep their native hit testing.
+/// Structured tables and code blocks keep their native hit testing. Link text
+/// stays inside HtmlLink so it remains clickable; surrounding prose can still
+/// use exact painted-run hit testing.
 pub fn tracked_html(source: &str) -> Option<String> {
     let mut result = String::with_capacity(source.len() * 2);
     let mut offset = 0;
@@ -241,11 +243,12 @@ pub fn tracked_html(source: &str) -> Option<String> {
                     | "ruby"
                     | "mark"
                     | "img"
+                    | "a"
                     | "reader_code"
             ) {
                 return None;
             }
-            if matches!(name.as_str(), "ruby" | "mark" | "reader_code") {
+            if matches!(name.as_str(), "ruby" | "mark" | "reader_code" | "a") {
                 if closing {
                     custom_depth = custom_depth.saturating_sub(1);
                 } else if !inside.ends_with('/') {
@@ -389,6 +392,19 @@ mod tests {
     }
 
     #[test]
+    fn wrapping_preserves_link_widget_and_tracks_surrounding_prose() {
+        let source = "<p>Before <a href='next.xhtml'>linked words</a> after the link.</p>";
+        let tracked = tracked_html(source).unwrap();
+        assert!(tracked.contains("<reader_run>Before </reader_run>"));
+        assert!(tracked.contains("<a href='next.xhtml'>linked words</a>"));
+        assert!(tracked.contains("<reader_run> after the link.</reader_run>"));
+        assert_eq!(
+            readwise_core::vocab::annotate::rendered_text(source),
+            readwise_core::vocab::annotate::rendered_text(&tracked),
+        );
+    }
+
+    #[test]
     fn callout_code_and_gloss_paragraph_captures_all_text_runs() {
         // Async Rust: the image and the paragraph are one stored block. The
         // old whitelist rejected it, leaving selection stuck before quickly.
@@ -475,7 +491,6 @@ mod tests {
         for source in [
             "<p>before <code class='custom'>value</code> after</p>",
             "<p>before <code><b>nested</b></code> after</p>",
-            "<img src='1.png'/><p><a href='chapter.html'>link</a></p>",
             "<reader_code>unfinished",
         ] {
             assert!(tracked_html(&crate::reader_inline_code::wrap_html(source)).is_none());
@@ -487,7 +502,6 @@ mod tests {
         for html in [
             "<table><tr><td>x</td></tr></table>",
             "<p><code>x</code></p>",
-            "<p><a href='x'>link</a></p>",
             "<ruby>x",
             "<p title='unfinished>",
         ] {

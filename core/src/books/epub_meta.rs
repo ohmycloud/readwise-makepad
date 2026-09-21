@@ -17,6 +17,8 @@ pub struct EpubMeta {
 pub struct ChapterInfo {
     pub title: String,
     pub html: String,
+    /// Path of this spine document inside the EPUB archive, for relative links.
+    pub source_path: String,
 }
 
 /// 加载全书章节（已消毒 + 提取标题 + 图片落盘并改写 src，阅读器可直接渲染）。
@@ -28,6 +30,10 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         doc.set_current_chapter(i);
+        let source_path = doc
+            .get_current_path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let html = doc
             .get_current_str()
             .map(|(s, _mime)| s)
@@ -38,7 +44,11 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
         }
         let body = rewrite_img_src(&body, &images);
         let title = first_heading_text(&body).unwrap_or_else(|| format!("第 {} 节", out.len() + 1));
-        out.push(ChapterInfo { title, html: body });
+        out.push(ChapterInfo {
+            title,
+            html: body,
+            source_path,
+        });
     }
     if out.is_empty() {
         return Err("未解析出任何章节".to_string());
@@ -313,6 +323,7 @@ const KEEP_TAGS: &[&str] = &[
     "br",
     "hr",
     "img",
+    "a",
 ];
 
 /// 这些标签连同内容一起丢（对阅读无意义或有害）。
@@ -396,7 +407,7 @@ fn hoist_table_captions(html: &str) -> String {
     out
 }
 
-/// 面向 Html widget 的消毒：白名单标签保留原样；未知标签（div/section/span/a/figure…）
+/// 面向 Html widget 的消毒：白名单标签保留原样；未知标签（div/section/span/figure…）
 /// 去掉标签本身、保留内部内容；DROP_TAGS 连内容删除；注释/声明剔除。
 pub fn sanitize_for_reader(html: &str) -> String {
     let html = hoist_table_captions(html);
@@ -462,6 +473,22 @@ pub fn sanitize_for_reader(html: &str) -> String {
             } else {
                 out.push_str("<p><em>");
             }
+        } else if name == "a" && !is_close {
+            let tag = &html[lt..=gt];
+            out.push_str("<a");
+            for attr in ["href", "id", "name"] {
+                if let Some((start, end)) = quoted_attr_range(tag, attr) {
+                    let value = &tag[start..end];
+                    if attr != "href" || safe_reader_href(value) {
+                        out.push(' ');
+                        out.push_str(attr);
+                        out.push_str("=\"");
+                        out.push_str(&value.replace('"', "&quot;"));
+                        out.push('"');
+                    }
+                }
+            }
+            out.push('>');
         } else if KEEP_TAGS.contains(&name.as_str()) {
             out.push_str(&html[lt..=gt]);
         }
@@ -469,6 +496,21 @@ pub fn sanitize_for_reader(html: &str) -> String {
         i = gt + 1;
     }
     out
+}
+
+fn safe_reader_href(href: &str) -> bool {
+    let href = href.trim();
+    if href.is_empty() || href.chars().any(char::is_control) {
+        return false;
+    }
+    let lower = href.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+    {
+        return true;
+    }
+    !href.starts_with('/')
+        && !href.starts_with('\\')
+        && !href.split('/').next().unwrap_or("").contains(':')
 }
 
 /// 按块级结构安全分块（PortalList 虚拟化用）：只在标签嵌套深度回到 0 时切，
@@ -653,7 +695,19 @@ mod tests {
     fn sanitize_unwraps_containers_keeps_content() {
         let src = r##"<section class="chapter"><div id="x"><h1>Title</h1><p>Hello <span class="k">world</span> <a href="#f1">link</a></p></div></section>"##;
         let out = sanitize_for_reader(src);
-        assert_eq!(out, "<h1>Title</h1><p>Hello world link</p>");
+        assert_eq!(
+            out,
+            "<h1>Title</h1><p>Hello world <a href=\"#f1\">link</a></p>"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_relative_links_and_named_anchors_but_not_active_attributes() {
+        let html = r##"<p><a id="part" name="old" onclick="evil()">Heading</a> <a href="../next.xhtml#part" onmouseover="evil()">Next</a> <a href="javascript:evil()">Unsafe</a></p>"##;
+        assert_eq!(
+            sanitize_for_reader(html),
+            "<p><a id=\"part\" name=\"old\">Heading</a> <a href=\"../next.xhtml#part\">Next</a> <a>Unsafe</a></p>"
+        );
     }
 
     #[test]

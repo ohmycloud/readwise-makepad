@@ -8,7 +8,7 @@ pub const RUBY_SEP: char = '\u{E000}';
 
 /// 给章节 HTML 注入生词注音：文本节点里的英文词，若其原形在释义表中
 /// 且不在已认识集合中，包成 <ruby>词⌷释义</ruby>（⌷ 为 RUBY_SEP 私有区分隔符）。
-/// 跳过标签内部、code/pre 内容、HTML 实体（老项目 GlossAnnotator 的字符串版）。
+/// 跳过标签内部、code/pre 和链接内容、HTML 实体（老项目 GlossAnnotator 的字符串版）。
 pub fn annotate_html(
     html: &str,
     glosses: &HashMap<String, String>,
@@ -36,8 +36,9 @@ pub fn annotate_html(
                 .take_while(|c| c.is_ascii_alphanumeric())
                 .collect::<String>()
                 .to_lowercase();
-            // code/pre：不注音；table：单元格行高不可控，注音会被裁，跳过
-            if name == "code" || name == "pre" || name == "table" {
+            // Code/table cannot host ruby; Makepad's HtmlLink also consumes its
+            // text as one widget and drops nested ruby plus following link text.
+            if matches!(name.as_str(), "code" | "pre" | "table" | "a") {
                 code_depth += if is_close { -1 } else { 1 };
                 code_depth = code_depth.max(0);
             }
@@ -695,5 +696,16 @@ mod tests {
             out,
             "<pre>solitude</pre>&amp; <ruby>solitude\u{E000}孤独</ruby>"
         );
+    }
+
+    #[test]
+    fn leaves_link_text_intact_so_html_link_keeps_all_of_its_content() {
+        let glosses = HashMap::from([("mutexes".to_string(), "互斥体".to_string())]);
+        let html = "<p>See <a href=\"ch01.xhtml#mutexes\">Locking: Mutexes and RwLocks</a>, then mutexes.</p>";
+        let annotated = annotate_html(html, &glosses, &HashSet::new());
+        assert!(
+            annotated.contains("<a href=\"ch01.xhtml#mutexes\">Locking: Mutexes and RwLocks</a>")
+        );
+        assert!(annotated.contains("then <ruby>mutexes\u{e000}互斥体</ruby>"));
     }
 }

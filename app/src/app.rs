@@ -2276,6 +2276,7 @@ struct OpenBook {
     title: String,
     /// 各章原始 body HTML（已消毒，不含运行时注音）。
     chapters: Vec<String>,
+    chapter_paths: Vec<String>,
     /// 按访问惰性生成、已切块的注音章节；关闭注音时仍从原始章节投影。
     /// 直接缓存 PortalList 所需的块，避免每次设置刷新或旋转恢复都重新 split_blocks。
     glossed_chapter_chunks: Vec<Option<Vec<String>>>,
@@ -2315,6 +2316,81 @@ impl OpenBook {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum ReaderLinkTarget {
+    External(String),
+    Chapter {
+        index: usize,
+        fragment: Option<String>,
+    },
+    Unsupported,
+}
+
+fn normalized_epub_path(path: &str) -> String {
+    let mut parts = Vec::new();
+    for part in path.replace('\\', "/").split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            value => parts.push(value.to_string()),
+        }
+    }
+    parts.join("/")
+}
+
+fn resolve_reader_link(book: &OpenBook, current: usize, href: &str) -> ReaderLinkTarget {
+    let href = href.trim();
+    if href.starts_with("https://") || href.starts_with("http://") || href.starts_with("mailto:") {
+        return ReaderLinkTarget::External(href.to_string());
+    }
+    if href.is_empty() || href.starts_with('/') || href.contains(':') {
+        return ReaderLinkTarget::Unsupported;
+    }
+    let (path, fragment) = href
+        .split_once('#')
+        .map_or((href, None), |(path, fragment)| {
+            (
+                path,
+                (!fragment.is_empty()).then(|| percent_decode_path(fragment)),
+            )
+        });
+    let path = path.split('?').next().unwrap_or(path);
+    if path.is_empty() {
+        return ReaderLinkTarget::Chapter {
+            index: current,
+            fragment,
+        };
+    }
+    let relative = percent_decode_path(path);
+    let base = book
+        .chapter_paths
+        .get(current)
+        .and_then(|path| path.rsplit_once('/'))
+        .map_or("", |(parent, _)| parent);
+    let target = normalized_epub_path(&format!("{base}/{relative}"));
+    book.chapter_paths
+        .iter()
+        .position(|path| normalized_epub_path(path) == target)
+        .map_or(ReaderLinkTarget::Unsupported, |index| {
+            ReaderLinkTarget::Chapter { index, fragment }
+        })
+}
+
+fn reader_anchor_block(chunks: &[String], fragment: &str) -> usize {
+    let quoted = [
+        format!("id=\"{fragment}\""),
+        format!("id='{fragment}'"),
+        format!("name=\"{fragment}\""),
+        format!("name='{fragment}'"),
+    ];
+    chunks
+        .iter()
+        .position(|block| quoted.iter().any(|needle| block.contains(needle)))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod lazy_gloss_tests {
     use super::*;
@@ -2327,6 +2403,7 @@ mod lazy_gloss_tests {
                 "<p>The solitude.</p>".to_string(),
                 "<p>A murmur.</p>".to_string(),
             ],
+            chapter_paths: vec!["Text/one.xhtml".into(), "Text/two.xhtml".into()],
             glossed_chapter_chunks: vec![None, None],
             glosses: HashMap::from([
                 ("solitude".to_string(), "孤独".to_string()),
@@ -2401,6 +2478,40 @@ mod lazy_gloss_tests {
 
         let second = book.chapter_chunks(0, true).unwrap();
         assert_eq!(second, first);
+    }
+
+    #[test]
+    fn reader_links_resolve_external_relative_and_fragment_targets() {
+        let book = book();
+        assert_eq!(
+            resolve_reader_link(&book, 0, "https://example.org/"),
+            ReaderLinkTarget::External("https://example.org/".into())
+        );
+        assert_eq!(
+            resolve_reader_link(&book, 0, "two.xhtml#section"),
+            ReaderLinkTarget::Chapter {
+                index: 1,
+                fragment: Some("section".into())
+            }
+        );
+        assert_eq!(
+            resolve_reader_link(&book, 1, "#part"),
+            ReaderLinkTarget::Chapter {
+                index: 1,
+                fragment: Some("part".into())
+            }
+        );
+        assert_eq!(
+            resolve_reader_link(&book, 0, "javascript:bad()"),
+            ReaderLinkTarget::Unsupported
+        );
+        assert_eq!(
+            reader_anchor_block(
+                &["<p>x</p>".into(), "<h2 id=\"part\">y</h2>".into()],
+                "part"
+            ),
+            1
+        );
     }
 }
 
@@ -2899,8 +3010,10 @@ fn spawn_open_book(item: ShelfItem) {
         };
         let mut chapters = Vec::with_capacity(infos.len());
         let mut chapter_titles = Vec::with_capacity(infos.len());
+        let mut chapter_paths = Vec::with_capacity(infos.len());
         for info in infos {
             chapter_titles.push(info.title);
+            chapter_paths.push(info.source_path);
             chapters.push(info.html);
         }
         let parse_ms = open_started.elapsed().as_millis();
@@ -2924,6 +3037,7 @@ fn spawn_open_book(item: ShelfItem) {
             title: item.title,
             glossed_chapter_chunks: vec![None; chapters.len()],
             chapters,
+            chapter_paths,
             chapter_titles,
             glosses,
             known_words,
@@ -4243,6 +4357,34 @@ script_mod! {
         }
     }
 
+    // Style the CodeEditor's own scrollbars in the source-backed templates.
+    // Applying this dynamically to portal-list items loses the script source
+    // when the list recycles a row and can crash the renderer.
+    let ReaderCodeViewPaper = ReaderCodeViewLight{editor +:{scroll_bars +:{
+        scroll_bar_x +:{draw_bg +:{color:#d5cdbd color_hover:#716a60 color_drag:#805d35}}
+        scroll_bar_y +:{draw_bg +:{color:#d5cdbd color_hover:#716a60 color_drag:#805d35}}
+    }}}
+    let ReaderCodeViewSepia = ReaderCodeViewLight{editor +:{scroll_bars +:{
+        scroll_bar_x +:{draw_bg +:{color:#ccb995 color_hover:#x75624e color_drag:#85562f}}
+        scroll_bar_y +:{draw_bg +:{color:#ccb995 color_hover:#x75624e color_drag:#85562f}}
+    }}}
+    let ReaderCodeViewSage = ReaderCodeViewLight{editor +:{scroll_bars +:{
+        scroll_bar_x +:{draw_bg +:{color:#becdb8 color_hover:#607065 color_drag:#3e6850}}
+        scroll_bar_y +:{draw_bg +:{color:#becdb8 color_hover:#607065 color_drag:#3e6850}}
+    }}}
+    let ReaderCodeViewNight = ReaderCodeView{editor +:{scroll_bars +:{
+        scroll_bar_x +:{draw_bg +:{color:#46505a color_hover:#9a9b99 color_drag:#b7c9a6}}
+        scroll_bar_y +:{draw_bg +:{color:#46505a color_hover:#9a9b99 color_drag:#b7c9a6}}
+    }}}
+    let ReaderCodeViewThemeLight = ReaderCodeViewLight{editor +:{scroll_bars +:{
+        scroll_bar_x +:{draw_bg +:{color:#b9b9b9 color_hover:#686868 color_drag:#365f8d}}
+        scroll_bar_y +:{draw_bg +:{color:#b9b9b9 color_hover:#686868 color_drag:#365f8d}}
+    }}}
+    let ReaderCodeViewThemeDark = ReaderCodeView{editor +:{scroll_bars +:{
+        scroll_bar_x +:{draw_bg +:{color:#686868 color_hover:#aaaaaa color_drag:#b8c8dc}}
+        scroll_bar_y +:{draw_bg +:{color:#686868 color_hover:#aaaaaa color_drag:#b8c8dc}}
+    }}}
+
     let ReaderCodePara = RoundedView{
         width: Fill height: Fit
         new_batch: true
@@ -4353,27 +4495,27 @@ script_mod! {
             }
             CodePaper := ReaderCodePara{
                 draw_bg +: {color: #f7f4ea border_color: #d8d1c2}
-                code_view := ReaderCodeViewLight{}
+                code_view := ReaderCodeViewPaper{}
             }
             CodeSepia := ReaderCodePara{
                 draw_bg +: {color: #f2e3c6 border_color: #ccb995}
-                code_view := ReaderCodeViewLight{}
+                code_view := ReaderCodeViewSepia{}
             }
             CodeSage := ReaderCodePara{
                 draw_bg +: {color: #e7efe3 border_color: #becdb8}
-                code_view := ReaderCodeViewLight{}
+                code_view := ReaderCodeViewSage{}
             }
             CodeNight := ReaderCodePara{
                 draw_bg +: {color: #20252b border_color: #46505a}
-                code_view := ReaderCodeView{}
+                code_view := ReaderCodeViewNight{}
             }
             CodeThemeLight := ReaderCodePara{
                 draw_bg +: {color: #d9d9d9 border_color: #b9b9b9}
-                code_view := ReaderCodeViewLight{}
+                code_view := ReaderCodeViewThemeLight{}
             }
             CodeThemeDark := ReaderCodePara{
                 draw_bg +: {color: #4d4d4d border_color: #686868}
-                code_view := ReaderCodeView{}
+                code_view := ReaderCodeViewThemeDark{}
             }
         }
         }
@@ -5833,7 +5975,9 @@ struct ChapterList {
     #[rust]
     item_layout_widths: HashMap<(usize, usize), f64>,
     #[rust]
-    hit_runs: HashMap<usize, (u64, Vec<crate::reader_hit::HitRun>)>,
+    // A paragraph can be drawn in both columns by two different portal slots.
+    // Their glyph origins differ even though the source block is identical.
+    hit_runs: HashMap<WidgetUid, (usize, u64, Vec<crate::reader_hit::HitRun>)>,
     #[rust]
     text_maps: HashMap<usize, (u64, crate::reader_text::TextMap)>,
     #[rust]
@@ -6276,14 +6420,16 @@ impl ChapterList {
         );
         let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
         let signature = reader_source_hash(&format!(
-            "{}:{:.1}:{:.1}:{:?}:{:?}:{}:{}",
+            "{}:{:.1}:{:.1}:{}:{:?}:{:?}:{}:{}:{}",
             content_version,
             layout.width,
             layout.height,
+            layout.count,
             *READER_FONT.read().unwrap(),
             *READER_SPACING.read().unwrap(),
             font,
-            *crate::ruby_word::GLOSS_FONT_SIZE.read().unwrap()
+            *crate::ruby_word::GLOSS_FONT_SIZE.read().unwrap(),
+            *GLOSS_ENABLED.read().unwrap()
         ));
         let list_ref = self.view.portal_list(cx, ids!(list));
         let mut anchor = PageAnchor {
@@ -6853,8 +6999,10 @@ impl ChapterList {
                 let paragraphs = PARAGRAPHS.read().unwrap();
                 let paragraph = paragraphs.get(*id)?;
                 let plain_len = readwise_core::vocab::annotate::rendered_text(paragraph).len();
-                if let Some((source_hash, runs)) = self.hit_runs.get(id) {
-                    if *source_hash == reader_source_hash(paragraph) {
+                if let Some((run_block, source_hash, runs)) =
+                    self.hit_runs.get(&widget.widget_uid())
+                {
+                    if *run_block == *id && *source_hash == reader_source_hash(paragraph) {
                         if let Some(index) = crate::reader_hit::hit_index(runs, abs - rect.pos) {
                             return Some((*id, self.text_map(*id, paragraph)?.source_index(index)));
                         }
@@ -6867,11 +7015,17 @@ impl ChapterList {
                     .and_then(Option::as_ref)
                     .is_some();
                 let char_idx = if supports_unified_reader_hit_test(paragraph) && !is_code {
-                    let fallback = self.unified_markup_hit_index(cx, widget, paragraph, abs)?;
-                    let native = self
-                        .text_map(*id, paragraph)?
-                        .source_index(widget.selection_point_to_char_index(cx, abs)?);
-                    if let (Some(previous), Some(previous_abs)) = (
+                    let fallback = self
+                        .unified_markup_hit_index(cx, widget, paragraph, abs)
+                        .map(|index| index.min(plain_len));
+                    let native = self.text_map(*id, paragraph).and_then(|map| {
+                        widget
+                            .selection_point_to_char_index(cx, abs)
+                            .map(|index| map.source_index(index))
+                    });
+                    if let (Some(native), Some(fallback), Some(previous), Some(previous_abs)) = (
+                        native,
+                        fallback,
                         self.sel_cursor.filter(|point| point.0 == *id),
                         self.last_abs,
                     ) {
@@ -6881,16 +7035,16 @@ impl ChapterList {
                             .unwrap_or(false);
                         choose_reader_hit_index(
                             native,
-                            fallback.min(plain_len),
+                            fallback,
                             previous.1,
                             reader_drag_moves_forward(previous_abs, abs),
                             pointer_moved,
                         )
                     } else {
-                        // Anchors must always come from the layout actually on
-                        // screen. The fallback only participates after a drag
-                        // proves that the native tracker is stuck at a run edge.
-                        native
+                        // A paginated right-column Html item can paint correctly
+                        // while its native selection Area is absent. In that case
+                        // use the same source-text layout as the drag fallback.
+                        native.or(fallback)?
                     }
                 } else {
                     let native = widget.selection_point_to_char_index(cx, abs)?;
@@ -7098,14 +7252,16 @@ impl ChapterList {
                 if !self.reader_rect(cx).contains(e.abs) {
                     return;
                 }
-                *SEL_RANGE.write().unwrap() = None;
+                let had_selection = SEL_RANGE.write().unwrap().take().is_some();
                 SELECTED_TEXT.write().unwrap().clear();
                 self.reset_selection_gesture();
                 self.last_abs = Some(e.abs);
                 Cx::post_action(SelAction::Hide);
                 // 清除上一轮原生选区的 item 状态后再建立新锚点，避免快速
                 // “选择→取消→再选择”时旧选区 Area 留到下一次完整 Draw。
-                self.apply_visible_selection(cx);
+                if had_selection {
+                    self.apply_visible_selection(cx);
+                }
                 // Inline text widgets (ruby words and links) must keep receiving
                 // clicks, but they are also valid text-selection starting points.
                 // Their FingerUp `was_tap()` check distinguishes a click from a drag.
@@ -7344,7 +7500,8 @@ impl ChapterList {
             current_range
         };
         if let Some(code_text) = code_text {
-            item.widget(cx, ids!(code_view)).set_text(cx, code_text);
+            let code_view = item.widget(cx, ids!(code_view));
+            code_view.set_text(cx, code_text);
         } else {
             let html = item.widget(cx, ids!(para_html));
             let display_html = tracked
@@ -7454,9 +7611,9 @@ impl ChapterList {
         }
         if tracked.is_some() {
             self.hit_runs
-                .insert(item_id, (reader_source_hash(para), runs));
+                .insert(item.widget_uid(), (item_id, reader_source_hash(para), runs));
         } else {
-            self.hit_runs.remove(&item_id);
+            self.hit_runs.remove(&item.widget_uid());
         }
         let width_stable = previous_layout_width
             .map(|previous| reader_geometry_width_is_stable(previous, item_rect.size.x))
@@ -8494,7 +8651,7 @@ pub struct App {
     selection_popup_anchor: Option<DVec2>,
     #[rust]
     pending_selection_popup_layout: bool,
-    /// 生词释义卡片与选区工具条一样由阅读器覆盖层定位，避免参与纵向正文布局。
+    /// 生词释义卡片由阅读器覆盖层定位，避免参与纵向正文布局。
     #[rust]
     word_card_anchor: Option<DVec2>,
     #[rust]
@@ -11823,9 +11980,9 @@ impl App {
         changed
     }
 
-    /// 将生词卡片锚定到被点击的注音词附近，并限制在正文视口内。
-    /// 首帧使用估算高度，绘制完成后再按卡片真实高度校正，避免闪到阅读器底部。
-    fn position_word_card(&self, cx: &mut Cx, use_measured_height: bool) -> bool {
+    /// Card placement uses a font-scaled height estimate on its first frame.
+    /// Repositioning after layout made the card jump under the pointer.
+    fn position_word_card(&self, cx: &mut Cx) -> bool {
         let Some(anchor) = self.word_card_anchor else {
             return false;
         };
@@ -11838,12 +11995,12 @@ impl App {
             return false;
         }
         let card = self.ui.view(cx, ids!(word_card));
-        let measured_height = card.area().rect(cx).size.y;
-        let card_height = if use_measured_height && measured_height > 0.0 {
-            measured_height
-        } else {
-            WORD_CARD_ESTIMATED_HEIGHT
-        };
+        let font_size = READER_FONT_SIZE
+            .read()
+            .unwrap()
+            .unwrap_or(READER_FONT_DEFAULT);
+        let card_height = WORD_CARD_ESTIMATED_HEIGHT
+            + (font_size as f64 - READER_FONT_DEFAULT as f64).max(0.0) * 5.0;
         let (position, width) = word_card_geometry(viewport, anchor, card_height);
         let Some(mut inner) = card.borrow_mut() else {
             return false;
@@ -12726,9 +12883,6 @@ impl MatchEvent for App {
                             localized("生词本里已有这个词", "This word is already in Vocabulary")
                         };
                         self.ui.label(cx, ids!(card_hint)).set_text(cx, hint);
-                        if self.word_card_anchor.is_some() {
-                            self.pending_word_card_layout = true;
-                        }
                         self.set_selection_hint(cx, hint);
                         if *added {
                             spawn_load_vocab();
@@ -13162,6 +13316,35 @@ impl MatchEvent for App {
                         format!("点词：{word}")
                     };
                     self.ui.label(cx, ids!(status)).set_text(cx, &status);
+                } else {
+                    let target = CURRENT_BOOK
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .map(|book| resolve_reader_link(book, self.chapter_idx, &url));
+                    match target {
+                        Some(ReaderLinkTarget::External(url)) => {
+                            cx.open_url(&url, OpenUrlInPlace::No)
+                        }
+                        Some(ReaderLinkTarget::Chapter { index, fragment }) => {
+                            let block = CURRENT_BOOK
+                                .write()
+                                .unwrap()
+                                .as_mut()
+                                .and_then(|book| build_chapter_chunks(book, index))
+                                .map(|chunks| {
+                                    fragment
+                                        .as_deref()
+                                        .map_or(0, |id| reader_anchor_block(&chunks, id))
+                                })
+                                .unwrap_or(0);
+                            self.set_chapter_at(cx, index, block, 0.0, true);
+                        }
+                        _ => self
+                            .ui
+                            .label(cx, ids!(status))
+                            .set_text(cx, localized("无法打开此链接", "Cannot open this link")),
+                    }
                 }
             }
             if let RubyWordAction::Clicked {
@@ -13174,13 +13357,28 @@ impl MatchEvent for App {
                     .trim_end_matches(['.', ',', ';', ':', '!', '?'])
                     .to_string();
                 let lemma = readwise_core::vocab::lemma::lemmatize(&word);
+                let font_size = READER_FONT_SIZE
+                    .read()
+                    .unwrap()
+                    .unwrap_or(READER_FONT_DEFAULT);
+                for id in [id!(card_word), id!(card_gloss), id!(card_hint)] {
+                    if let Some(mut label) = self.ui.label(cx, &[id]).borrow_mut() {
+                        label.draw_text.text_style.font_size = font_size;
+                    }
+                }
+                for id in [id!(close_card_btn), id!(add_vocab_btn), id!(know_btn)] {
+                    let mut button = self.ui.widget(cx, &[id]);
+                    script_apply_eval!(cx, button, {
+                        draw_text.text_style.font_size: #(font_size)
+                    });
+                }
                 self.ui.label(cx, ids!(card_word)).set_text(cx, &word);
                 self.ui.label(cx, ids!(card_gloss)).set_text(cx, &gloss);
                 self.ui.label(cx, ids!(card_hint)).set_text(cx, "");
                 self.ui.widget(cx, ids!(word_card)).set_visible(cx, true);
                 self.word_card_anchor = Some(anchor);
-                self.position_word_card(cx, false);
-                self.pending_word_card_layout = true;
+                self.position_word_card(cx);
+                self.pending_word_card_layout = false;
                 self.card = Some((word, lemma, gloss));
                 self.ui.widget(cx, ids!(word_card_layer)).redraw(cx);
             }
@@ -14001,9 +14199,7 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(know_btn)).clicked(actions) {
             if let Some((_, lemma, _)) = self.card.clone() {
-                self.ui
-                    .label(cx, ids!(card_hint))
-                    .set_text(cx, localized("标记中…", "Marking…"));
+                self.close_word_card(cx);
                 spawn_mark_known(lemma);
             }
         }
@@ -14410,6 +14606,31 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // The word card owns pointer input while open. A press outside closes
+        // it immediately; a press inside must not start selection underneath.
+        let word_card_press = match event {
+            Event::MouseDown(e) => Some(e.abs),
+            Event::TouchUpdate(e) => e
+                .touches
+                .iter()
+                .find(|touch| touch.state == TouchState::Start)
+                .map(|touch| touch.abs),
+            _ => None,
+        };
+        let card_captures_pointer = if self.word_card_anchor.is_some() {
+            if let Some(abs) = word_card_press {
+                let card_rect = self.ui.widget(cx, ids!(word_card)).area().clipped_rect(cx);
+                if !card_rect.contains(abs) {
+                    self.close_word_card(cx);
+                    return;
+                }
+                true
+            } else {
+                SELECTION_POPUP_POINTER.load(Ordering::Relaxed)
+            }
+        } else {
+            false
+        };
         // Dismiss from the window-level owner, not only the shelf body's
         // transparent overlay. Consume this press so it cannot open a book or
         // activate a control underneath the disappearing menu.
@@ -14467,7 +14688,10 @@ impl AppMain for App {
                 },
                 abs,
             );
-            SELECTION_POPUP_POINTER.store(popup_captures_pointer, Ordering::Relaxed);
+            SELECTION_POPUP_POINTER.store(
+                popup_captures_pointer || card_captures_pointer,
+                Ordering::Relaxed,
+            );
         }
         let wire_outcome = self
             .ai_request
@@ -14680,7 +14904,7 @@ impl AppMain for App {
             }
             if self.pending_word_card_layout {
                 self.pending_word_card_layout = false;
-                if self.position_word_card(cx, true) {
+                if self.position_word_card(cx) {
                     self.ui.redraw(cx);
                 }
             }

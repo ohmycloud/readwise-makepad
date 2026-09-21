@@ -48,7 +48,9 @@ impl ColumnLayout {
             }
             _ => 1,
         };
-        let max_width = font * 60.0;
+        // A single column should use the available page; the narrower measure
+        // remains useful when two independent columns share the viewport.
+        let max_width = font * if count == 1 { 76.0 } else { 60.0 };
         let column_width = ((usable - (count - 1) as f64 * gap) / count as f64).min(max_width);
         Self {
             count,
@@ -396,8 +398,8 @@ mod tests {
     fn single_column_is_centered_and_bounded() {
         let layout = ColumnLayout::resolve(ReaderColumns::One, 1400.0, 700.0, 12.0, 2);
         assert_eq!(layout.count, 1);
-        assert_eq!(layout.width, 720.0);
-        assert_eq!(layout.left, 340.0);
+        assert_eq!(layout.width, 912.0);
+        assert_eq!(layout.left, 244.0);
     }
     #[test]
     fn long_paragraph_continues_at_exact_same_boundary() {
