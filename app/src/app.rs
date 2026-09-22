@@ -13459,15 +13459,21 @@ impl MatchEvent for App {
                     .read()
                     .unwrap()
                     .unwrap_or(READER_FONT_DEFAULT);
-                for id in [id!(card_word), id!(card_gloss), id!(card_hint)] {
+                for id in [id!(card_word), id!(card_hint)] {
                     if let Some(mut label) = self.ui.label(cx, &[id]).borrow_mut() {
                         label.draw_text.text_style.font_size = font_size;
                     }
                 }
+                // Chinese gloss and action glyphs look larger than Latin body
+                // text at the same numeric size.
+                let action_font_size = (font_size * 0.8).max(8.0);
+                if let Some(mut label) = self.ui.label(cx, ids!(card_gloss)).borrow_mut() {
+                    label.draw_text.text_style.font_size = action_font_size;
+                }
                 for id in [id!(close_card_btn), id!(add_vocab_btn), id!(know_btn)] {
                     let mut button = self.ui.widget(cx, &[id]);
                     script_apply_eval!(cx, button, {
-                        draw_text.text_style.font_size: #(font_size)
+                        draw_text.text_style.font_size: #(action_font_size)
                     });
                 }
                 self.ui.label(cx, ids!(card_word)).set_text(cx, &word);
