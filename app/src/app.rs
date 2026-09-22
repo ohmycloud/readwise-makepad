@@ -7751,9 +7751,21 @@ impl ChapterList {
         } else {
             current_range
         };
+        let mut code_cache_changed = false;
         if let Some(code_text) = code_text {
             let code_view = item.widget(cx, ids!(code_view));
-            code_view.set_text(cx, code_text);
+            if code_view.text() != code_text {
+                code_view.set_text(cx, code_text);
+                // Paged reading reuses PortalList slots. A code container's
+                // DrawList can still hold the previous block at this slot.
+                // Invalidate it for the next frame, then draw without that
+                // cache now so the first frame's measured height is correct.
+                cx.redraw_area_in_draw(item.area());
+                if let Some(mut view) = item.borrow_mut::<View>() {
+                    view.set_optimize(cx, ViewOptimize::None);
+                    code_cache_changed = true;
+                }
+            }
         } else {
             let html = item.widget(cx, ids!(para_html));
             let display_html = tracked
@@ -7833,6 +7845,11 @@ impl ChapterList {
             0.0
         };
         crate::chapter_image::with_page_height(page_height, || item.draw_all_unscoped(cx));
+        if code_cache_changed {
+            if let Some(mut view) = item.borrow_mut::<View>() {
+                view.set_optimize(cx, ViewOptimize::DrawList);
+            }
+        }
         let item_rect = item.area().rect(cx);
         let item_margin = item.walk(cx).margin;
         let runs = crate::reader_hit::end_capture(cx, item_rect.pos);
