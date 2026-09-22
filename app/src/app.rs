@@ -2346,6 +2346,51 @@ impl OpenBook {
             self.glossed_chapter_chunks.fill(None);
         }
     }
+
+    fn take_highlights(
+        &mut self,
+        chapter: usize,
+        ids: &[String],
+    ) -> Vec<(usize, readwise_core::books::Highlight)> {
+        let wanted = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let mut removed = Vec::new();
+        let mut empty = false;
+        if let Some(highlights) = self.highlights.get_mut(&chapter) {
+            let mut index = 0;
+            highlights.retain(|highlight| {
+                let take = wanted.contains(highlight.id.as_str());
+                if take {
+                    removed.push((index, highlight.clone()));
+                }
+                index += 1;
+                !take
+            });
+            empty = highlights.is_empty();
+        }
+        if empty {
+            self.highlights.remove(&chapter);
+        }
+        removed
+    }
+
+    fn restore_highlights(
+        &mut self,
+        chapter: usize,
+        removed: &[(usize, readwise_core::books::Highlight)],
+    ) -> bool {
+        if removed.is_empty() {
+            return false;
+        }
+        let highlights = self.highlights.entry(chapter).or_default();
+        let mut restored = false;
+        for (index, highlight) in removed {
+            if !highlights.iter().any(|item| item.id == highlight.id) {
+                highlights.insert((*index).min(highlights.len()), highlight.clone());
+                restored = true;
+            }
+        }
+        restored
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -2763,7 +2808,17 @@ fn spawn_delete_note(book_id: String, note_id: String) {
 #[derive(Debug)]
 enum HlAction {
     Saved(readwise_core::books::Highlight, usize),
-    Deleted { chapter: usize, ids: Vec<String> },
+    Deleted {
+        book_id: String,
+        chapter: usize,
+        ids: Vec<String>,
+    },
+    DeleteFailed {
+        book_id: String,
+        chapter: usize,
+        removed: Vec<(usize, readwise_core::books::Highlight)>,
+        error: String,
+    },
     Error(String),
 }
 
@@ -2790,12 +2845,29 @@ fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
     });
 }
 
-fn spawn_delete_highlights(book_id: String, chapter: usize, ids: Vec<String>) {
+fn spawn_delete_highlights(
+    book_id: String,
+    chapter: usize,
+    ids: Vec<String>,
+    removed: Vec<(usize, readwise_core::books::Highlight)>,
+) {
     std::thread::spawn(move || {
-        let Some(db) = DB.get() else { return };
-        match db.delete_highlights(&book_id, &ids) {
-            Ok(_) => Cx::post_action(HlAction::Deleted { chapter, ids }),
-            Err(error) => Cx::post_action(HlAction::Error(error)),
+        let result = DB
+            .get()
+            .ok_or_else(|| "数据库尚未就绪".to_string())
+            .and_then(|db| db.delete_highlights(&book_id, &ids));
+        match result {
+            Ok(_) => Cx::post_action(HlAction::Deleted {
+                book_id,
+                chapter,
+                ids,
+            }),
+            Err(error) => Cx::post_action(HlAction::DeleteFailed {
+                book_id,
+                chapter,
+                removed,
+                error,
+            }),
         }
     });
 }
@@ -3173,6 +3245,49 @@ mod highlight_overlap_tests {
         assert_eq!(highlight_range_in_block(&highlight, 3, 12), Some((0, 12)));
         assert_eq!(highlight_range_in_block(&highlight, 4, 10), Some((0, 10)));
         assert_eq!(highlight_range_in_block(&highlight, 5, 20), None);
+    }
+
+    #[test]
+    fn failed_delete_restores_only_removed_highlights_in_original_order() {
+        let mut book = OpenBook {
+            id: "book".into(),
+            title: String::new(),
+            chapters: Vec::new(),
+            chapter_paths: Vec::new(),
+            glossed_chapter_chunks: Vec::new(),
+            glosses: HashMap::new(),
+            known_words: HashSet::new(),
+            chapter_titles: Vec::new(),
+            highlights: HashMap::from([(
+                2,
+                vec![
+                    highlight("first", (0, 0), (0, 1)),
+                    highlight("second", (0, 1), (0, 2)),
+                    highlight("third", (0, 2), (0, 3)),
+                ],
+            )]),
+        };
+        let ids = vec!["first".to_string(), "third".to_string()];
+        let removed = book.take_highlights(2, &ids);
+        let remaining = book.highlights.get(&2).unwrap();
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|hl| hl.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second"]
+        );
+        assert!(book.restore_highlights(2, &removed));
+        assert!(!book.restore_highlights(2, &removed));
+        assert_eq!(
+            book.highlights
+                .get(&2)
+                .unwrap()
+                .iter()
+                .map(|hl| hl.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
     }
 }
 
@@ -11956,6 +12071,10 @@ impl App {
         if !silence_current_paragraph_glosses(lemma) {
             return;
         }
+        self.redraw_reader_annotations(cx);
+    }
+
+    fn redraw_reader_annotations(&self, cx: &mut Cx) {
         let chapter = self.ui.widget(cx, ids!(chapter_list));
         if let Some(mut reader) = chapter.borrow_mut::<ChapterList>() {
             reader.page_turn.cancel();
@@ -13039,25 +13158,47 @@ impl MatchEvent for App {
                                 .push(hl.clone());
                         }
                         self.clear_reader_selection(cx);
-                        self.refresh_current_chapter(cx);
+                        self.redraw_reader_annotations(cx);
                     }
-                    HlAction::Deleted { chapter, ids } => {
-                        let ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
-                        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
-                            let remove_chapter = if let Some(highlights) =
-                                book.highlights.get_mut(chapter)
-                            {
-                                highlights.retain(|highlight| !ids.contains(highlight.id.as_str()));
-                                highlights.is_empty()
-                            } else {
-                                false
-                            };
-                            if remove_chapter {
-                                book.highlights.remove(chapter);
-                            }
+                    HlAction::Deleted {
+                        book_id,
+                        chapter,
+                        ids,
+                    } => {
+                        // A book reopened while the save was pending may have
+                        // loaded the old rows. Reconcile only that same book.
+                        let changed = CURRENT_BOOK
+                            .write()
+                            .unwrap()
+                            .as_mut()
+                            .filter(|book| book.id == *book_id)
+                            .is_some_and(|book| !book.take_highlights(*chapter, ids).is_empty());
+                        if changed && *chapter == self.chapter_idx {
+                            self.redraw_reader_annotations(cx);
                         }
-                        self.clear_reader_selection(cx);
-                        self.refresh_current_chapter(cx);
+                    }
+                    HlAction::DeleteFailed {
+                        book_id,
+                        chapter,
+                        removed,
+                        error,
+                    } => {
+                        let restored = CURRENT_BOOK
+                            .write()
+                            .unwrap()
+                            .as_mut()
+                            .filter(|book| book.id == *book_id)
+                            .is_some_and(|book| book.restore_highlights(*chapter, removed));
+                        if restored && *chapter == self.chapter_idx {
+                            self.redraw_reader_annotations(cx);
+                        }
+                        self.ui.label(cx, ids!(status)).set_text(
+                            cx,
+                            &format!(
+                                "{}: {error}",
+                                localized("删除高亮失败", "Could not remove highlight")
+                            ),
+                        );
                     }
                     HlAction::Error(error) => {
                         let message = if app_language() == AppLanguage::English {
@@ -14191,8 +14332,16 @@ impl MatchEvent for App {
                     self.set_selection_hint(cx, localized("正在添加高亮…", "Adding highlight…"));
                     spawn_add_highlight(book_id, self.chapter_idx, range);
                 } else {
-                    self.set_selection_hint(cx, localized("正在删除高亮…", "Removing highlight…"));
-                    spawn_delete_highlights(book_id, self.chapter_idx, ids);
+                    let removed = CURRENT_BOOK
+                        .write()
+                        .unwrap()
+                        .as_mut()
+                        .filter(|book| book.id == book_id)
+                        .map(|book| book.take_highlights(self.chapter_idx, &ids))
+                        .unwrap_or_default();
+                    self.clear_reader_selection(cx);
+                    self.redraw_reader_annotations(cx);
+                    spawn_delete_highlights(book_id, self.chapter_idx, ids, removed);
                 }
             }
         }
