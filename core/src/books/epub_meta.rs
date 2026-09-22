@@ -415,6 +415,9 @@ pub fn sanitize_for_reader(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let lower = html.to_lowercase();
     let mut i = 0;
+    // An EPUB may use <a id="…"/> as a zero-width destination. It must not
+    // become an unclosed HtmlLink, which would consume the following prose.
+    let mut link_stack = Vec::new();
     while i < html.len() {
         let Some(lt_rel) = html[i..].find('<') else {
             out.push_str(&html[i..]);
@@ -467,19 +470,39 @@ pub fn sanitize_for_reader(html: &str) -> String {
             continue;
         }
 
-        if name == "figcaption" {
+        if link_stack.last() == Some(&true)
+            && matches!(
+                name.as_str(),
+                "b" | "strong" | "i" | "em" | "code" | "sub" | "sup" | "u" | "del" | "s" | "strike"
+            )
+        {
+            // HtmlLink consumes one text node and skips nested markup. Flatten
+            // inline formatting so every word remains in the link's text.
+        } else if name == "figcaption" {
             if is_close {
                 out.push_str("</em></p>");
             } else {
                 out.push_str("<p><em>");
             }
-        } else if name == "a" && !is_close {
+        } else if name == "a" && is_close {
+            if link_stack.pop().unwrap_or(false) {
+                out.push_str("</a>");
+            }
+        } else if name == "a" {
             let tag = &html[lt..=gt];
-            out.push_str("<a");
-            for attr in ["href", "id", "name"] {
-                if let Some((start, end)) = quoted_attr_range(tag, attr) {
-                    let value = &tag[start..end];
-                    if attr != "href" || safe_reader_href(value) {
+            let is_link = quoted_attr(tag, "href").is_some_and(safe_reader_href);
+            let self_closing = inner.trim_end().ends_with('/');
+            let keep_link = is_link && !self_closing;
+            let has_marker = quoted_attr(tag, "id").is_some() || quoted_attr(tag, "name").is_some();
+            if keep_link || has_marker {
+                out.push_str("<a");
+                for attr in if keep_link {
+                    &["href", "id", "name"][..]
+                } else {
+                    &["id", "name"][..]
+                } {
+                    if let Some((start, end)) = quoted_attr_range(tag, attr) {
+                        let value = &tag[start..end];
                         out.push(' ');
                         out.push_str(attr);
                         out.push_str("=\"");
@@ -487,8 +510,11 @@ pub fn sanitize_for_reader(html: &str) -> String {
                         out.push('"');
                     }
                 }
+                out.push_str(if keep_link { ">" } else { "></a>" });
             }
-            out.push('>');
+            if !self_closing {
+                link_stack.push(keep_link);
+            }
         } else if KEEP_TAGS.contains(&name.as_str()) {
             out.push_str(&html[lt..=gt]);
         }
@@ -706,7 +732,32 @@ mod tests {
         let html = r##"<p><a id="part" name="old" onclick="evil()">Heading</a> <a href="../next.xhtml#part" onmouseover="evil()">Next</a> <a href="javascript:evil()">Unsafe</a></p>"##;
         assert_eq!(
             sanitize_for_reader(html),
-            "<p><a id=\"part\" name=\"old\">Heading</a> <a href=\"../next.xhtml#part\">Next</a> <a>Unsafe</a></p>"
+            "<p><a id=\"part\" name=\"old\"></a>Heading <a href=\"../next.xhtml#part\">Next</a> Unsafe</p>"
+        );
+    }
+
+    #[test]
+    fn self_closing_anchor_remains_zero_width_before_paragraph_text() {
+        let html = r#"<p>First <a data-type="indexterm" id="ix_first"/>word <a id="ix_second" />and the rest of the paragraph.</p>"#;
+        let sanitized = sanitize_for_reader(html);
+        assert_eq!(
+            sanitized,
+            "<p>First <a id=\"ix_first\"></a>word <a id=\"ix_second\"></a>and the rest of the paragraph.</p>"
+        );
+        assert_eq!(split_blocks(&sanitized), vec![sanitized.clone()],);
+        assert_eq!(
+            crate::vocab::annotate::rendered_text(&sanitized),
+            "First word and the rest of the paragraph."
+        );
+    }
+
+    #[test]
+    fn link_with_inline_formatting_keeps_its_complete_text() {
+        let html =
+            r#"<p>See <a href="next.xhtml"><em>first</em> and <code>second</code></a> after.</p>"#;
+        assert_eq!(
+            sanitize_for_reader(html),
+            "<p>See <a href=\"next.xhtml\">first and second</a> after.</p>"
         );
     }
 

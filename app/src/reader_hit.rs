@@ -320,6 +320,7 @@ impl Widget for ReaderRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_widgets::makepad_html::parse_html;
 
     #[test]
     fn line_margins_stay_in_the_same_block_instead_of_selecting_earlier_text() {
@@ -401,6 +402,36 @@ mod tests {
         assert_eq!(
             readwise_core::vocab::annotate::rendered_text(source),
             readwise_core::vocab::annotate::rendered_text(&tracked),
+        );
+    }
+
+    #[test]
+    fn epub_destination_anchor_does_not_capture_the_next_link_or_prose() {
+        let source = r#"<p>Before <a id="ix_term"/>word <a href="note.xhtml">note <em>title</em></a> after.</p>"#;
+        let sanitized = readwise_core::books::epub_meta::sanitize_for_reader(source);
+        let display = tracked_html(&sanitized).unwrap();
+        let mut errors = Some(Vec::new());
+        let doc = parse_html(&display, &mut errors, InternLiveId::No);
+        assert!(errors.unwrap().is_empty());
+
+        let mut walker = doc.new_walker();
+        let mut links = Vec::new();
+        while !walker.done() {
+            if walker.open_tag_lc() == Some(live_id!(a)) {
+                links.push((
+                    walker.find_attr_lc(live_id!(href)).map(str::to_owned),
+                    walker.find_text().map(str::to_owned),
+                ));
+                walker.jump_to_close();
+            }
+            walker.walk();
+        }
+        assert_eq!(
+            links,
+            vec![
+                (None, Some(String::new())),
+                (Some("note.xhtml".into()), Some("note title".into()))
+            ]
         );
     }
 
