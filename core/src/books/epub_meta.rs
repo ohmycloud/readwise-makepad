@@ -1,8 +1,9 @@
-use epub::doc::EpubDoc;
-use std::collections::HashMap;
+use epub::doc::{EpubDoc, NavPoint};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek};
 use std::path::Path;
+use xml::reader::{EventReader, XmlEvent};
 
 /// 从 EPUB 解析出的元数据（M2 只取书架需要的）。
 pub struct EpubMeta {
@@ -23,10 +24,46 @@ pub struct ChapterInfo {
     pub figure_targets: HashMap<String, String>,
 }
 
+/// A clickable EPUB navigation entry. Levels 0, 1 and 2 are shown in the reader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TocEntry {
+    pub title: String,
+    pub level: usize,
+    pub chapter: usize,
+    pub fragment: Option<String>,
+}
+
+pub struct LoadedChapters {
+    pub chapters: Vec<ChapterInfo>,
+    pub toc: Vec<TocEntry>,
+}
+
+#[derive(Debug)]
+struct RawTocEntry {
+    title: String,
+    level: usize,
+    href: String,
+}
+
 /// 加载全书章节（已消毒 + 提取标题 + 图片落盘并改写 src，阅读器可直接渲染）。
 pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String> {
+    load_chapters_with_toc(path).map(|loaded| loaded.chapters)
+}
+
+/// Load spine documents and the EPUB's own navigation hierarchy in one pass.
+pub fn load_chapters_with_toc<P: AsRef<Path>>(path: P) -> Result<LoadedChapters, String> {
     let path = path.as_ref();
     let mut doc = EpubDoc::new(path).map_err(|e| format!("打开 EPUB 失败: {}", e))?;
+    let raw_toc = epub3_navigation(&mut doc);
+    let mut ncx_toc = Vec::new();
+    flatten_ncx(&doc.toc, 0, &mut ncx_toc);
+    let toc_fragments: HashSet<String> = raw_toc
+        .iter()
+        .chain(&ncx_toc)
+        .filter_map(|entry| entry.href.split_once('#').map(|(_, fragment)| fragment))
+        .filter(|fragment| !fragment.is_empty())
+        .map(percent_decode)
+        .collect();
     let images = extract_images(&mut doc, path);
     let n = doc.get_num_chapters();
     let mut out = Vec::with_capacity(n);
@@ -42,7 +79,7 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
             .unwrap_or_default();
         let body = extract_body(&html);
         let figure_targets = figure_image_targets(&body, &images);
-        let body = sanitize_for_reader(&body);
+        let body = sanitize_for_reader_with_anchors(&body, &toc_fragments);
         if body.trim().is_empty() {
             continue;
         }
@@ -58,7 +95,200 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
     if out.is_empty() {
         return Err("未解析出任何章节".to_string());
     }
-    Ok(out)
+    let nav_toc = resolve_toc_entries(raw_toc, &out);
+    let ncx_toc = resolve_toc_entries(ncx_toc, &out);
+    // Some EPUB3 books carry both files, with a shorter HTML nav and a more
+    // detailed NCX. Prefer the source that exposes more reachable sections.
+    let toc = if ncx_toc.len() > nav_toc.len() {
+        ncx_toc
+    } else {
+        nav_toc
+    };
+    let toc = if toc.is_empty() {
+        out.iter()
+            .enumerate()
+            .map(|(chapter, info)| TocEntry {
+                title: format!("{}. {}", chapter + 1, info.title),
+                level: 0,
+                chapter,
+                fragment: None,
+            })
+            .collect()
+    } else {
+        toc
+    };
+    Ok(LoadedChapters { chapters: out, toc })
+}
+
+fn epub3_navigation<R: Read + Seek>(doc: &mut EpubDoc<R>) -> Vec<RawTocEntry> {
+    if let Some(nav_id) = doc.get_nav_id() {
+        if let Some(nav_path) = doc
+            .resources
+            .get(&nav_id)
+            .map(|resource| resource.path.clone())
+        {
+            if let Some((nav, _)) = doc.get_resource_str(&nav_id) {
+                let entries = parse_epub3_nav(&nav, &nav_path);
+                if !entries.is_empty() {
+                    return entries;
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn flatten_ncx(points: &[NavPoint], level: usize, entries: &mut Vec<RawTocEntry>) {
+    if level >= 3 {
+        return;
+    }
+    for point in points {
+        entries.push(RawTocEntry {
+            title: point.label.clone(),
+            level,
+            href: point.content.to_string_lossy().into_owned(),
+        });
+        flatten_ncx(&point.children, level + 1, entries);
+    }
+}
+
+fn parse_epub3_nav(nav: &str, nav_path: &Path) -> Vec<RawTocEntry> {
+    let mut entries = Vec::new();
+    let mut nav_depth = 0_usize;
+    let mut list_depth = 0_usize;
+    let mut item_depth = 0_usize;
+    let mut link: Option<(String, String, usize)> = None;
+    for event in EventReader::from_str(nav) {
+        match event {
+            Ok(XmlEvent::StartElement {
+                name, attributes, ..
+            }) => {
+                if nav_depth == 0 {
+                    if name.local_name != "nav"
+                        || !attributes.iter().any(|attr| {
+                            (attr.name.local_name == "type"
+                                && attr.value.split_whitespace().any(|part| part == "toc"))
+                                || (attr.name.local_name == "role" && attr.value == "doc-toc")
+                        })
+                    {
+                        continue;
+                    }
+                    nav_depth = 1;
+                    continue;
+                }
+                nav_depth += 1;
+                match name.local_name.as_str() {
+                    "ol" => list_depth += 1,
+                    "li" => item_depth += 1,
+                    "a" if item_depth > 0 && (1..=3).contains(&list_depth) => {
+                        if let Some(href) = attributes
+                            .iter()
+                            .find(|attr| attr.name.local_name == "href")
+                            .map(|attr| attr.value.as_str())
+                        {
+                            let base = nav_path.parent().unwrap_or(Path::new(""));
+                            let target = if href.starts_with('#') {
+                                format!("{}{}", nav_path.to_string_lossy(), href)
+                            } else {
+                                base.join(href).to_string_lossy().into_owned()
+                            };
+                            link = Some((target, String::new(), list_depth - 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(XmlEvent::Characters(text))
+            | Ok(XmlEvent::CData(text))
+            | Ok(XmlEvent::Whitespace(text)) => {
+                if let Some((_, label, _)) = link.as_mut() {
+                    label.push_str(&text);
+                }
+            }
+            Ok(XmlEvent::EndElement { name }) if nav_depth > 0 => {
+                match name.local_name.as_str() {
+                    "a" => {
+                        if let Some((href, title, level)) = link.take() {
+                            let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+                            if !title.is_empty() {
+                                entries.push(RawTocEntry { title, level, href });
+                            }
+                        }
+                    }
+                    "li" => item_depth = item_depth.saturating_sub(1),
+                    "ol" => list_depth = list_depth.saturating_sub(1),
+                    _ => {}
+                }
+                nav_depth -= 1;
+            }
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    entries
+}
+
+fn normalized_content_path(path: &str) -> String {
+    let mut parts = Vec::new();
+    for part in percent_decode(path).replace('\\', "/").split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            value => parts.push(value.to_string()),
+        }
+    }
+    parts.join("/")
+}
+
+fn resolve_toc_entries(raw: Vec<RawTocEntry>, chapters: &[ChapterInfo]) -> Vec<TocEntry> {
+    let by_path: HashMap<_, _> = chapters
+        .iter()
+        .enumerate()
+        .map(|(index, chapter)| (normalized_content_path(&chapter.source_path), index))
+        .collect();
+    let mut entries = Vec::new();
+    let mut visible_ancestors = [None; 3];
+    for entry in raw {
+        if entry.level >= 3 {
+            continue;
+        }
+        visible_ancestors[entry.level..].fill(None);
+        let title = entry.title.trim();
+        let (path, fragment) =
+            entry
+                .href
+                .split_once('#')
+                .map_or((entry.href.as_str(), None), |(path, fragment)| {
+                    (
+                        path,
+                        (!fragment.is_empty()).then(|| percent_decode(fragment)),
+                    )
+                });
+        let path = path.split('?').next().unwrap_or(path);
+        let Some(&chapter) = by_path.get(&normalized_content_path(path)) else {
+            continue;
+        };
+        if title.is_empty() {
+            continue;
+        }
+        // A publisher can put a non-spine page in the NCX. If that parent
+        // cannot be opened, promote its children under the nearest visible
+        // ancestor instead of leaving an unexplained indentation.
+        let level = (0..entry.level)
+            .rev()
+            .find_map(|ancestor| visible_ancestors[ancestor])
+            .map_or(0, |parent| parent + 1);
+        visible_ancestors[entry.level] = Some(level);
+        entries.push(TocEntry {
+            title: title.to_string(),
+            level,
+            chapter,
+            fragment,
+        });
+    }
+    entries
 }
 
 /// 把包内图片资源提取到书目录的 res/（幂等），返回 文件名 → 绝对路径。
@@ -489,6 +719,10 @@ fn hoist_table_captions(html: &str) -> String {
 /// 面向 Html widget 的消毒：白名单标签保留原样；未知标签（div/section/span/figure…）
 /// 去掉标签本身、保留内部内容；DROP_TAGS 连内容删除；注释/声明剔除。
 pub fn sanitize_for_reader(html: &str) -> String {
+    sanitize_for_reader_with_anchors(html, &HashSet::new())
+}
+
+fn sanitize_for_reader_with_anchors(html: &str, toc_fragments: &HashSet<String>) -> String {
     let html = hoist_table_captions(html);
     let html = html.as_str();
     let mut out = String::with_capacity(html.len());
@@ -555,6 +789,30 @@ pub fn sanitize_for_reader(html: &str) -> String {
                 figure_depth = figure_depth.saturating_sub(1);
             } else if !inner.trim_end().ends_with('/') {
                 figure_depth += 1;
+            }
+        }
+
+        if !toc_fragments.is_empty()
+            && !is_close
+            && !KEEP_TAGS.contains(&name.as_str())
+            && link_stack.last() != Some(&true)
+        {
+            // A TOC entry often points at a section/div wrapper. The wrapper
+            // itself is removed below, but its destination must survive.
+            let tag = &html[lt..=gt];
+            let id = quoted_attr(tag, "id").filter(|id| toc_fragments.contains(*id));
+            let anchor_name = quoted_attr(tag, "name").filter(|name| toc_fragments.contains(*name));
+            if id.is_some() || anchor_name.is_some() {
+                out.push_str("<a data-reader-toc=\"1\"");
+                for (attr, value) in [("id", id), ("name", anchor_name)] {
+                    let Some(value) = value else { continue };
+                    out.push(' ');
+                    out.push_str(attr);
+                    out.push_str("=\"");
+                    out.push_str(&value.replace('"', "&quot;"));
+                    out.push('"');
+                }
+                out.push_str("></a>");
             }
         }
 
@@ -669,10 +927,12 @@ pub fn split_blocks(html: &str) -> Vec<String> {
         // malformed books that leave plain title text immediately before `<table>`.
         if !is_close && name == "table" && depth == 0 {
             let prefix = buf.trim();
-            if !prefix.is_empty() {
+            if !prefix.is_empty() && !only_toc_anchor_markers(prefix) {
                 blocks.push(prefix.to_string());
+                buf.clear();
+            } else if prefix.is_empty() {
+                buf.clear();
             }
-            buf.clear();
         }
         buf.push_str(&html[lt..=gt]);
         if !VOID.contains(&name.as_str()) && !self_close && !name.is_empty() {
@@ -681,15 +941,17 @@ pub fn split_blocks(html: &str) -> Vec<String> {
         if depth <= 0 && is_close {
             depth = 0;
             let block = buf.trim();
-            if !block.is_empty() {
+            if block.is_empty() {
+                buf.clear();
+            } else if !only_toc_anchor_markers(block) {
                 blocks.push(block.to_string());
+                buf.clear();
             }
-            buf.clear();
         }
         i = gt + 1;
     }
     let tail = buf.trim();
-    if !tail.is_empty() {
+    if !tail.is_empty() && !only_toc_anchor_markers(tail) {
         blocks.push(tail.to_string());
     }
     if blocks.is_empty() {
@@ -698,11 +960,28 @@ pub fn split_blocks(html: &str) -> Vec<String> {
     blocks
 }
 
+fn strip_toc_anchor_prefix(mut html: &str) -> &str {
+    loop {
+        html = html.trim_start();
+        if !html.starts_with("<a data-reader-toc=\"1\"") {
+            return html;
+        }
+        let Some(end) = html.find("</a>") else {
+            return html;
+        };
+        html = &html[end + "</a>".len()..];
+    }
+}
+
+fn only_toc_anchor_markers(html: &str) -> bool {
+    strip_toc_anchor_prefix(html).trim().is_empty()
+}
+
 /// 从一个顶层 `<pre>` 块中恢复供原生代码视图使用的纯文本。
 /// EPUB 常用 span 包裹语法 token，并用实体表示源码中的尖括号；这些
 /// 展示标记应被剥掉，但缩进、空格、显式换行和注释文本必须原样保留。
 pub fn code_block_text(html: &str) -> Option<String> {
-    let trimmed = html.trim();
+    let trimmed = strip_toc_anchor_prefix(html.trim()).trim();
     let lower = trimmed.to_ascii_lowercase();
     let pre_start = lower.find("<pre")?;
     if !trimmed[..pre_start].trim().is_empty() {
@@ -813,6 +1092,132 @@ mod tests {
     use super::*;
 
     #[test]
+    fn epub3_navigation_keeps_three_levels_and_fragment_targets() {
+        let nav = r#"<?xml version="1.0" encoding="utf-8"?>
+            <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+              <body><nav epub:type="toc"><ol>
+                <li><a href="Text/one.xhtml">Part One</a><ol>
+                  <li><a href="Text/one.xhtml#first">First <span>section</span></a><ol>
+                    <li><a href="Text/one.xhtml#detail%20one">Detail</a><ol>
+                      <li><a href="Text/one.xhtml#too-deep">Too deep</a></li>
+                    </ol></li>
+                  </ol></li>
+                </ol></li>
+                <li><a href="Text/two.xhtml">Part Two</a></li>
+              </ol></nav></body>
+            </html>"#;
+        let raw = parse_epub3_nav(nav, Path::new("OEBPS/nav.xhtml"));
+        let chapters = [
+            ChapterInfo {
+                title: "One".into(),
+                html: String::new(),
+                source_path: "OEBPS/Text/one.xhtml".into(),
+                figure_targets: HashMap::new(),
+            },
+            ChapterInfo {
+                title: "Two".into(),
+                html: String::new(),
+                source_path: "OEBPS/Text/two.xhtml".into(),
+                figure_targets: HashMap::new(),
+            },
+        ];
+        let toc = resolve_toc_entries(raw, &chapters);
+        assert_eq!(
+            toc,
+            vec![
+                TocEntry {
+                    title: "Part One".into(),
+                    level: 0,
+                    chapter: 0,
+                    fragment: None
+                },
+                TocEntry {
+                    title: "First section".into(),
+                    level: 1,
+                    chapter: 0,
+                    fragment: Some("first".into())
+                },
+                TocEntry {
+                    title: "Detail".into(),
+                    level: 2,
+                    chapter: 0,
+                    fragment: Some("detail one".into())
+                },
+                TocEntry {
+                    title: "Part Two".into(),
+                    level: 0,
+                    chapter: 1,
+                    fragment: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ncx_navigation_preserves_order_and_stops_after_third_level() {
+        fn point(label: &str, href: &str, children: Vec<NavPoint>) -> NavPoint {
+            NavPoint {
+                label: label.into(),
+                content: href.into(),
+                children,
+                play_order: None,
+            }
+        }
+        let points = vec![point(
+            "Chapter",
+            "OEBPS/Text/chapter.xhtml",
+            vec![point(
+                "Section",
+                "OEBPS/Text/chapter.xhtml#section",
+                vec![point(
+                    "Subsection",
+                    "OEBPS/Text/chapter.xhtml#subsection",
+                    vec![point("Hidden", "OEBPS/Text/chapter.xhtml#hidden", vec![])],
+                )],
+            )],
+        )];
+        let mut raw = Vec::new();
+        flatten_ncx(&points, 0, &mut raw);
+        assert_eq!(
+            raw.iter()
+                .map(|entry| (entry.title.as_str(), entry.level))
+                .collect::<Vec<_>>(),
+            [("Chapter", 0), ("Section", 1), ("Subsection", 2)]
+        );
+    }
+
+    #[test]
+    fn missing_navigation_parent_does_not_orphan_its_children() {
+        let raw = vec![
+            RawTocEntry {
+                title: "Outside spine".into(),
+                level: 0,
+                href: "OEBPS/cover.xhtml".into(),
+            },
+            RawTocEntry {
+                title: "Readable chapter".into(),
+                level: 1,
+                href: "OEBPS/Text/chapter.xhtml#start".into(),
+            },
+        ];
+        let chapters = [ChapterInfo {
+            title: "Chapter".into(),
+            html: String::new(),
+            source_path: "OEBPS/Text/chapter.xhtml".into(),
+            figure_targets: HashMap::new(),
+        }];
+        assert_eq!(
+            resolve_toc_entries(raw, &chapters),
+            vec![TocEntry {
+                title: "Readable chapter".into(),
+                level: 0,
+                chapter: 0,
+                fragment: Some("start".into()),
+            }]
+        );
+    }
+
+    #[test]
     fn sanitize_unwraps_containers_keeps_content() {
         let src = r##"<section class="chapter"><div id="x"><h1>Title</h1><p>Hello <span class="k">world</span> <a href="#f1">link</a></p></div></section>"##;
         let out = sanitize_for_reader(src);
@@ -820,6 +1225,31 @@ mod tests {
             out,
             "<h1>Title</h1><p>Hello world <a href=\"#f1\">link</a></p>"
         );
+    }
+
+    #[test]
+    fn toc_target_on_unwrapped_section_stays_in_its_heading_block() {
+        let html = "<section id=\"part\"><h2>Part</h2><p>Body</p></section>";
+        let plain = split_blocks(&sanitize_for_reader(html));
+        let with_toc = split_blocks(&sanitize_for_reader_with_anchors(
+            html,
+            &HashSet::from(["part".to_string()]),
+        ));
+        assert_eq!(with_toc.len(), plain.len());
+        assert!(with_toc[0].contains("id=\"part\""));
+        assert!(with_toc[0].contains("<h2>Part</h2>"));
+        assert_eq!(with_toc[1], plain[1]);
+    }
+
+    #[test]
+    fn toc_anchor_before_code_keeps_the_native_code_block() {
+        let html = "<section id=\"example\"><pre><code>let x = 1;</code></pre></section>";
+        let with_toc = split_blocks(&sanitize_for_reader_with_anchors(
+            html,
+            &HashSet::from(["example".to_string()]),
+        ));
+        assert_eq!(with_toc.len(), 1);
+        assert_eq!(code_block_text(&with_toc[0]).as_deref(), Some("let x = 1;"));
     }
 
     #[test]

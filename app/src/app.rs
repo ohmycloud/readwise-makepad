@@ -2321,8 +2321,8 @@ struct OpenBook {
     glossed_chapter_chunks: Vec<Option<Vec<String>>>,
     glosses: HashMap<String, String>,
     known_words: HashSet<String>,
-    /// 各章标题（TOC 用）。
-    chapter_titles: Vec<String>,
+    /// EPUB navigation entries, including anchors within a spine document.
+    toc: Vec<readwise_core::books::epub_meta::TocEntry>,
     /// 各章高亮（章下标 → 区间列表）。
     highlights: HashMap<usize, Vec<readwise_core::books::Highlight>>,
 }
@@ -2516,7 +2516,7 @@ mod lazy_gloss_tests {
                 ("murmur".to_string(), "低语".to_string()),
             ]),
             known_words: HashSet::new(),
-            chapter_titles: vec!["One".to_string(), "Two".to_string()],
+            toc: Vec::new(),
             highlights: HashMap::new(),
         }
     }
@@ -3170,9 +3170,9 @@ fn spawn_open_book(item: ShelfItem) {
     *CURRENT_ITEM.write().unwrap() = Some(item.clone());
     std::thread::spawn(move || {
         let open_started = std::time::Instant::now();
-        let infos = match readwise_core::books::epub_meta::load_chapters(std::path::Path::new(
-            &item.file_path,
-        )) {
+        let loaded = match readwise_core::books::epub_meta::load_chapters_with_toc(
+            std::path::Path::new(&item.file_path),
+        ) {
             Ok(list) => list,
             Err(e) => {
                 Cx::post_action(ReaderAction::OpenError {
@@ -3182,12 +3182,10 @@ fn spawn_open_book(item: ShelfItem) {
                 return;
             }
         };
-        let mut chapters = Vec::with_capacity(infos.len());
-        let mut chapter_titles = Vec::with_capacity(infos.len());
-        let mut chapter_paths = Vec::with_capacity(infos.len());
-        let mut figure_targets = Vec::with_capacity(infos.len());
-        for info in infos {
-            chapter_titles.push(info.title);
+        let mut chapters = Vec::with_capacity(loaded.chapters.len());
+        let mut chapter_paths = Vec::with_capacity(loaded.chapters.len());
+        let mut figure_targets = Vec::with_capacity(loaded.chapters.len());
+        for info in loaded.chapters {
             chapter_paths.push(info.source_path);
             figure_targets.push(info.figure_targets);
             chapters.push(info.html);
@@ -3215,7 +3213,7 @@ fn spawn_open_book(item: ShelfItem) {
             chapters,
             chapter_paths,
             figure_targets,
-            chapter_titles,
+            toc: loaded.toc,
             glosses,
             known_words,
             highlights,
@@ -3318,7 +3316,7 @@ mod highlight_overlap_tests {
             glossed_chapter_chunks: Vec::new(),
             glosses: HashMap::new(),
             known_words: HashSet::new(),
-            chapter_titles: Vec::new(),
+            toc: Vec::new(),
             highlights: HashMap::from([(
                 2,
                 vec![
@@ -8238,31 +8236,49 @@ impl Widget for TocList {
             .as_ref()
             .map(|item| item.id.clone());
         let guard = CURRENT_BOOK.read().unwrap();
-        let titles: &[String] = guard
+        let ready_book = guard
             .as_ref()
-            .filter(|book| requested_id.as_deref() == Some(book.id.as_str()))
-            .map(|b| b.chapter_titles.as_slice())
-            .unwrap_or(&[]);
+            .filter(|book| requested_id.as_deref() == Some(book.id.as_str()));
+        let toc: &[readwise_core::books::epub_meta::TocEntry] =
+            ready_book.map(|b| b.toc.as_slice()).unwrap_or(&[]);
         let current = CURRENT_CHAPTER.load(std::sync::atomic::Ordering::Relaxed);
+        let current_block = CURRENT_READER_BLOCK.load(Ordering::Relaxed);
+        let current_chunks = ready_book
+            .and_then(|book| book.chapters.get(current))
+            .map(|chapter| readwise_core::books::epub_meta::split_blocks(chapter));
+        let active = current_chunks.as_deref().and_then(|chunks| {
+            toc.iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.chapter == current)
+                .filter_map(|(index, entry)| {
+                    let block = entry
+                        .fragment
+                        .as_deref()
+                        .map_or(0, |fragment| reader_anchor_block(chunks, fragment));
+                    (block <= current_block).then_some((index, block, entry.level))
+                })
+                .max_by_key(|(_, block, level)| (*block, *level))
+                .map(|(index, _, _)| index)
+        });
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                list.set_item_range(cx, 0, titles.len());
+                list.set_item_range(cx, 0, toc.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let Some(title) = titles.get(item_id) else {
+                    let Some(entry) = toc.get(item_id) else {
                         continue;
                     };
                     let item = list.item(cx, item_id, id!(TocItem));
-                    let text = format!("{}. {}", item_id + 1, title);
                     let label = item.label(cx, ids!(toc_item_label));
-                    if label.text() != text {
-                        label.set_text(cx, &text);
+                    if label.text() != entry.title {
+                        label.set_text(cx, &entry.title);
                     }
                     if let Some(mut inner) = label.borrow_mut() {
                         inner.draw_text.color = self.text_color;
+                        inner.walk.margin.left = entry.level as f64 * 18.0;
                     }
                     if let Some(mut inner) = item.borrow_mut::<View>() {
-                        let color = if item_id == current {
+                        let color = if Some(item_id) == active {
                             self.active_bg
                         } else {
                             self.inactive_bg
@@ -14661,8 +14677,25 @@ impl MatchEvent for App {
             .portal_list(cx, ids!(list));
         for (item_id, item) in toc_list.items_with_actions(actions) {
             if item.button(cx, ids!(toc_item_btn)).clicked(actions) {
-                if CURRENT_BOOK.read().unwrap().is_some() {
-                    self.set_chapter(cx, item_id);
+                let target = CURRENT_BOOK
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|book| book.toc.get(item_id).cloned());
+                if let Some(target) = target {
+                    let block = CURRENT_BOOK
+                        .write()
+                        .unwrap()
+                        .as_mut()
+                        .and_then(|book| build_chapter_chunks(book, target.chapter))
+                        .map(|chunks| {
+                            target
+                                .fragment
+                                .as_deref()
+                                .map_or(0, |fragment| reader_anchor_block(&chunks, fragment))
+                        })
+                        .unwrap_or(0);
+                    self.set_chapter_at(cx, target.chapter, block, 0.0, true);
                     self.toc_open = false;
                     self.sync_reader_panel_layout(cx);
                     self.ui.redraw(cx);
