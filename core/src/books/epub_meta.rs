@@ -19,6 +19,8 @@ pub struct ChapterInfo {
     pub html: String,
     /// Path of this spine document inside the EPUB archive, for relative links.
     pub source_path: String,
+    /// Fragment IDs inside figures, mapped to the extracted original image.
+    pub figure_targets: HashMap<String, String>,
 }
 
 /// 加载全书章节（已消毒 + 提取标题 + 图片落盘并改写 src，阅读器可直接渲染）。
@@ -38,7 +40,9 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
             .get_current_str()
             .map(|(s, _mime)| s)
             .unwrap_or_default();
-        let body = sanitize_for_reader(&extract_body(&html));
+        let body = extract_body(&html);
+        let figure_targets = figure_image_targets(&body, &images);
+        let body = sanitize_for_reader(&body);
         if body.trim().is_empty() {
             continue;
         }
@@ -48,6 +52,7 @@ pub fn load_chapters<P: AsRef<Path>>(path: P) -> Result<Vec<ChapterInfo>, String
             title,
             html: body,
             source_path,
+            figure_targets,
         });
     }
     if out.is_empty() {
@@ -106,6 +111,80 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Figure cross-references may point to an ID on the outer `<div>` or on a
+/// caption anchor. Those wrappers are removed for Makepad Html, so capture the
+/// relationship before sanitizing the chapter.
+fn figure_image_targets(html: &str, images: &HashMap<String, String>) -> HashMap<String, String> {
+    let lower = html.to_ascii_lowercase();
+    let mut targets = HashMap::new();
+    let mut cursor = 0;
+    while let Some(relative) = lower[cursor..].find("<figure") {
+        let start = cursor + relative;
+        let after_name = start + "<figure".len();
+        if !lower
+            .as_bytes()
+            .get(after_name)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'>')
+        {
+            cursor = after_name;
+            continue;
+        }
+        let Some(open_end) = lower[start..].find('>').map(|offset| start + offset) else {
+            break;
+        };
+        let Some(close_start) = lower[open_end + 1..]
+            .find("</figure>")
+            .map(|offset| open_end + 1 + offset)
+        else {
+            cursor = open_end + 1;
+            continue;
+        };
+        let figure = &html[start..close_start];
+        let mut ids = Vec::new();
+        let mut image = None;
+        let mut tag_cursor = 0;
+        while let Some(relative) = figure[tag_cursor..].find('<') {
+            let tag_start = tag_cursor + relative;
+            let Some(tag_end) = figure[tag_start..]
+                .find('>')
+                .map(|offset| tag_start + offset)
+            else {
+                break;
+            };
+            let tag = &figure[tag_start..=tag_end];
+            let inner = tag[1..tag.len() - 1].trim_start();
+            if !inner.starts_with('/') {
+                let name = inner
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric())
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                if let Some(id) = quoted_attr(tag, "id") {
+                    ids.push(id.to_string());
+                }
+                if name == "a" {
+                    if let Some(name) = quoted_attr(tag, "name") {
+                        ids.push(name.to_string());
+                    }
+                }
+                if name == "img" && image.is_none() {
+                    image = quoted_attr(tag, "src")
+                        .map(|src| percent_decode(src.rsplit('/').next().unwrap_or(src)))
+                        .and_then(|file| images.get(&file).cloned());
+                }
+            }
+            tag_cursor = tag_end + 1;
+        }
+        if let Some(image) = image {
+            for id in ids {
+                targets.insert(id, image.clone());
+            }
+        }
+        cursor = close_start + "</figure>".len();
+    }
+    targets
 }
 
 /// 把 <img src="包内相对路径"> 改写为提取后的绝对路径（按文件名匹配）。
@@ -734,6 +813,35 @@ mod tests {
             sanitize_for_reader(html),
             "<p><a id=\"part\" name=\"old\"></a>Heading <a href=\"../next.xhtml#part\">Next</a> Unsafe</p>"
         );
+    }
+
+    #[test]
+    fn figure_targets_include_wrapper_and_caption_anchors() {
+        let images = HashMap::from([
+            ("first.png".to_string(), "/books/res/first.png".to_string()),
+            (
+                "second.png".to_string(),
+                "/books/res/second.png".to_string(),
+            ),
+        ]);
+        let html = concat!(
+            r##"<p><a href="#fig0301">Figure 3-1</a></p>"##,
+            r#"<figure><div class="figure" id="fig0301"><img src="assets/first.png"/>"#,
+            r#"<h6>Figure 3-1</h6></div></figure>"#,
+            r#"<figure><img src="images/second.png"/><figcaption>"#,
+            r#"<a id="figure3-2">Figure 3-2</a></figcaption></figure>"#,
+        );
+        let targets = figure_image_targets(html, &images);
+        assert_eq!(
+            targets.get("fig0301").map(String::as_str),
+            Some("/books/res/first.png")
+        );
+        assert_eq!(
+            targets.get("figure3-2").map(String::as_str),
+            Some("/books/res/second.png")
+        );
+        assert!(!targets.contains_key("missing"));
+        assert!(!sanitize_for_reader(html).contains("id=\"fig0301\""));
     }
 
     #[test]

@@ -2301,6 +2301,7 @@ struct OpenBook {
     /// 各章原始 body HTML（已消毒，不含运行时注音）。
     chapters: Vec<String>,
     chapter_paths: Vec<String>,
+    figure_targets: Vec<HashMap<String, String>>,
     /// 按访问惰性生成、已切块的注音章节；关闭注音时仍从原始章节投影。
     /// 直接缓存 PortalList 所需的块，避免每次设置刷新或旋转恢复都重新 split_blocks。
     glossed_chapter_chunks: Vec<Option<Vec<String>>>,
@@ -2396,6 +2397,7 @@ impl OpenBook {
 #[derive(Debug, PartialEq)]
 enum ReaderLinkTarget {
     External(String),
+    Image(String),
     Chapter {
         index: usize,
         fragment: Option<String>,
@@ -2417,6 +2419,21 @@ fn normalized_epub_path(path: &str) -> String {
     parts.join("/")
 }
 
+fn chapter_link_target(
+    book: &OpenBook,
+    index: usize,
+    fragment: Option<String>,
+) -> ReaderLinkTarget {
+    if let Some(image) = fragment
+        .as_deref()
+        .and_then(|id| book.figure_targets.get(index)?.get(id))
+    {
+        ReaderLinkTarget::Image(image.clone())
+    } else {
+        ReaderLinkTarget::Chapter { index, fragment }
+    }
+}
+
 fn resolve_reader_link(book: &OpenBook, current: usize, href: &str) -> ReaderLinkTarget {
     let href = href.trim();
     if href.starts_with("https://") || href.starts_with("http://") || href.starts_with("mailto:") {
@@ -2435,10 +2452,7 @@ fn resolve_reader_link(book: &OpenBook, current: usize, href: &str) -> ReaderLin
         });
     let path = path.split('?').next().unwrap_or(path);
     if path.is_empty() {
-        return ReaderLinkTarget::Chapter {
-            index: current,
-            fragment,
-        };
+        return chapter_link_target(book, current, fragment);
     }
     let relative = percent_decode_path(path);
     let base = book
@@ -2451,7 +2465,7 @@ fn resolve_reader_link(book: &OpenBook, current: usize, href: &str) -> ReaderLin
         .iter()
         .position(|path| normalized_epub_path(path) == target)
         .map_or(ReaderLinkTarget::Unsupported, |index| {
-            ReaderLinkTarget::Chapter { index, fragment }
+            chapter_link_target(book, index, fragment)
         })
 }
 
@@ -2481,6 +2495,7 @@ mod lazy_gloss_tests {
                 "<p>A murmur.</p>".to_string(),
             ],
             chapter_paths: vec!["Text/one.xhtml".into(), "Text/two.xhtml".into()],
+            figure_targets: vec![HashMap::new(), HashMap::new()],
             glossed_chapter_chunks: vec![None, None],
             glosses: HashMap::from([
                 ("solitude".to_string(), "孤独".to_string()),
@@ -2582,7 +2597,9 @@ mod lazy_gloss_tests {
 
     #[test]
     fn reader_links_resolve_external_relative_and_fragment_targets() {
-        let book = book();
+        let mut book = book();
+        book.figure_targets[0].insert("fig3-1".into(), "/books/res/fig3-1.png".into());
+        book.figure_targets[1].insert("fig3-2".into(), "/books/res/fig3-2.png".into());
         assert_eq!(
             resolve_reader_link(&book, 0, "https://example.org/"),
             ReaderLinkTarget::External("https://example.org/".into())
@@ -2600,6 +2617,14 @@ mod lazy_gloss_tests {
                 index: 1,
                 fragment: Some("part".into())
             }
+        );
+        assert_eq!(
+            resolve_reader_link(&book, 0, "#fig3-1"),
+            ReaderLinkTarget::Image("/books/res/fig3-1.png".into())
+        );
+        assert_eq!(
+            resolve_reader_link(&book, 0, "two.xhtml#fig3-2"),
+            ReaderLinkTarget::Image("/books/res/fig3-2.png".into())
         );
         assert_eq!(
             resolve_reader_link(&book, 0, "javascript:bad()"),
@@ -3138,9 +3163,11 @@ fn spawn_open_book(item: ShelfItem) {
         let mut chapters = Vec::with_capacity(infos.len());
         let mut chapter_titles = Vec::with_capacity(infos.len());
         let mut chapter_paths = Vec::with_capacity(infos.len());
+        let mut figure_targets = Vec::with_capacity(infos.len());
         for info in infos {
             chapter_titles.push(info.title);
             chapter_paths.push(info.source_path);
+            figure_targets.push(info.figure_targets);
             chapters.push(info.html);
         }
         let parse_ms = open_started.elapsed().as_millis();
@@ -3165,6 +3192,7 @@ fn spawn_open_book(item: ShelfItem) {
             glossed_chapter_chunks: vec![None; chapters.len()],
             chapters,
             chapter_paths,
+            figure_targets,
             chapter_titles,
             glosses,
             known_words,
@@ -3254,6 +3282,7 @@ mod highlight_overlap_tests {
             title: String::new(),
             chapters: Vec::new(),
             chapter_paths: Vec::new(),
+            figure_targets: Vec::new(),
             glossed_chapter_chunks: Vec::new(),
             glosses: HashMap::new(),
             known_words: HashSet::new(),
@@ -13564,6 +13593,9 @@ impl MatchEvent for App {
                     match target {
                         Some(ReaderLinkTarget::External(url)) => {
                             cx.open_url(&url, OpenUrlInPlace::No)
+                        }
+                        Some(ReaderLinkTarget::Image(path)) => {
+                            self.open_reader_image_viewer(cx, &path)
                         }
                         Some(ReaderLinkTarget::Chapter { index, fragment }) => {
                             let block = CURRENT_BOOK
