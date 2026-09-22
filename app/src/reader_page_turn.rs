@@ -195,6 +195,16 @@ impl PageTurn {
         self.transition.available = available;
     }
 
+    /// A new turn can use the already-rendered incoming page immediately.
+    /// Keep waiting only while its first snapshot is still unavailable.
+    pub fn finish_if_ready(&mut self) -> bool {
+        if !self.transition.busy() || !self.transition.available {
+            return false;
+        }
+        self.finish();
+        true
+    }
+
     pub fn request(&mut self, cx: &mut Cx, forward: bool) {
         if self.transition.request(forward) {
             if let Some(surface) = &mut self.surface {
@@ -305,6 +315,21 @@ impl PageTurn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ready_page_turn_can_be_interrupted_by_the_next_turn() {
+        let mut turn = PageTurn::default();
+        turn.transition.waiting = true;
+        assert!(!turn.finish_if_ready());
+        assert!(turn.busy());
+
+        turn.transition.available = true;
+        turn.transition.started = Some(1.0);
+        turn.transition.waiting = false;
+        assert!(turn.finish_if_ready());
+        assert!(!turn.busy());
+        assert!(turn.transition.available);
+    }
 
     #[test]
     fn no_animation_before_a_ready_snapshot() {

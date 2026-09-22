@@ -6969,6 +6969,12 @@ impl ChapterList {
     /// keep the current page in place until the next draw completes them.
     fn turn_page(&mut self, cx: &mut Cx, forward: bool) -> bool {
         use crate::reader_columns::PageAnchor;
+        if self.pager.page_ready() {
+            // The current destination has already been painted. A quick
+            // opposite-direction click should turn from it immediately,
+            // even while its visual transition is still finishing.
+            self.page_turn.finish_if_ready();
+        }
         if self.page_turn.busy() || !self.pager.page_ready() {
             self.pager.pending_turn = Some(forward);
             self.pager.measure_frame = cx.new_next_frame();
