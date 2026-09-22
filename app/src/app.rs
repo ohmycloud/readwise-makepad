@@ -4357,15 +4357,18 @@ script_mod! {
         flow: Down spacing: 6
         draw_bg.color: theme.color_bg_container
         draw_bg.border_radius: 7.0
+        note_bound_id := Label{visible: false text: ""}
         note_quote_title := Label{
             width: Fill
             text: "引用"
             draw_text.color: theme.color_highlight
             draw_text.text_style.font_size: 9
         }
-        note_quote := Label{
+        note_quote := TextInput{
             width: Fill
-            text: ""
+            height: Fit
+            is_multiline: true
+            is_read_only: true
             draw_text.text_style.font_size: 10
         }
         note_body_title := Label{
@@ -4377,7 +4380,18 @@ script_mod! {
         note_body_input := TextInput{
             width: Fill
             height: 54
+            is_multiline: true
             empty_text: "补充笔记（可编辑）"
+            scroll_bar: ScrollBar{
+                draw_bg +: {
+                    color: #0000
+                    color_hover: #x66877c88
+                    color_drag: #x4f776cbb
+                    border_color: #0000
+                    border_color_hover: #0000
+                    border_color_drag: #0000
+                }
+            }
         }
         note_actions := View{
             width: Fill height: Fit
@@ -4394,7 +4408,19 @@ script_mod! {
         list := PortalList{
             width: Fill height: Fill
             spacing: 8
-            scroll_bar: ScrollBar{}
+            // Text inputs own pointer drags for selecting and copying notes.
+            // The list still scrolls with the wheel and its scrollbar.
+            drag_scrolling: false
+            scroll_bar: ScrollBar{
+                draw_bg +: {
+                    color: #0000
+                    color_hover: #x66877c88
+                    color_drag: #x4f776cbb
+                    border_color: #0000
+                    border_color_hover: #0000
+                    border_color_drag: #0000
+                }
+            }
             NoteCard := NoteCardTemplate{}
             NoteCardAlternate := NoteCardTemplate{}
         }
@@ -5147,9 +5173,11 @@ script_mod! {
                                             draw_text.color: theme.color_highlight
                                             draw_text.text_style.font_size: 9
                                         }
-                                        note_quote := Label{
+                                        note_quote := TextInput{
                                             width: Fill
-                                            text: ""
+                                            height: Fit
+                                            is_multiline: true
+                                            is_read_only: true
                                             draw_text.color: theme.color_text
                                             draw_text.text_style.font_size: 9.5
                                         }
@@ -8416,6 +8444,10 @@ impl Widget for NoteList {
             *READER_BACKGROUND.read().unwrap(),
             *READER_THEME.read().unwrap(),
         );
+        let note_input_palette = ReaderScenePalette {
+            field: palette.surface,
+            ..palette
+        };
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, projection.entries.len());
@@ -8437,16 +8469,19 @@ impl Widget for NoteList {
                     let (quote, body) = split_note_content(&note.content);
                     item.label(cx, ids!(note_quote_title))
                         .set_text(cx, crate::i18n::text(language, "quote"));
-                    item.label(cx, ids!(note_quote)).set_text(cx, quote);
                     item.label(cx, ids!(note_body_title))
                         .set_text(cx, crate::i18n::text(language, "note"));
+                    let binding = format!("{}:{}", projection.revision, note.id);
+                    let bound_id = item.label(cx, ids!(note_bound_id));
                     let body_input = item.text_input(cx, ids!(note_body_input));
-                    body_input.set_empty_text(
-                        cx,
-                        crate::i18n::text(language, "note_placeholder").to_string(),
-                    );
-                    if body_input.text() != body {
+                    let placeholder = crate::i18n::text(language, "note_placeholder");
+                    if body_input.empty_text() != placeholder {
+                        body_input.set_empty_text(cx, placeholder.to_string());
+                    }
+                    if bound_id.text() != binding {
+                        item.text_input(cx, ids!(note_quote)).set_text(cx, quote);
                         body_input.set_text(cx, body);
+                        bound_id.set_text(cx, &binding);
                     }
                     item.widget(cx, ids!(note_delete_btn))
                         .set_text(cx, crate::i18n::text(language, "delete"));
@@ -8460,9 +8495,9 @@ impl Widget for NoteList {
                     let note_delete = item.widget(cx, ids!(note_delete_btn));
                     apply_reader_surface_palette(cx, item.clone(), palette.surface, palette.border);
                     apply_reader_label_palette(cx, note_quote_title, palette.accent);
-                    apply_reader_label_palette(cx, note_quote, palette.text);
+                    apply_reader_input_palette(cx, note_quote, note_input_palette);
                     apply_reader_label_palette(cx, note_body_title, palette.accent);
-                    apply_reader_input_palette(cx, note_body_input, palette);
+                    apply_reader_input_palette(cx, note_body_input, note_input_palette);
                     apply_reader_button_palette(cx, note_save, palette);
                     apply_reader_button_palette(cx, note_delete, palette);
                     item.draw_all_unscoped(cx);
@@ -9899,7 +9934,6 @@ impl App {
             id!(title),
             id!(status),
             id!(note_panel_title),
-            id!(note_quote),
             id!(note_empty_title),
             id!(reader_ai_title),
             id!(card_word),
@@ -9986,12 +10020,15 @@ impl App {
                 color_focus: #(destructive)
             }
         });
-        for id in [
-            id!(note_extra),
-            id!(reader_chat_input),
-            id!(library_rename_input),
-        ] {
+        for id in [id!(reader_chat_input), id!(library_rename_input)] {
             apply_reader_input_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
+        let note_input_palette = ReaderScenePalette {
+            field: palette.surface,
+            ..palette
+        };
+        for id in [id!(note_quote), id!(note_extra)] {
+            apply_reader_input_palette(cx, self.ui.widget(cx, &[id]), note_input_palette);
         }
 
         if let Some(mut toc) = self.ui.widget(cx, ids!(toc_list)).borrow_mut::<TocList>() {
@@ -12528,7 +12565,7 @@ impl App {
             .widget(cx, ids!(note_composer))
             .set_visible(cx, true);
         self.ui
-            .label(cx, ids!(note_quote))
+            .text_input(cx, ids!(note_quote))
             .set_text(cx, &self.note_quote_text);
         self.ui.text_input(cx, ids!(note_extra)).set_text(cx, "");
         self.ui.label(cx, ids!(note_hint)).set_text(
