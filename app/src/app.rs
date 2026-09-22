@@ -2037,6 +2037,29 @@ pub(crate) fn current_reader_image_palette() -> (Vec4f, Vec4f) {
     )
 }
 
+pub(crate) fn current_reader_link_color(hovered: bool, pressed: bool) -> Vec4f {
+    let background = *READER_BACKGROUND.read().unwrap();
+    let theme = *READER_THEME.read().unwrap();
+    let dark = background == ReaderBackground::Night
+        || (background == ReaderBackground::FollowTheme && theme == ReaderTheme::Dark);
+    let rgba = if dark {
+        if pressed {
+            0xff91_91ff
+        } else if hovered {
+            0xffc0_c0ff
+        } else {
+            0xffaa_aaff
+        }
+    } else if pressed {
+        0x8e1c_27ff
+    } else if hovered {
+        0xc02a_35ff
+    } else {
+        0xa923_2eff
+    };
+    Vec4f::from_u32(rgba)
+}
+
 #[derive(Clone, Copy)]
 struct ReaderScenePalette {
     surface: Vec4f,
@@ -4761,9 +4784,7 @@ script_mod! {
                 para_html := Html{
                     width: Fill height: Fit
                     selectable: true
-                    a.color: theme.color_text
-                    a.hover_color: theme.color_text_hover
-                    a.pressed_color: theme.color_text_focus
+                    a := mod.widgets.ReaderLink{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                     reader_run := mod.widgets.ReaderRun{}
@@ -4784,9 +4805,7 @@ script_mod! {
                     text_style_fixed.line_spacing: 2.2
                     paragraph_margin.bottom: 1.4
                     heading_margin.bottom: 1.1
-                    a.color: theme.color_text
-                    a.hover_color: theme.color_text_hover
-                    a.pressed_color: theme.color_text_focus
+                    a := mod.widgets.ReaderLink{}
                     ruby := mod.widgets.RubyWord{}
                     reader_run := mod.widgets.ReaderRun{}
                     reader_code := mod.widgets.ReaderInlineCode{}
@@ -4804,9 +4823,7 @@ script_mod! {
                 para_html := Html{
                     width: Fill{max: 960} height: Fit
                     selectable: true
-                    a.color: theme.color_text
-                    a.hover_color: theme.color_text_hover
-                    a.pressed_color: theme.color_text_focus
+                    a := mod.widgets.ReaderLink{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                     reader_code := mod.widgets.ReaderInlineCode{}
@@ -4827,9 +4844,7 @@ script_mod! {
                     text_style_bold.line_spacing: 2.2
                     text_style_italic.line_spacing: 2.2
                     text_style_fixed.line_spacing: 2.2
-                    a.color: theme.color_text
-                    a.hover_color: theme.color_text_hover
-                    a.pressed_color: theme.color_text_focus
+                    a := mod.widgets.ReaderLink{}
                     ruby := mod.widgets.RubyWord{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
@@ -15232,6 +15247,7 @@ impl AppMain for App {
         crate::ruby_word::script_mod(vm);
         crate::reader_hit::script_mod(vm);
         crate::reader_inline_code::script_mod(vm);
+        crate::reader_link::script_mod(vm);
         crate::chapter_image::script_mod(vm);
         crate::reader_page_turn::script_mod(vm);
         crate::mark_span::script_mod(vm);
