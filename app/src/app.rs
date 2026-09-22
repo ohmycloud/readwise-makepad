@@ -4630,6 +4630,8 @@ script_mod! {
                     mark := mod.widgets.MarkSpan{}
                     reader_run := mod.widgets.ReaderRun{}
                     reader_code := mod.widgets.ReaderInlineCode{}
+                    readeralignon := mod.widgets.ReaderTextAlignOn{}
+                    readeralignoff := mod.widgets.ReaderTextAlignOff{}
                 }
             }
             GlossPara := View{
@@ -4650,6 +4652,8 @@ script_mod! {
                     ruby := mod.widgets.RubyWord{}
                     reader_run := mod.widgets.ReaderRun{}
                     reader_code := mod.widgets.ReaderInlineCode{}
+                    readeralignon := mod.widgets.ReaderTextAlignOn{}
+                    readeralignoff := mod.widgets.ReaderTextAlignOff{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                 }
@@ -4668,6 +4672,8 @@ script_mod! {
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                     reader_code := mod.widgets.ReaderInlineCode{}
+                    readeralignon := mod.widgets.ReaderTextAlignOn{}
+                    readeralignoff := mod.widgets.ReaderTextAlignOff{}
                 }
             }
             TableGlossPara := View{
@@ -4690,6 +4696,8 @@ script_mod! {
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
                     reader_code := mod.widgets.ReaderInlineCode{}
+                    readeralignon := mod.widgets.ReaderTextAlignOn{}
+                    readeralignoff := mod.widgets.ReaderTextAlignOff{}
                 }
             }
             CodePaper := ReaderCodePara{

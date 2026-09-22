@@ -245,6 +245,8 @@ pub fn tracked_html(source: &str) -> Option<String> {
                     | "img"
                     | "a"
                     | "reader_code"
+                    | "readeralignon"
+                    | "readeralignoff"
             ) {
                 return None;
             }
@@ -276,6 +278,41 @@ script_mod! {
     use mod.prelude.widgets.*
     mod.widgets.ReaderRunBase = #(ReaderRun::register_widget(vm))
     mod.widgets.ReaderRun = set_type_default() do mod.widgets.ReaderRunBase{}
+    mod.widgets.ReaderTextAlignBase = #(ReaderTextAlign::register_widget(vm))
+    mod.widgets.ReaderTextAlignOn = set_type_default() do mod.widgets.ReaderTextAlignBase{center: true}
+    mod.widgets.ReaderTextAlignOff = set_type_default() do mod.widgets.ReaderTextAlignBase{center: false}
+}
+
+#[derive(Script, WidgetRegister)]
+pub struct ReaderTextAlign {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[live]
+    center: bool,
+}
+impl ScriptHook for ReaderTextAlign {}
+impl WidgetNode for ReaderTextAlign {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        Walk::default()
+    }
+    fn area(&self) -> Area {
+        Area::Empty
+    }
+    fn redraw(&mut self, _cx: &mut Cx) {}
+}
+impl Widget for ReaderTextAlign {
+    fn draw_walk(&mut self, _cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+            tf.cell_text_align_x = if self.center { 0.5 } else { 0.0 };
+        }
+        DrawStep::done()
+    }
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 }
 
 #[derive(Script, WidgetRegister)]
@@ -321,6 +358,17 @@ impl Widget for ReaderRun {
 mod tests {
     use super::*;
     use makepad_widgets::makepad_html::parse_html;
+
+    #[test]
+    fn centered_caption_keeps_tracked_text_offsets() {
+        let source = "<h6><readeralignon></readeralignon>Figure 3-25. A centered caption<readeralignoff></readeralignoff></h6>";
+        let tracked = tracked_html(source).expect("caption must retain row hit testing");
+        assert!(tracked.contains("<reader_run>Figure 3-25. A centered caption</reader_run>"));
+        assert_eq!(
+            readwise_core::vocab::annotate::rendered_text(source),
+            readwise_core::vocab::annotate::rendered_text(&tracked)
+        );
+    }
 
     #[test]
     fn line_margins_stay_in_the_same_block_instead_of_selecting_earlier_text() {

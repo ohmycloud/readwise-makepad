@@ -497,6 +497,7 @@ pub fn sanitize_for_reader(html: &str) -> String {
     // An EPUB may use <a id="…"/> as a zero-width destination. It must not
     // become an unclosed HtmlLink, which would consume the following prose.
     let mut link_stack = Vec::new();
+    let mut figure_depth = 0usize;
     while i < html.len() {
         let Some(lt_rel) = html[i..].find('<') else {
             out.push_str(&html[i..]);
@@ -549,6 +550,14 @@ pub fn sanitize_for_reader(html: &str) -> String {
             continue;
         }
 
+        if name == "figure" {
+            if is_close {
+                figure_depth = figure_depth.saturating_sub(1);
+            } else if !inner.trim_end().ends_with('/') {
+                figure_depth += 1;
+            }
+        }
+
         if link_stack.last() == Some(&true)
             && matches!(
                 name.as_str(),
@@ -559,9 +568,16 @@ pub fn sanitize_for_reader(html: &str) -> String {
             // inline formatting so every word remains in the link's text.
         } else if name == "figcaption" {
             if is_close {
-                out.push_str("</em></p>");
+                out.push_str("<readeralignoff></readeralignoff></em></p>");
             } else {
-                out.push_str("<p><em>");
+                out.push_str("<p><em><readeralignon></readeralignon>");
+            }
+        } else if name == "h6" && figure_depth > 0 {
+            if is_close {
+                out.push_str("<readeralignoff></readeralignoff></h6>");
+            } else {
+                out.push_str(&html[lt..=gt]);
+                out.push_str("<readeralignon></readeralignon>");
             }
         } else if name == "a" && is_close {
             if link_stack.pop().unwrap_or(false) {
@@ -919,9 +935,21 @@ mod tests {
         assert_eq!(
             split_blocks(&sanitized),
             vec![
-                "<p><em>Table 2. Details</em></p>".to_string(),
+                "<p><em><readeralignon></readeralignon>Table 2. Details<readeralignoff></readeralignoff></em></p>".to_string(),
                 "<table><tr><td>x</td></tr></table>".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn figure_heading_caption_is_centered_without_changing_visible_text() {
+        let html = "<figure><div><img src=\"figure.png\"/><h6><span>Figure 3-25. </span>Self-consistency samples many thoughts and answers and will choose the most frequent answer</h6></div></figure><h6>Next heading</h6>";
+        let sanitized = sanitize_for_reader(html);
+        assert!(sanitized.contains("<h6><readeralignon></readeralignon>Figure 3-25. Self-consistency samples many thoughts and answers and will choose the most frequent answer<readeralignoff></readeralignoff></h6>"));
+        assert!(sanitized.ends_with("<h6>Next heading</h6>"));
+        assert_eq!(
+            crate::vocab::annotate::rendered_text(&sanitized),
+            crate::vocab::annotate::rendered_text(html)
         );
     }
 

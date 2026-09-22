@@ -19,6 +19,9 @@ pub fn annotate_html(
     }
     let mut out = String::with_capacity(html.len() + html.len() / 4);
     let mut code_depth: i32 = 0;
+    // A caption is drawn as one centered text run. Ruby widgets would split
+    // that run and center each fragment independently.
+    let mut centered_caption = false;
     let mut i = 0;
     while i < html.len() {
         let rest = &html[i..];
@@ -42,6 +45,11 @@ pub fn annotate_html(
                 code_depth += if is_close { -1 } else { 1 };
                 code_depth = code_depth.max(0);
             }
+            if name == "readeralignon" && !is_close {
+                centered_caption = true;
+            } else if name == "readeralignoff" && !is_close {
+                centered_caption = false;
+            }
             out.push_str(tag);
             i += gt_rel + 1;
             continue;
@@ -59,7 +67,7 @@ pub fn annotate_html(
         }
         let text_end = rest.find(['<', '&']).unwrap_or(rest.len());
         let text = &rest[..text_end];
-        if code_depth > 0 {
+        if code_depth > 0 || centered_caption {
             out.push_str(text);
         } else {
             annotate_text(text, glosses, known, &mut out);
@@ -733,6 +741,17 @@ mod tests {
         );
         assert!(out.starts_with("<table><tr><td>solitude</td></tr></table>"));
         assert!(out.contains("<ruby>solitude\u{E000}孤独</ruby>"));
+    }
+
+    #[test]
+    fn keeps_centered_caption_as_one_text_run() {
+        let (g, k) = ctx();
+        let html = "<h6><readeralignon></readeralignon>solitude and murmur<readeralignoff></readeralignoff></h6><p>solitude</p>";
+        let annotated = annotate_html(html, &g, &k);
+        assert!(annotated.contains(
+            "<readeralignon></readeralignon>solitude and murmur<readeralignoff></readeralignoff>"
+        ));
+        assert!(annotated.contains("<p><ruby>solitude\u{E000}孤独</ruby></p>"));
     }
 
     #[test]
