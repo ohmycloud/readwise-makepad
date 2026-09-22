@@ -4627,6 +4627,8 @@ script_mod! {
             height: Fit
             word_wrap: false
             show_gutter: false
+            // Keep horizontal scrolling active without painting its handle.
+            scroll_bars +: {scroll_bar_x +: {bar_size: 0.0}}
             draw_bg +: {color: #0000}
             draw_text +: {
                 text_style +: {font_size: 10.5 line_spacing: 1.35}
@@ -4698,31 +4700,25 @@ script_mod! {
         }
     }
 
-    // Style the CodeEditor's own scrollbars in the source-backed templates.
+    // Style the CodeEditor's vertical scrollbar in the source-backed templates.
     // Applying this dynamically to portal-list items loses the script source
     // when the list recycles a row and can crash the renderer.
     let ReaderCodeViewPaper = ReaderCodeViewLight{editor +:{scroll_bars +:{
-        scroll_bar_x +:{draw_bg +:{color:#d5cdbd color_hover:#716a60 color_drag:#805d35}}
         scroll_bar_y +:{draw_bg +:{color:#d5cdbd color_hover:#716a60 color_drag:#805d35}}
     }}}
     let ReaderCodeViewSepia = ReaderCodeViewLight{editor +:{scroll_bars +:{
-        scroll_bar_x +:{draw_bg +:{color:#ccb995 color_hover:#x75624e color_drag:#85562f}}
         scroll_bar_y +:{draw_bg +:{color:#ccb995 color_hover:#x75624e color_drag:#85562f}}
     }}}
     let ReaderCodeViewSage = ReaderCodeViewLight{editor +:{scroll_bars +:{
-        scroll_bar_x +:{draw_bg +:{color:#becdb8 color_hover:#607065 color_drag:#3e6850}}
         scroll_bar_y +:{draw_bg +:{color:#becdb8 color_hover:#607065 color_drag:#3e6850}}
     }}}
     let ReaderCodeViewNight = ReaderCodeView{editor +:{scroll_bars +:{
-        scroll_bar_x +:{draw_bg +:{color:#46505a color_hover:#9a9b99 color_drag:#b7c9a6}}
         scroll_bar_y +:{draw_bg +:{color:#46505a color_hover:#9a9b99 color_drag:#b7c9a6}}
     }}}
     let ReaderCodeViewThemeLight = ReaderCodeViewLight{editor +:{scroll_bars +:{
-        scroll_bar_x +:{draw_bg +:{color:#b9b9b9 color_hover:#686868 color_drag:#365f8d}}
         scroll_bar_y +:{draw_bg +:{color:#b9b9b9 color_hover:#686868 color_drag:#365f8d}}
     }}}
     let ReaderCodeViewThemeDark = ReaderCodeView{editor +:{scroll_bars +:{
-        scroll_bar_x +:{draw_bg +:{color:#686868 color_hover:#aaaaaa color_drag:#b8c8dc}}
         scroll_bar_y +:{draw_bg +:{color:#686868 color_hover:#aaaaaa color_drag:#b8c8dc}}
     }}}
 
