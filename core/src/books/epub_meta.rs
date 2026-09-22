@@ -635,6 +635,33 @@ const KEEP_TAGS: &[&str] = &[
     "a",
 ];
 
+const READER_BLOCK_TAGS: &[&str] = &[
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "blockquote",
+    "pre",
+    "ul",
+    "ol",
+    "li",
+    "table",
+];
+
+fn contains_open_block_tag(html: &str) -> bool {
+    READER_BLOCK_TAGS.iter().any(|name| {
+        let opening = format!("<{name}");
+        html.match_indices(&opening).any(|(index, _)| {
+            html.as_bytes()
+                .get(index + opening.len())
+                .is_some_and(|next| next.is_ascii_whitespace() || matches!(next, b'>' | b'/'))
+        })
+    })
+}
+
 /// 这些标签连同内容一起丢（对阅读无意义或有害）。
 const DROP_TAGS: &[&str] = &[
     "script", "style", "head", "svg", "math", "rt", "rp", "template",
@@ -731,6 +758,7 @@ fn sanitize_for_reader_with_anchors(html: &str, toc_fragments: &HashSet<String>)
     // An EPUB may use <a id="…"/> as a zero-width destination. It must not
     // become an unclosed HtmlLink, which would consume the following prose.
     let mut link_stack = Vec::new();
+    let mut definition_stack: Vec<(String, bool)> = Vec::new();
     let mut figure_depth = 0usize;
     while i < html.len() {
         let Some(lt_rel) = html[i..].find('<') else {
@@ -824,6 +852,28 @@ fn sanitize_for_reader_with_anchors(html: &str, toc_fragments: &HashSet<String>)
         {
             // HtmlLink consumes one text node and skips nested markup. Flatten
             // inline formatting so every word remains in the link's text.
+        } else if matches!(name.as_str(), "dt" | "dd") {
+            if is_close {
+                if let Some(index) = definition_stack.iter().rposition(|(tag, _)| tag == &name) {
+                    if definition_stack.remove(index).1 {
+                        out.push_str("</p>");
+                    }
+                }
+            } else if !inner.trim_end().ends_with('/') {
+                // Definition terms/descriptions are blocks, but Makepad Html
+                // does not recognize their tags. Wrap plain content while
+                // leaving existing nested paragraphs untouched.
+                let close = format!("</{name}");
+                let body_start = gt + 1;
+                let body_end = lower[body_start..]
+                    .find(&close)
+                    .map_or(lower.len(), |at| body_start + at);
+                let wrap = !contains_open_block_tag(&lower[body_start..body_end]);
+                definition_stack.push((name.clone(), wrap));
+                if wrap {
+                    out.push_str("<p>");
+                }
+            }
         } else if name == "figcaption" {
             if is_close {
                 out.push_str("<readeralignoff></readeralignoff></em></p>");
@@ -922,10 +972,10 @@ pub fn split_blocks(html: &str) -> Vec<String> {
             .collect::<String>()
             .to_lowercase();
 
-        // A top-level table must start with a fresh layout turtle. EPUB figure/caption
-        // wrappers are removed by sanitization, so defensive splitting here also fixes
-        // malformed books that leave plain title text immediately before `<table>`.
-        if !is_close && name == "table" && depth == 0 {
+        // Inline tags can be top-level after their unsupported parent (such as
+        // <dd>) is removed. Keep following punctuation in the same paragraph.
+        // A block opener starts a fresh item after any preceding inline text.
+        if !is_close && READER_BLOCK_TAGS.contains(&name.as_str()) && depth == 0 {
             let prefix = buf.trim();
             if !prefix.is_empty() && !only_toc_anchor_markers(prefix) {
                 blocks.push(prefix.to_string());
@@ -938,7 +988,7 @@ pub fn split_blocks(html: &str) -> Vec<String> {
         if !VOID.contains(&name.as_str()) && !self_close && !name.is_empty() {
             depth += if is_close { -1 } else { 1 };
         }
-        if depth <= 0 && is_close {
+        if depth <= 0 && is_close && READER_BLOCK_TAGS.contains(&name.as_str()) {
             depth = 0;
             let block = buf.trim();
             if block.is_empty() {
@@ -1332,6 +1382,47 @@ mod tests {
                 "<h2>T</h2>".to_string(),
                 "<blockquote><p>a</p><p>b</p></blockquote>".to_string(),
                 "<p>c</p>".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn definition_description_keeps_punctuation_after_inline_code() {
+        let html = concat!(
+            "<dl><dt><code>Cell::new(value)</code></dt>",
+            "<dd>Creates a new <code>Cell</code>, moving the given ",
+            "<code>value</code> into it.</dd></dl>"
+        );
+        let blocks = split_blocks(&sanitize_for_reader(html));
+        assert_eq!(
+            blocks,
+            vec![
+                "<p><code>Cell::new(value)</code></p>",
+                "<p>Creates a new <code>Cell</code>, moving the given <code>value</code> into it.</p>",
+            ]
+        );
+    }
+
+    #[test]
+    fn definition_description_with_paragraphs_does_not_nest_paragraphs() {
+        let html = "<dl><dt>set</dt><dd><p>Stores <code>value</code>, then returns.</p><p>More details.</p></dd></dl>";
+        assert_eq!(
+            split_blocks(&sanitize_for_reader(html)),
+            vec![
+                "<p>set</p>",
+                "<p>Stores <code>value</code>, then returns.</p>",
+                "<p>More details.</p>",
+            ]
+        );
+    }
+
+    #[test]
+    fn unwrapped_inline_tags_never_split_following_punctuation() {
+        assert_eq!(
+            split_blocks("See <code>Cell</code>, then <em>value</em>, too.<p>Next.</p>"),
+            vec![
+                "See <code>Cell</code>, then <em>value</em>, too.",
+                "<p>Next.</p>",
             ]
         );
     }
