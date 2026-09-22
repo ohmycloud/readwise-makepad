@@ -190,7 +190,11 @@ impl Widget for RubyWord {
             return DrawStep::done();
         };
 
-        let word_color = *WORD_COLOR.read().unwrap();
+        let word_color = if self.gloss.is_empty() {
+            None
+        } else {
+            *WORD_COLOR.read().unwrap()
+        };
         if let Some((r, g, b)) = word_color {
             tf.font_colors.push(Vec4f {
                 x: r,
@@ -205,11 +209,15 @@ impl Widget for RubyWord {
                 tf,
                 cx,
                 &self.word,
-                Vec4f {
-                    x: r,
-                    y: g,
-                    z: b,
-                    w: a,
+                if self.gloss.is_empty() {
+                    Vec4f::default()
+                } else {
+                    Vec4f {
+                        x: r,
+                        y: g,
+                        z: b,
+                        w: a,
+                    }
                 },
             );
         } else {
@@ -318,6 +326,9 @@ impl Widget for RubyWord {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.gloss.is_empty() {
+            return;
+        }
         for area in self.drawn_areas.clone() {
             match event.hits(cx, area) {
                 Hit::FingerHoverIn(_) => {

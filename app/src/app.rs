@@ -378,6 +378,21 @@ fn replace_paragraphs(chunks: Vec<String>) {
     *PARAGRAPHS.write().unwrap() = chunks;
 }
 
+fn silence_current_paragraph_glosses(lemma: &str) -> bool {
+    let mut paragraphs = PARAGRAPHS.write().unwrap();
+    let mut changed = false;
+    for paragraph in paragraphs.iter_mut().filter(|text| text.contains("<ruby")) {
+        let silent = readwise_core::vocab::annotate::silence_ruby_for_lemma(paragraph, lemma);
+        if *paragraph != silent {
+            *paragraph = silent;
+            changed = true;
+        }
+    }
+    // Only gloss text changed. The same ruby widgets, words, and line spacing
+    // remain, so existing pagination metrics are still valid.
+    changed
+}
+
 fn is_table_block(html: &str) -> bool {
     let html = html.trim_start();
     html.get(..6)
@@ -1878,7 +1893,12 @@ static CURRENT_ITEM: LazyLock<RwLock<Option<ShelfItem>>> = LazyLock::new(|| RwLo
 #[derive(Debug)]
 enum CardAction {
     VocabAdded(bool),
-    MarkedKnown,
+    MarkKnownSaved(String),
+    MarkKnownFailed {
+        lemma: String,
+        book_id: Option<String>,
+        error: String,
+    },
 }
 
 fn spawn_add_vocab(lemma: String, word: String, gloss: String, book_id: Option<String>) {
@@ -1909,19 +1929,23 @@ fn spawn_add_vocab(lemma: String, word: String, gloss: String, book_id: Option<S
     });
 }
 
-fn spawn_mark_known(lemma: String) {
+fn spawn_mark_known(lemma: String, book_id: Option<String>) {
     std::thread::spawn(move || {
-        let Some(db) = DB.get() else { return };
-        if let Err(e) = db.add_known_word(&lemma, "marked") {
-            ::log::error!("标记已认识失败: {}", e);
-            return;
+        let result = DB
+            .get()
+            .ok_or_else(|| "数据库尚未就绪".to_string())
+            .and_then(|db| db.add_known_word(&lemma, "marked"));
+        match result {
+            Ok(()) => Cx::post_action(CardAction::MarkKnownSaved(lemma)),
+            Err(error) => {
+                ::log::error!("标记已认识失败: {}", error);
+                Cx::post_action(CardAction::MarkKnownFailed {
+                    lemma,
+                    book_id,
+                    error,
+                });
+            }
         }
-        // 只处理已经访问并缓存的章节块；未访问章节会从
-        // known_words 直接跳过该词。
-        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
-            book.mark_word_known(&lemma);
-        }
-        Cx::post_action(CardAction::MarkedKnown);
     });
 }
 
@@ -2314,6 +2338,14 @@ impl OpenBook {
             }
         }
     }
+
+    fn unmark_word_known(&mut self, lemma: &str) {
+        if self.known_words.remove(lemma) {
+            // A failed save must rebuild cached annotations from the original
+            // chapter HTML; the in-place removal above cannot be reversed.
+            self.glossed_chapter_chunks.fill(None);
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -2448,6 +2480,29 @@ mod lazy_gloss_tests {
         book.mark_word_known("solitude");
 
         assert!(!book
+            .chapter_chunks(0, true)
+            .unwrap()
+            .join("")
+            .contains("<ruby>solitude"));
+    }
+
+    #[test]
+    fn failed_known_word_save_restores_cached_glosses() {
+        let mut book = book();
+        assert!(book
+            .chapter_chunks(0, true)
+            .unwrap()
+            .join("")
+            .contains("<ruby>solitude"));
+        book.mark_word_known("solitude");
+        assert!(!book
+            .chapter_chunks(0, true)
+            .unwrap()
+            .join("")
+            .contains("<ruby>solitude"));
+
+        book.unmark_word_known("solitude");
+        assert!(book
             .chapter_chunks(0, true)
             .unwrap()
             .join("")
@@ -11885,6 +11940,7 @@ impl App {
                 .widget(cx, ids!(chapter_list))
                 .borrow_mut::<ChapterList>()
             {
+                reader.page_turn.cancel();
                 reader.pager.requested_source = resume
                     .and_then(|location| location.source.map(|source| (location.block, source)));
             }
@@ -11894,6 +11950,17 @@ impl App {
         }
         self.invalidate_reader_pagination_layout(cx);
         self.ui.redraw(cx);
+    }
+
+    fn hide_current_word_gloss(&mut self, cx: &mut Cx, lemma: &str) {
+        if !silence_current_paragraph_glosses(lemma) {
+            return;
+        }
+        let chapter = self.ui.widget(cx, ids!(chapter_list));
+        if let Some(mut reader) = chapter.borrow_mut::<ChapterList>() {
+            reader.page_turn.cancel();
+        }
+        chapter.redraw(cx);
     }
 
     fn selected_highlight_ids(&self) -> Vec<String> {
@@ -12888,9 +12955,40 @@ impl MatchEvent for App {
                             spawn_load_vocab();
                         }
                     }
-                    CardAction::MarkedKnown => {
-                        self.close_word_card(cx);
-                        self.refresh_current_chapter(cx);
+                    CardAction::MarkKnownSaved(lemma) => {
+                        let changed = CURRENT_BOOK
+                            .write()
+                            .unwrap()
+                            .as_mut()
+                            .filter(|book| !book.known_words.contains(lemma))
+                            .map(|book| book.mark_word_known(lemma))
+                            .is_some();
+                        if changed {
+                            self.refresh_current_chapter(cx);
+                        }
+                    }
+                    CardAction::MarkKnownFailed {
+                        lemma,
+                        book_id,
+                        error,
+                    } => {
+                        let restored = CURRENT_BOOK
+                            .write()
+                            .unwrap()
+                            .as_mut()
+                            .filter(|book| book_id.as_deref() == Some(book.id.as_str()))
+                            .map(|book| book.unmark_word_known(lemma))
+                            .is_some();
+                        if restored {
+                            self.refresh_current_chapter(cx);
+                        }
+                        self.ui.label(cx, ids!(status)).set_text(
+                            cx,
+                            &format!(
+                                "{}: {error}",
+                                localized("标记已认识失败", "Could not mark word known")
+                            ),
+                        );
                     }
                 }
                 continue;
@@ -14200,7 +14298,14 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(know_btn)).clicked(actions) {
             if let Some((_, lemma, _)) = self.card.clone() {
                 self.close_word_card(cx);
-                spawn_mark_known(lemma);
+                let book_id = CURRENT_BOOK.write().unwrap().as_mut().map(|book| {
+                    book.mark_word_known(&lemma);
+                    book.id.clone()
+                });
+                if book_id.is_some() {
+                    self.hide_current_word_gloss(cx, &lemma);
+                }
+                spawn_mark_known(lemma, book_id);
             }
         }
         if self.ui.button(cx, ids!(toc_btn)).clicked(actions) {

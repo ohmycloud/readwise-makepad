@@ -187,6 +187,41 @@ pub fn remove_ruby_for_lemma(html: &str, lemma: &str) -> String {
     out
 }
 
+/// Clear only a known word's gloss in the current reader projection. Keeping
+/// the ruby widget and its word text preserves the measured page layout until
+/// normal navigation rebuilds the chapter without that annotation.
+pub fn silence_ruby_for_lemma(html: &str, lemma: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(pos) = html[i..].find("<ruby") {
+        let tag_start = i + pos;
+        let Some(open_end_rel) = html[tag_start..].find('>') else {
+            break;
+        };
+        let content_start = tag_start + open_end_rel + 1;
+        let Some(close_rel) = html[content_start..].find("</ruby>") else {
+            break;
+        };
+        let content_end = content_start + close_rel;
+        let content = &html[content_start..content_end];
+        out.push_str(&html[i..content_start]);
+        if let Some((word, _gloss)) = content.split_once(RUBY_SEP) {
+            if lemmatize(word) == lemma {
+                out.push_str(word);
+                out.push(RUBY_SEP);
+            } else {
+                out.push_str(content);
+            }
+        } else {
+            out.push_str(content);
+        }
+        out.push_str("</ruby>");
+        i = content_end + "</ruby>".len();
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
 /// 剥掉全部注音标注（总开关关闭时原地还原纯文）。
 pub fn remove_all_ruby(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
@@ -674,6 +709,18 @@ mod tests {
             out,
             "<p>The <ruby>solitude\u{E000}孤独</ruby> and murmurs.</p>"
         );
+    }
+
+    #[test]
+    fn silencing_gloss_keeps_ruby_layout_and_visible_text() {
+        let src =
+            "<p>The <ruby>solitude\u{E000}孤独</ruby> and <ruby>murmurs\u{E000}低语</ruby>.</p>";
+        let silent = silence_ruby_for_lemma(src, "solitude");
+        assert_eq!(
+            silent,
+            "<p>The <ruby>solitude\u{E000}</ruby> and <ruby>murmurs\u{E000}低语</ruby>.</p>"
+        );
+        assert_eq!(rendered_text(src), rendered_text(&silent));
     }
 
     #[test]
