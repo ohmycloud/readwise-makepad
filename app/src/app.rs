@@ -814,7 +814,7 @@ impl<T> ListProjection<T> {
     }
 }
 
-/// 当前书的笔记（后台线程刷新，NoteList 只读渲染）。
+/// 当前书的笔记（后台线程刷新，NoteList 展示引用并允许编辑正文）。
 static NOTES: LazyLock<RwLock<ListProjection<readwise_core::notes::models::Note>>> =
     LazyLock::new(|| RwLock::new(ListProjection::default()));
 
@@ -2790,15 +2790,57 @@ fn spawn_load_notes(book_id: String) {
     });
 }
 
+const NOTE_EXTRA_SEPARATOR: &str = "\n\n[readwise-note-extra]\n\n";
+
+fn format_note_content(quote: &str, extra: &str) -> String {
+    let quote = quote.trim();
+    let extra = extra.trim();
+    match (quote.is_empty(), extra.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => quote.to_string(),
+        (true, false) => extra.to_string(),
+        (false, false) => format!("{quote}{NOTE_EXTRA_SEPARATOR}{extra}"),
+    }
+}
+
+fn split_note_content(content: &str) -> (&str, &str) {
+    content
+        .split_once(NOTE_EXTRA_SEPARATOR)
+        .map(|(quote, extra)| (quote.trim(), extra.trim()))
+        .unwrap_or((content.trim(), ""))
+}
+
+#[cfg(test)]
+mod note_content_tests {
+    use super::{format_note_content, split_note_content, NOTE_EXTRA_SEPARATOR};
+
+    #[test]
+    fn note_content_keeps_quote_separate_from_editable_body() {
+        let content = format_note_content("  原文第一段\n原文第二段  ", "  我的理解  ");
+        assert_eq!(
+            content,
+            format!("原文第一段\n原文第二段{NOTE_EXTRA_SEPARATOR}我的理解")
+        );
+        assert_eq!(
+            split_note_content(&content),
+            ("原文第一段\n原文第二段", "我的理解")
+        );
+    }
+
+    #[test]
+    fn legacy_note_content_is_shown_as_one_complete_quote() {
+        assert_eq!(
+            split_note_content("  旧笔记\n仍是完整引用  "),
+            ("旧笔记\n仍是完整引用", "")
+        );
+    }
+}
+
 fn spawn_create_note(item: ShelfItem, quote: String, extra: String) {
     let english = app_language() == AppLanguage::English;
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
-        let content = [quote.trim(), extra.trim()]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let content = format_note_content(&quote, &extra);
         if let Err(e) = db.create_note(&item.id, &item.title, &item.author, &content) {
             Cx::post_action(NoteAction::Error(e));
             return;
@@ -2813,6 +2855,30 @@ fn spawn_create_note(item: ShelfItem, quote: String, extra: String) {
                     "笔记已保存 ✓".to_string()
                 }),
                 finish_composer: true,
+            }),
+            Err(e) => Cx::post_action(NoteAction::Error(e)),
+        }
+    });
+}
+
+fn spawn_update_note(book_id: String, note_id: String, content: String) {
+    let english = app_language() == AppLanguage::English;
+    std::thread::spawn(move || {
+        let Some(db) = DB.get() else { return };
+        if let Err(e) = db.update_note(&note_id, &content) {
+            Cx::post_action(NoteAction::Error(e));
+            return;
+        }
+        match db.get_notes_by_book(&book_id) {
+            Ok(notes) => Cx::post_action(NoteAction::Refreshed {
+                book_id,
+                notes,
+                message: Some(if english {
+                    "Note updated ✓".to_string()
+                } else {
+                    "笔记已更新 ✓".to_string()
+                }),
+                finish_composer: false,
             }),
             Err(e) => Cx::post_action(NoteAction::Error(e)),
         }
@@ -2846,7 +2912,11 @@ fn spawn_delete_note(book_id: String, note_id: String) {
 /// 高亮保存结果。
 #[derive(Debug)]
 enum HlAction {
-    Saved(readwise_core::books::Highlight, usize),
+    Saved {
+        book_id: String,
+        highlight: readwise_core::books::Highlight,
+        chapter: usize,
+    },
     Deleted {
         book_id: String,
         chapter: usize,
@@ -2877,7 +2947,11 @@ fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
                     end_char: ec,
                     color: color.to_string(),
                 };
-                Cx::post_action(HlAction::Saved(hl, chapter));
+                Cx::post_action(HlAction::Saved {
+                    book_id,
+                    highlight: hl,
+                    chapter,
+                });
             }
             Err(e) => Cx::post_action(HlAction::Error(e)),
         }
@@ -4283,21 +4357,33 @@ script_mod! {
         flow: Down spacing: 6
         draw_bg.color: theme.color_bg_container
         draw_bg.border_radius: 7.0
-        note_title := Label{
+        note_quote_title := Label{
             width: Fill
-            text: ""
-            draw_text.text_style.font_size: 11
-        }
-        note_preview := Label{
-            width: Fill
-            text: ""
-            draw_text.color: theme.color_label_inner_inactive
+            text: "引用"
+            draw_text.color: theme.color_highlight
             draw_text.text_style.font_size: 9
+        }
+        note_quote := Label{
+            width: Fill
+            text: ""
+            draw_text.text_style.font_size: 10
+        }
+        note_body_title := Label{
+            width: Fill
+            text: "笔记"
+            draw_text.color: theme.color_highlight
+            draw_text.text_style.font_size: 9
+        }
+        note_body_input := TextInput{
+            width: Fill
+            height: 54
+            empty_text: "补充笔记（可编辑）"
         }
         note_actions := View{
             width: Fill height: Fit
             flow: Right
             align: Align{x: 1.0 y: 0.5}
+            note_save_btn := ButtonFlat{ text: "保存" }
             note_delete_btn := ButtonFlatter{ text: "删除" }
         }
     }
@@ -8348,17 +8434,36 @@ impl Widget for NoteList {
                         continue;
                     };
                     let item = list.item(cx, item_id, template);
-                    item.label(cx, ids!(note_title)).set_text(cx, &note.title);
-                    item.label(cx, ids!(note_preview))
-                        .set_text(cx, &preview_text(&note.content, 120));
+                    let (quote, body) = split_note_content(&note.content);
+                    item.label(cx, ids!(note_quote_title))
+                        .set_text(cx, crate::i18n::text(language, "quote"));
+                    item.label(cx, ids!(note_quote)).set_text(cx, quote);
+                    item.label(cx, ids!(note_body_title))
+                        .set_text(cx, crate::i18n::text(language, "note"));
+                    let body_input = item.text_input(cx, ids!(note_body_input));
+                    body_input.set_empty_text(
+                        cx,
+                        crate::i18n::text(language, "note_placeholder").to_string(),
+                    );
+                    if body_input.text() != body {
+                        body_input.set_text(cx, body);
+                    }
                     item.widget(cx, ids!(note_delete_btn))
                         .set_text(cx, crate::i18n::text(language, "delete"));
-                    let note_title = item.widget(cx, ids!(note_title));
-                    let note_preview = item.widget(cx, ids!(note_preview));
+                    item.widget(cx, ids!(note_save_btn))
+                        .set_text(cx, crate::i18n::text(language, "save"));
+                    let note_quote_title = item.widget(cx, ids!(note_quote_title));
+                    let note_quote = item.widget(cx, ids!(note_quote));
+                    let note_body_title = item.widget(cx, ids!(note_body_title));
+                    let note_body_input = item.widget(cx, ids!(note_body_input));
+                    let note_save = item.widget(cx, ids!(note_save_btn));
                     let note_delete = item.widget(cx, ids!(note_delete_btn));
                     apply_reader_surface_palette(cx, item.clone(), palette.surface, palette.border);
-                    apply_reader_label_palette(cx, note_title, palette.text);
-                    apply_reader_label_palette(cx, note_preview, palette.muted);
+                    apply_reader_label_palette(cx, note_quote_title, palette.accent);
+                    apply_reader_label_palette(cx, note_quote, palette.text);
+                    apply_reader_label_palette(cx, note_body_title, palette.accent);
+                    apply_reader_input_palette(cx, note_body_input, palette);
+                    apply_reader_button_palette(cx, note_save, palette);
                     apply_reader_button_palette(cx, note_delete, palette);
                     item.draw_all_unscoped(cx);
                 }
@@ -12461,6 +12566,17 @@ impl App {
         self.ui
             .label(cx, ids!(note_hint))
             .set_text(cx, localized("保存中…", "Saving…"));
+        let selection_range = *SEL_RANGE.read().unwrap();
+        let book_id = CURRENT_BOOK
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|book| book.id.clone());
+        if let (Some(range), Some(book_id)) = (selection_range, book_id) {
+            if self.selected_highlight_ids().is_empty() {
+                spawn_add_highlight(book_id, self.chapter_idx, range);
+            }
+        }
         spawn_create_note(item, self.note_quote_text.clone(), extra);
     }
 
@@ -13314,12 +13430,23 @@ impl MatchEvent for App {
             }
             if let Some(highlight_action) = action.downcast_ref::<HlAction>() {
                 match highlight_action {
-                    HlAction::Saved(hl, chapter) => {
-                        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+                    HlAction::Saved {
+                        book_id,
+                        highlight,
+                        chapter,
+                    } => {
+                        if let Some(book) = CURRENT_BOOK
+                            .write()
+                            .unwrap()
+                            .as_mut()
+                            .filter(|book| book.id == *book_id)
+                        {
                             book.highlights
                                 .entry(*chapter)
                                 .or_default()
-                                .push(hl.clone());
+                                .push(highlight.clone());
+                        } else {
+                            continue;
                         }
                         self.clear_reader_selection(cx);
                         self.redraw_reader_annotations(cx);
@@ -14707,6 +14834,19 @@ impl MatchEvent for App {
             .widget(cx, ids!(note_list))
             .portal_list(cx, ids!(list));
         for (item_id, item) in note_list.items_with_actions(actions) {
+            if item.button(cx, ids!(note_save_btn)).clicked(actions) {
+                let note = NOTES.read().unwrap().entry_for_item_id(item_id).cloned();
+                let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
+                if let (Some(note), Some(book_id)) = (note, book_id) {
+                    let (quote, _) = split_note_content(&note.content);
+                    let body = item.text_input(cx, ids!(note_body_input)).text();
+                    let content = format_note_content(quote, &body);
+                    self.ui
+                        .label(cx, ids!(note_hint))
+                        .set_text(cx, localized("保存中…", "Saving…"));
+                    spawn_update_note(book_id, note.id, content);
+                }
+            }
             if item.button(cx, ids!(note_delete_btn)).clicked(actions) {
                 let note_id = NOTES
                     .read()
