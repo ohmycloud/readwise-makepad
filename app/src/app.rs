@@ -1885,9 +1885,23 @@ mod reader_pagination_tests {
 
 /// 当前打开的书（后台线程写入，UI 读）。
 static CURRENT_BOOK: LazyLock<RwLock<Option<OpenBook>>> = LazyLock::new(|| RwLock::new(None));
+static OPEN_BOOK_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// 当前打开的书对应的书架项（"标为已认识"后重开重注音用）。
 static CURRENT_ITEM: LazyLock<RwLock<Option<ShelfItem>>> = LazyLock::new(|| RwLock::new(None));
+
+fn requested_book_is_ready() -> bool {
+    let requested_id = CURRENT_ITEM
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|item| item.id.clone());
+    CURRENT_BOOK
+        .read()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|book| requested_id.as_deref() == Some(book.id.as_str()))
+}
 
 /// 释义卡片操作结果（后台 → UI）。
 #[derive(Debug)]
@@ -2909,12 +2923,16 @@ static CURRENT_READER_SOURCE: AtomicUsize = AtomicUsize::new(usize::MAX);
 #[derive(Debug)]
 enum ReaderAction {
     Opened {
+        request_id: u64,
         resume: ReaderLocation,
         gloss_count: usize,
         parse_ms: u128,
         initial_gloss_ms: u128,
     },
-    OpenError(String),
+    OpenError {
+        request_id: u64,
+        error: String,
+    },
 }
 
 #[derive(Debug)]
@@ -3148,6 +3166,7 @@ fn speak_text(text: String) {
 
 /// 后台加载整本书章节 + 恢复进度。
 fn spawn_open_book(item: ShelfItem) {
+    let request_id = OPEN_BOOK_REQUEST_ID.fetch_add(1, Ordering::AcqRel) + 1;
     *CURRENT_ITEM.write().unwrap() = Some(item.clone());
     std::thread::spawn(move || {
         let open_started = std::time::Instant::now();
@@ -3156,7 +3175,10 @@ fn spawn_open_book(item: ShelfItem) {
         )) {
             Ok(list) => list,
             Err(e) => {
-                Cx::post_action(ReaderAction::OpenError(e));
+                Cx::post_action(ReaderAction::OpenError {
+                    request_id,
+                    error: e,
+                });
                 return;
             }
         };
@@ -3203,8 +3225,18 @@ fn spawn_open_book(item: ShelfItem) {
             let _ = book.chapter_chunks(resume.chapter, true);
         }
         let initial_gloss_ms = gloss_started.elapsed().as_millis();
+        let requested_item = CURRENT_ITEM.read().unwrap();
+        if OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id
+            || requested_item
+                .as_ref()
+                .is_none_or(|item| item.id != book.id)
+        {
+            return;
+        }
         *CURRENT_BOOK.write().unwrap() = Some(book);
+        drop(requested_item);
         Cx::post_action(ReaderAction::Opened {
+            request_id,
             resume,
             gloss_count,
             parse_ms,
@@ -4958,6 +4990,13 @@ script_mod! {
                                     width: 260 height: Fill
                                     flow: Down
                                     draw_bg.color: theme.color_bg_app
+                                    toc_loading := Label{
+                                        visible: false
+                                        width: Fill height: Fit
+                                        padding: 12
+                                        text: "目录加载中…"
+                                        draw_text.color: theme.color_label_inner_inactive
+                                    }
                                     toc_list := mod.widgets.TocList{}
                                     }
                                     reader_surface := SolidView{
@@ -8170,9 +8209,15 @@ struct TocList {
 
 impl Widget for TocList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let requested_id = CURRENT_ITEM
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|item| item.id.clone());
         let guard = CURRENT_BOOK.read().unwrap();
         let titles: &[String] = guard
             .as_ref()
+            .filter(|book| requested_id.as_deref() == Some(book.id.as_str()))
             .map(|b| b.chapter_titles.as_slice())
             .unwrap_or(&[]);
         let current = CURRENT_CHAPTER.load(std::sync::atomic::Ordering::Relaxed);
@@ -8871,6 +8916,9 @@ pub struct App {
     pending_theme_reapply: bool,
     #[rust]
     toc_open: bool,
+    /// The TOC may be opened before its hidden panel has painted its first frame.
+    #[rust]
+    pending_toc_first_draw: bool,
     #[rust]
     note_open: bool,
     #[rust]
@@ -8925,6 +8973,9 @@ impl App {
     /// reference.
     fn restore_projected_ui_after_draw(&mut self, cx: &mut Cx) {
         self.activate_page(cx, self.active_page);
+        if self.on_reader_page {
+            self.sync_reader_panel_layout(cx);
+        }
         if let Some((vocab_count, known_count)) = *DB_READY_COUNTS.read().unwrap() {
             self.project_db_ready_status(cx, vocab_count, known_count);
         }
@@ -9228,6 +9279,14 @@ impl App {
 
     fn open_book_for_reading(&mut self, cx: &mut Cx, book: ShelfItem) {
         self.close_library_action_menu(cx);
+        self.toc_open = false;
+        self.note_open = false;
+        self.reader_ai_open = false;
+        self.pending_toc_first_draw = false;
+        self.ui
+            .widget(cx, ids!(toc_list))
+            .portal_list(cx, ids!(list))
+            .set_first_id_and_scroll(0, 0.0);
         self.replace_notes(cx, Vec::new());
         self.ui.label(cx, ids!(title)).set_text(
             cx,
@@ -9238,6 +9297,7 @@ impl App {
             },
         );
         self.activate_page(cx, AppPage::Reader);
+        self.sync_reader_panel_layout(cx);
         spawn_open_book(book);
     }
 
@@ -10300,6 +10360,7 @@ impl App {
 
     fn sync_reader_panel_layout(&mut self, cx: &mut Cx) {
         let panel_open = self.toc_open || self.note_open || self.reader_ai_open;
+        let toc_ready = requested_book_is_ready();
         if let Some(mut chapter_list) = self
             .ui
             .widget(cx, ids!(chapter_list))
@@ -10313,6 +10374,15 @@ impl App {
         self.ui
             .widget(cx, ids!(toc_panel))
             .set_visible(cx, self.toc_open);
+        self.ui
+            .widget(cx, ids!(toc_list))
+            .set_visible(cx, toc_ready);
+        self.ui
+            .widget(cx, ids!(toc_loading))
+            .set_visible(cx, !toc_ready);
+        self.ui
+            .label(cx, ids!(toc_loading))
+            .set_text(cx, localized("目录加载中…", "Loading contents…"));
         self.ui
             .widget(cx, ids!(note_panel))
             .set_visible(cx, self.note_open);
@@ -10344,6 +10414,24 @@ impl App {
             }
         }
         self.invalidate_reader_pagination_layout(cx);
+    }
+
+    fn finish_toc_first_draw(&mut self, cx: &mut Cx) {
+        if !std::mem::take(&mut self.pending_toc_first_draw)
+            || !self.on_reader_page
+            || !self.toc_open
+        {
+            return;
+        }
+        let panel = self.ui.widget(cx, ids!(toc_panel));
+        let list = self.ui.widget(cx, ids!(toc_list));
+        if panel.borrow::<View>().is_none_or(|view| !view.visible)
+            || panel.area().is_empty()
+            || (requested_book_is_ready() && list.area().is_empty())
+        {
+            self.sync_reader_panel_layout(cx);
+            self.ui.widget(cx, ids!(reader_columns)).redraw(cx);
+        }
     }
 
     fn update_responsive_layout(
@@ -13297,11 +13385,17 @@ impl MatchEvent for App {
             if let Some(reader) = action.downcast_ref::<ReaderAction>() {
                 match reader {
                     ReaderAction::Opened {
+                        request_id,
                         resume,
                         gloss_count,
                         parse_ms,
                         initial_gloss_ms,
                     } => {
+                        if *request_id != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire)
+                            || !requested_book_is_ready()
+                        {
+                            continue;
+                        }
                         ::log::info!(
                             "Opened EPUB: parse={}ms, initial chapter gloss={}ms, lazy remaining chapters",
                             parse_ms,
@@ -13309,6 +13403,11 @@ impl MatchEvent for App {
                         );
                         self.reader_chapter_block_counts.clear();
                         self.reader_page_span = 0;
+                        // The reader can receive a TOC click while the first
+                        // book is still loading. Project the panel again now
+                        // that its chapter titles are available.
+                        self.sync_reader_panel_layout(cx);
+                        self.ui.widget(cx, ids!(toc_list)).redraw(cx);
                         self.set_chapter_at(cx, resume.chapter, resume.block, resume.scroll, false);
                         if let Some(mut reader) = self
                             .ui
@@ -13339,13 +13438,16 @@ impl MatchEvent for App {
                         }
                         self.start_reading_timer(cx);
                     }
-                    ReaderAction::OpenError(e) => {
+                    ReaderAction::OpenError { request_id, error } => {
+                        if *request_id != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) {
+                            continue;
+                        }
                         self.ui.label(cx, ids!(title)).set_text(
                             cx,
                             &if app_language() == AppLanguage::English {
-                                format!("Failed to open: {e}")
+                                format!("Failed to open: {error}")
                             } else {
-                                format!("打开失败: {e}")
+                                format!("打开失败: {error}")
                             },
                         );
                     }
@@ -14505,9 +14607,11 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(toc_btn)).clicked(actions) {
             self.toc_open = !self.toc_open;
+            self.pending_toc_first_draw = self.toc_open;
             if self.toc_open {
                 self.note_open = false;
                 self.reader_ai_open = false;
+                self.ui.widget(cx, ids!(toc_list)).redraw(cx);
             }
             self.sync_reader_panel_layout(cx);
             self.ui.redraw(cx);
@@ -15191,6 +15295,7 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if matches!(event, Event::Draw(_)) {
+            self.finish_toc_first_draw(cx);
             if self.pending_ui_projection_after_draw {
                 self.pending_ui_projection_after_draw = false;
                 self.restore_projected_ui_after_draw(cx);
