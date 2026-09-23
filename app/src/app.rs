@@ -109,6 +109,8 @@ fn shelf_cover_needs_load(
     card_uid == WidgetUid(0) || loaded_covers.get(&card_uid) != Some(cover_path)
 }
 
+const LIST_COVER_WIDTH_TO_HEIGHT: f64 = 44.0 / 56.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ReaderPageSummary {
     current: usize,
@@ -4163,7 +4165,9 @@ script_mod! {
         draw_bg.color: theme.color_u_hidden
         draw_bg.border_radius: 8.0
         cover := View{
-            width: 44 height: 56
+            // The info block establishes the row height; BookShelf sizes the
+            // cover after the item's text has completed its first layout.
+            width: 0 height: 0
             flow: Overlay
             cover_ph := SolidView{
                 width: Fill height: Fill
@@ -8871,32 +8875,42 @@ impl BookShelf {
             .next()
             .map(|c| c.to_string())
             .unwrap_or_default();
-        card.label(cx, ids!(cover_letter)).set_text(cx, &letter);
-        if show_details {
-            card.label(cx, ids!(card_title)).set_text(cx, &book.title);
-            card.label(cx, ids!(card_author)).set_text(cx, &book.author);
+        let cover_letter = card.label(cx, ids!(cover_letter));
+        if cover_letter.text() != letter {
+            cover_letter.set_text(cx, &letter);
         }
-        card.label(cx, ids!(card_status)).set_text(
-            cx,
-            &shelf_status(
-                language,
-                &book.status,
-                book.progress_current,
-                book.progress_total,
-            ),
+        if show_details {
+            let title = card.label(cx, ids!(card_title));
+            if title.text() != book.title {
+                title.set_text(cx, &book.title);
+            }
+            let author = card.label(cx, ids!(card_author));
+            if author.text() != book.author {
+                author.set_text(cx, &book.author);
+            }
+        }
+        let status = shelf_status(
+            language,
+            &book.status,
+            book.progress_current,
+            book.progress_total,
         );
+        let card_status = card.label(cx, ids!(card_status));
+        if card_status.text() != status {
+            card_status.set_text(cx, &status);
+        }
         let card_uid = card.widget_uid();
         if shelf_cover_needs_load(&self.loaded_covers, card_uid, &book.cover_path) {
             let img = card.image(cx, ids!(cover_img));
             let cover_placeholder = card.widget(cx, ids!(cover_ph));
             match &book.cover_path {
                 Some(path) => {
-                    // Keep the placeholder behind the image only while the book
-                    // has no usable cover. Otherwise its colored background shows
-                    // through the letterboxed top and bottom of portrait covers.
-                    cover_placeholder.set_visible(cx, false);
+                    // In list mode Biggest fills the cover frame, so leave the
+                    // placeholder visible until the async image arrives. Grid mode
+                    // uses Smallest and hides it to avoid colored side bands.
+                    cover_placeholder.set_visible(cx, show_details);
                     let path = std::path::Path::new(path);
-                    if let Err(error) = img.load_image_file_by_path(cx, path) {
+                    if let Err(error) = img.load_image_file_by_path_async(cx, path) {
                         println!("封面加载失败 {}: {:?}", path.display(), error);
                         img.set_texture(cx, None);
                         cover_placeholder.set_visible(cx, true);
@@ -8931,7 +8945,6 @@ impl Widget for BookShelf {
         };
         let grid_columns = shelf_grid_columns_for_width(available_width);
         let grid_cover_height = shelf_grid_cover_height(available_width, grid_columns);
-
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 let item_count = if view_mode == LibraryViewMode::Grid {
@@ -8949,7 +8962,6 @@ impl Widget for BookShelf {
                     self.last_view_mode = view_mode;
                     self.grid_columns = grid_columns;
                     self.alternate_template = !self.alternate_template;
-                    self.loaded_covers.clear();
                 }
                 let template = if view_mode == LibraryViewMode::Grid {
                     if self.alternate_template {
@@ -9013,6 +9025,39 @@ impl Widget for BookShelf {
                         self.bind_book_card(cx, &item, book, language, true);
                     }
                     item.draw_all_unscoped(cx);
+                    if view_mode == LibraryViewMode::List {
+                        // The info area is only current after this item has drawn.
+                        // Updating the cover now leaves the row height determined
+                        // by the text, then schedules one frame for the new cover.
+                        let info_height = item.view(cx, ids!(info)).area().rect(cx).size.y;
+                        if info_height.is_finite() && info_height > 0.0 {
+                            let cover_width = info_height * LIST_COVER_WIDTH_TO_HEIGHT;
+                            let cover_ref = item.view(cx, ids!(cover));
+                            let mut cover_size_changed = false;
+                            if let Some(mut cover) = cover_ref.borrow_mut() {
+                                let old_width = match cover.walk.width {
+                                    Size::Fixed(width) => width,
+                                    _ => -1.0,
+                                };
+                                let old_height = match cover.walk.height {
+                                    Size::Fixed(height) => height,
+                                    _ => -1.0,
+                                };
+                                if (old_width - cover_width).abs() > 0.5
+                                    || (old_height - info_height).abs() > 0.5
+                                {
+                                    cover.walk.width = Size::Fixed(cover_width);
+                                    cover.walk.height = Size::Fixed(info_height);
+                                    cover_size_changed = true;
+                                }
+                            };
+                            if cover_size_changed {
+                                // redraw() is ignored during a draw event. Queue this
+                                // cached PortalList item for the next frame instead.
+                                cx.cx.redraw_area_in_draw(item.area());
+                            }
+                        }
+                    }
                 }
             }
         }
