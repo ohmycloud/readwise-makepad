@@ -4171,6 +4171,7 @@ script_mod! {
             flow: Overlay
             cover_ph := SolidView{
                 width: Fill height: Fill
+                visible: false
                 align: Align{ x: 0.5 y: 0.5 }
                 draw_bg.color: theme.color_highlight
                 draw_bg.border_radius: 4.0
@@ -4226,6 +4227,7 @@ script_mod! {
             align: Center
             cover_ph := SolidView{
                 width: Fill height: Fill
+                visible: false
                 new_batch: true
                 align: Center
                 draw_bg.color: theme.color_highlight
@@ -8913,10 +8915,11 @@ impl BookShelf {
             let cover_placeholder = card.widget(cx, ids!(cover_ph));
             match &book.cover_path {
                 Some(path) => {
-                    // In list mode Biggest fills the cover frame, so leave the
-                    // placeholder visible until the async image arrives. Grid mode
-                    // uses Smallest and hides it to avoid colored side bands.
-                    cover_placeholder.set_visible(cx, show_details);
+                    // A cover that is still loading should not flash the
+                    // fallback letter or its colored background.
+                    cover_placeholder.set_visible(cx, false);
+                    // PortalList can reuse this card for a different book.
+                    img.set_texture(cx, None);
                     let path = std::path::Path::new(path);
                     if let Err(error) = img.load_image_file_by_path_async(cx, path) {
                         println!("封面加载失败 {}: {:?}", path.display(), error);
