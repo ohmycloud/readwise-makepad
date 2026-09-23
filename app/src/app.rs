@@ -1913,7 +1913,10 @@ fn requested_book_is_ready() -> bool {
 #[derive(Debug)]
 enum CardAction {
     VocabAdded(bool),
-    MarkKnownSaved(String),
+    MarkKnownSaved {
+        lemma: String,
+        known_count: Option<usize>,
+    },
     MarkKnownFailed {
         lemma: String,
         book_id: Option<String>,
@@ -1954,9 +1957,19 @@ fn spawn_mark_known(lemma: String, book_id: Option<String>) {
         let result = DB
             .get()
             .ok_or_else(|| "数据库尚未就绪".to_string())
-            .and_then(|db| db.add_known_word(&lemma, "marked"));
+            .and_then(|db| {
+                db.add_known_word(&lemma, "marked")?;
+                let known_count = match db.get_known_words() {
+                    Ok(words) => Some(words.len()),
+                    Err(error) => {
+                        ::log::error!("刷新已认识单词数量失败: {}", error);
+                        None
+                    }
+                };
+                Ok(known_count)
+            });
         match result {
-            Ok(()) => Cx::post_action(CardAction::MarkKnownSaved(lemma)),
+            Ok(known_count) => Cx::post_action(CardAction::MarkKnownSaved { lemma, known_count }),
             Err(error) => {
                 ::log::error!("标记已认识失败: {}", error);
                 Cx::post_action(CardAction::MarkKnownFailed {
@@ -9271,7 +9284,7 @@ pub struct App {
 }
 
 impl App {
-    fn project_db_ready_status(&self, cx: &mut Cx, vocab_count: usize, known_count: usize) {
+    fn project_db_counts(&self, cx: &mut Cx, vocab_count: usize, known_count: usize) {
         let status = if app_language() == AppLanguage::English {
             format!(
                 "Database ready\nVocabulary {}\nKnown {}",
@@ -9281,6 +9294,25 @@ impl App {
             format!("数据库就绪\n生词本 {}\n已认识 {}", vocab_count, known_count)
         };
         self.ui.label(cx, ids!(db_status)).set_text(cx, &status);
+    }
+
+    fn project_known_word_count(&self, cx: &mut Cx, known_count: usize) {
+        let counts = {
+            let mut cached = DB_READY_COUNTS.write().unwrap();
+            cached.as_mut().map(|(vocab_count, cached_known_count)| {
+                // Concurrent saves can finish in a different order than their
+                // UI actions. Marking known words only increases this count.
+                *cached_known_count = (*cached_known_count).max(known_count);
+                (*vocab_count, *cached_known_count)
+            })
+        };
+        if let Some((vocab_count, known_count)) = counts {
+            self.project_db_counts(cx, vocab_count, known_count);
+        }
+    }
+
+    fn project_db_ready_status(&self, cx: &mut Cx, vocab_count: usize, known_count: usize) {
+        self.project_db_counts(cx, vocab_count, known_count);
         let summary = if app_language() == AppLanguage::English {
             format!("{vocab_count} words; loading list…")
         } else {
@@ -13561,7 +13593,10 @@ impl MatchEvent for App {
                             spawn_load_vocab();
                         }
                     }
-                    CardAction::MarkKnownSaved(lemma) => {
+                    CardAction::MarkKnownSaved { lemma, known_count } => {
+                        if let Some(known_count) = known_count {
+                            self.project_known_word_count(cx, *known_count);
+                        }
                         let changed = CURRENT_BOOK
                             .write()
                             .unwrap()
