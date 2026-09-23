@@ -8858,6 +8858,14 @@ struct BookShelf {
     last_view_mode: LibraryViewMode,
     #[rust]
     grid_columns: usize,
+    #[rust]
+    list_cover_heights: HashMap<String, f64>,
+    #[rust]
+    list_cover_default_height: Option<f64>,
+    #[rust]
+    list_cover_width: f64,
+    #[rust]
+    last_language: AppLanguage,
 }
 
 impl BookShelf {
@@ -8945,6 +8953,21 @@ impl Widget for BookShelf {
         };
         let grid_columns = shelf_grid_columns_for_width(available_width);
         let grid_cover_height = shelf_grid_cover_height(available_width, grid_columns);
+        let language_changed = self.last_language != language;
+        self.last_language = language;
+        if language_changed {
+            // Existing cards have their own cached draw lists. Rebinding their
+            // labels during this draw needs a subsequent pass to paint them.
+            cx.cx.redraw_all();
+        }
+        if view_mode == LibraryViewMode::List
+            && measured_width > 0.0
+            && (self.list_cover_width - measured_width).abs() > 0.5
+        {
+            self.list_cover_heights.clear();
+            self.list_cover_default_height = None;
+            self.list_cover_width = measured_width;
+        }
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 let item_count = if view_mode == LibraryViewMode::Grid {
@@ -8982,7 +9005,7 @@ impl Widget for BookShelf {
                     if item_id >= item_count {
                         continue;
                     }
-                    let item = list.item(cx, item_id, template);
+                    let (item, existed) = list.item_with_existed(cx, item_id, template);
                     if view_mode == LibraryViewMode::Grid {
                         for (column, cell_id) in [
                             id!(grid_cell_0),
@@ -9012,25 +9035,56 @@ impl Widget for BookShelf {
                                 if let Some(mut cover) = card.view(cx, ids!(cover)).borrow_mut() {
                                     cover.walk.height = Size::Fixed(grid_cover_height);
                                 }
-                                self.bind_book_card(
-                                    cx,
-                                    &card,
-                                    &shelf.entries[book_index],
-                                    language,
-                                    false,
-                                );
+                                if !existed || language_changed {
+                                    self.bind_book_card(
+                                        cx,
+                                        &card,
+                                        &shelf.entries[book_index],
+                                        language,
+                                        false,
+                                    );
+                                }
                             }
                         }
                     } else if let Some(book) = shelf.entry_for_item_id(item_id) {
-                        self.bind_book_card(cx, &item, book, language, true);
+                        if !existed {
+                            if let Some(height) = self
+                                .list_cover_heights
+                                .get(&book.id)
+                                .copied()
+                                .or(self.list_cover_default_height)
+                            {
+                                if let Some(mut cover) = item.view(cx, ids!(cover)).borrow_mut() {
+                                    cover.walk.width =
+                                        Size::Fixed(height * LIST_COVER_WIDTH_TO_HEIGHT);
+                                    cover.walk.height = Size::Fixed(height);
+                                }
+                            }
+                        }
+                        if !existed || language_changed {
+                            self.bind_book_card(cx, &item, book, language, true);
+                        }
                     }
                     item.draw_all_unscoped(cx);
                     if view_mode == LibraryViewMode::List {
-                        // The info area is only current after this item has drawn.
-                        // Updating the cover now leaves the row height determined
-                        // by the text, then schedules one frame for the new cover.
+                        // The info area is current only after drawing. Cached
+                        // heights let reused cards render their cover in this
+                        // pass; only an actual height change needs another.
                         let info_height = item.view(cx, ids!(info)).area().rect(cx).size.y;
                         if info_height.is_finite() && info_height > 0.0 {
+                            if let Some(book) = shelf.entry_for_item_id(item_id) {
+                                if self
+                                    .list_cover_heights
+                                    .get(&book.id)
+                                    .is_none_or(|height| (height - info_height).abs() > 0.5)
+                                {
+                                    self.list_cover_heights.insert(book.id.clone(), info_height);
+                                }
+                            }
+                            self.list_cover_default_height = Some(
+                                self.list_cover_default_height
+                                    .map_or(info_height, |height| height.min(info_height)),
+                            );
                             let cover_width = info_height * LIST_COVER_WIDTH_TO_HEIGHT;
                             let cover_ref = item.view(cx, ids!(cover));
                             let mut cover_size_changed = false;
