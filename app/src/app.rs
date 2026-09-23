@@ -2150,7 +2150,12 @@ fn navigation_palette_for_page(
     reader_scene_palette(background, theme)
 }
 
-fn apply_reader_button_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
+fn apply_reader_button_palette_with_focus(
+    cx: &mut Cx,
+    mut widget: WidgetRef,
+    palette: ReaderScenePalette,
+    focus_background: Vec4f,
+) {
     let text = palette.text;
     let field = palette.field;
     let border = palette.border;
@@ -2167,13 +2172,17 @@ fn apply_reader_button_palette(cx: &mut Cx, mut widget: WidgetRef, palette: Read
             color: #(field)
             color_hover: #(hover)
             color_down: #(pressed)
-            color_focus: #(hover)
+            color_focus: #(focus_background)
             border_color: #(border)
             border_color_hover: #(border)
             border_color_down: #(border)
             border_color_focus: #(border)
         }
     });
+}
+
+fn apply_reader_button_palette(cx: &mut Cx, widget: WidgetRef, palette: ReaderScenePalette) {
+    apply_reader_button_palette_with_focus(cx, widget, palette, palette.hover);
 }
 
 fn apply_reader_input_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
@@ -9373,7 +9382,15 @@ impl App {
             id!(mobile_nav_statistics),
             id!(mobile_nav_settings),
         ] {
-            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
+            // Navigation buttons keep keyboard focus after a mouse click. A
+            // highlighted focus background makes the previously clicked button
+            // animate back to normal when the next button takes focus.
+            apply_reader_button_palette_with_focus(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette,
+                palette.field,
+            );
         }
         self.ui.widget(cx, ids!(sidebar)).redraw(cx);
         self.ui.widget(cx, ids!(mobile_nav)).redraw(cx);
