@@ -72,13 +72,16 @@ fn library_surface_visibility(visible_count: usize) -> (bool, bool) {
 }
 
 fn shelf_grid_columns_for_width(width: f64) -> usize {
-    if width >= 1080.0 {
-        4
-    } else if width >= 760.0 {
-        3
-    } else {
-        2
-    }
+    // Match the number of columns to the space available for roughly 200px cards.
+    // The row templates have six cells; narrow screens always keep two columns.
+    ((width - 48.0 + 8.0) / 208.0).floor().clamp(2.0, 6.0) as usize
+}
+
+fn shelf_grid_cover_height(width: f64, columns: usize) -> f64 {
+    let columns = columns.max(1) as f64;
+    // PortalList padding, row gaps, scrollbar, and the card's own padding.
+    let cell_width = (width - 48.0 - 8.0 * (columns - 1.0) - 12.0) / columns;
+    ((cell_width - 20.0).max(1.0) * 116.0 / 86.0).round()
 }
 
 fn shelf_grid_row_count(book_count: usize, columns: usize) -> usize {
@@ -1743,8 +1746,9 @@ mod shelf_filter_tests {
     #[test]
     fn shelf_grid_uses_responsive_columns_and_complete_rows() {
         assert_eq!(shelf_grid_columns_for_width(390.0), 2);
-        assert_eq!(shelf_grid_columns_for_width(900.0), 3);
-        assert_eq!(shelf_grid_columns_for_width(1200.0), 4);
+        assert_eq!(shelf_grid_columns_for_width(900.0), 4);
+        assert_eq!(shelf_grid_columns_for_width(1200.0), 5);
+        assert_eq!(shelf_grid_columns_for_width(1600.0), 6);
         assert_eq!(shelf_grid_row_count(0, 3), 0);
         assert_eq!(shelf_grid_row_count(7, 3), 3);
         assert_eq!(shelf_grid_book_index(2, 0, 3, 7), Some(6));
@@ -4210,12 +4214,12 @@ script_mod! {
         capture_overload: false
         cursor: MouseCursor.Hand
         flow: Down spacing: 5 padding: 10
-        align: Align{ x: 0.0 }
         draw_bg.color: theme.color_u_hidden
         draw_bg.border_radius: 8.0
         cover := View{
-            width: 86 height: 116
+            width: Fill height: 116
             flow: Overlay
+            align: Center
             cover_ph := SolidView{
                 width: Fill height: Fill
                 new_batch: true
@@ -4229,7 +4233,7 @@ script_mod! {
             }
             cover_img := Image{
                 width: Fill height: Fill
-                fit: ImageFit.Biggest
+                fit: ImageFit.Smallest
             }
         }
         grid_status_row := View{
@@ -4264,7 +4268,7 @@ script_mod! {
             CardAlternate := mod.widgets.BookShelfCard{}
             GridRow := View{
                 width: Fill height: Fit
-                flow: Right spacing: 12
+                flow: Right spacing: 8
                 grid_cell_0 := View{
                     width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
@@ -4278,13 +4282,21 @@ script_mod! {
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_3 := View{
+                    width: Fill height: Fit
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_4 := View{
+                    width: Fill height: Fit
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_5 := View{
                     width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
             }
             GridRowAlternate := View{
                 width: Fill height: Fit
-                flow: Right spacing: 12
+                flow: Right spacing: 8
                 grid_cell_0 := View{
                     width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
@@ -4298,6 +4310,14 @@ script_mod! {
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
                 grid_cell_3 := View{
+                    width: Fill height: Fit
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_4 := View{
+                    width: Fill height: Fit
+                    grid_card := mod.widgets.BookShelfGridCard{}
+                }
+                grid_cell_5 := View{
                     width: Fill height: Fit
                     grid_card := mod.widgets.BookShelfGridCard{}
                 }
@@ -8868,15 +8888,24 @@ impl BookShelf {
         let card_uid = card.widget_uid();
         if shelf_cover_needs_load(&self.loaded_covers, card_uid, &book.cover_path) {
             let img = card.image(cx, ids!(cover_img));
+            let cover_placeholder = card.widget(cx, ids!(cover_ph));
             match &book.cover_path {
                 Some(path) => {
+                    // Keep the placeholder behind the image only while the book
+                    // has no usable cover. Otherwise its colored background shows
+                    // through the letterboxed top and bottom of portrait covers.
+                    cover_placeholder.set_visible(cx, false);
                     let path = std::path::Path::new(path);
                     if let Err(error) = img.load_image_file_by_path(cx, path) {
                         println!("封面加载失败 {}: {:?}", path.display(), error);
                         img.set_texture(cx, None);
+                        cover_placeholder.set_visible(cx, true);
                     }
                 }
-                None => img.set_texture(cx, None),
+                None => {
+                    img.set_texture(cx, None);
+                    cover_placeholder.set_visible(cx, true);
+                }
             }
             if card_uid != WidgetUid(0) {
                 self.loaded_covers.insert(card_uid, book.cover_path.clone());
@@ -8901,6 +8930,7 @@ impl Widget for BookShelf {
             cx.display_context.screen_size.x
         };
         let grid_columns = shelf_grid_columns_for_width(available_width);
+        let grid_cover_height = shelf_grid_cover_height(available_width, grid_columns);
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
@@ -8947,6 +8977,8 @@ impl Widget for BookShelf {
                             id!(grid_cell_1),
                             id!(grid_cell_2),
                             id!(grid_cell_3),
+                            id!(grid_cell_4),
+                            id!(grid_cell_5),
                         ]
                         .into_iter()
                         .enumerate()
@@ -8965,6 +8997,9 @@ impl Widget for BookShelf {
                             );
                             card.set_visible(cx, book_index.is_some());
                             if let Some(book_index) = book_index {
+                                if let Some(mut cover) = card.view(cx, ids!(cover)).borrow_mut() {
+                                    cover.walk.height = Size::Fixed(grid_cover_height);
+                                }
                                 self.bind_book_card(
                                     cx,
                                     &card,
@@ -14158,6 +14193,8 @@ impl MatchEvent for App {
                     id!(grid_cell_1),
                     id!(grid_cell_2),
                     id!(grid_cell_3),
+                    id!(grid_cell_4),
+                    id!(grid_cell_5),
                 ]
                 .into_iter()
                 .enumerate()
