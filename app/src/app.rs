@@ -4205,15 +4205,12 @@ script_mod! {
     }
 
     mod.widgets.BookShelfGridCard = RoundedView{
-        // Two-line titles must not push the status outside a fixed card clip.
-        // The enclosing grid cells also fit content, so the row measures the
-        // tallest complete card before placing the next row.
         width: Fill height: Fit
         new_batch: true
         capture_overload: false
         cursor: MouseCursor.Hand
         flow: Down spacing: 5 padding: 10
-        align: Align{ x: 0.5 }
+        align: Align{ x: 0.0 }
         draw_bg.color: theme.color_u_hidden
         draw_bg.border_radius: 8.0
         cover := View{
@@ -4235,38 +4232,23 @@ script_mod! {
                 fit: ImageFit.Biggest
             }
         }
-        grid_title_row := View{
+        grid_status_row := View{
             width: Fill
             height: Fit
             flow: Right spacing: 4
             align: Align{y: 0.5}
-            card_title := Label{
+            card_status := Label{
                 width: Fill
-                max_lines: 2
+                max_lines: 1
                 text_overflow: Ellipsis
                 text: ""
-                draw_text.text_style.font_size: 12
+                draw_text.color: theme.color_highlight
+                draw_text.text_style.font_size: 9
             }
             more_btn := ButtonFlatter{
                 width: 34 height: 30 text: "•••"
                 draw_text.text_style.font_size: 11
             }
-        }
-        card_author := Label{
-            width: Fill
-            max_lines: 1
-            text_overflow: Ellipsis
-            text: ""
-            draw_text.color: theme.color_label_inner_inactive
-            draw_text.text_style.font_size: 9
-        }
-        card_status := Label{
-            width: Fill
-            max_lines: 1
-            text_overflow: Ellipsis
-            text: ""
-            draw_text.color: theme.color_highlight
-            draw_text.text_style.font_size: 9
         }
     }
 
@@ -8861,6 +8843,7 @@ impl BookShelf {
         card: &WidgetRef,
         book: &ShelfItem,
         language: AppLanguage,
+        show_details: bool,
     ) {
         let letter = book
             .title
@@ -8869,8 +8852,10 @@ impl BookShelf {
             .map(|c| c.to_string())
             .unwrap_or_default();
         card.label(cx, ids!(cover_letter)).set_text(cx, &letter);
-        card.label(cx, ids!(card_title)).set_text(cx, &book.title);
-        card.label(cx, ids!(card_author)).set_text(cx, &book.author);
+        if show_details {
+            card.label(cx, ids!(card_title)).set_text(cx, &book.title);
+            card.label(cx, ids!(card_author)).set_text(cx, &book.author);
+        }
         card.label(cx, ids!(card_status)).set_text(
             cx,
             &shelf_status(
@@ -8985,11 +8970,12 @@ impl Widget for BookShelf {
                                     &card,
                                     &shelf.entries[book_index],
                                     language,
+                                    false,
                                 );
                             }
                         }
                     } else if let Some(book) = shelf.entry_for_item_id(item_id) {
-                        self.bind_book_card(cx, &item, book, language);
+                        self.bind_book_card(cx, &item, book, language, true);
                     }
                     item.draw_all_unscoped(cx);
                 }
