@@ -10698,7 +10698,7 @@ impl App {
         }
     }
 
-    fn start_reading_timer(&mut self, cx: &mut Cx) {
+    fn start_reading_timer(&mut self) {
         if !self.app_in_foreground
             || !self.on_reader_page
             || self.reading_session_id.is_some()
@@ -10714,14 +10714,6 @@ impl App {
         let Some(book_id) = book_id else { return };
         self.reading_session_pending = true;
         self.reading_session_invalidated = false;
-        self.ui.label(cx, ids!(status)).set_text(
-            cx,
-            if app_language() == AppLanguage::English {
-                "Tracking reading time…"
-            } else {
-                "阅读计时中…"
-            },
-        );
         spawn_start_reading_session(book_id);
     }
 
@@ -12729,19 +12721,19 @@ impl MatchEvent for App {
         if has_current_book {
             self.restore_reader_after_rebuild(cx);
             if page == AppPage::Reader {
-                self.start_reading_timer(cx);
+                self.start_reading_timer();
             }
         }
     }
 
-    fn handle_foreground(&mut self, cx: &mut Cx) {
+    fn handle_foreground(&mut self, _cx: &mut Cx) {
         self.app_in_foreground = true;
-        self.start_reading_timer(cx);
+        self.start_reading_timer();
     }
 
-    fn handle_resume(&mut self, cx: &mut Cx) {
+    fn handle_resume(&mut self, _cx: &mut Cx) {
         self.app_in_foreground = true;
-        self.start_reading_timer(cx);
+        self.start_reading_timer();
     }
 
     fn handle_background(&mut self, cx: &mut Cx) {
@@ -12983,16 +12975,12 @@ impl MatchEvent for App {
                             self.statistics_after_pending_session = false;
                             self.reading_session_id = Some(id.clone());
                             self.reading_checkpoint_timer = cx.start_interval(30.0);
-                            self.ui.label(cx, ids!(status)).set_text(
-                                cx,
-                                localized("阅读时长已开始记录", "Reading time tracking started"),
-                            );
                         } else {
                             let load_statistics = self.statistics_after_pending_session;
                             self.statistics_after_pending_session = false;
                             spawn_finish_reading_session(id.clone(), load_statistics);
                             if self.app_in_foreground && self.on_reader_page && is_current_book {
-                                self.start_reading_timer(cx);
+                                self.start_reading_timer();
                             }
                         }
                     }
@@ -13650,7 +13638,7 @@ impl MatchEvent for App {
                             spawn_load_notes(book_id.clone());
                             spawn_build_reader_pagination(book_id);
                         }
-                        self.start_reading_timer(cx);
+                        self.start_reading_timer();
                     }
                     ReaderAction::OpenError { request_id, error } => {
                         if *request_id != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) {
@@ -14372,7 +14360,7 @@ impl MatchEvent for App {
             || self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions)
         {
             self.activate_page(cx, AppPage::Reader);
-            self.start_reading_timer(cx);
+            self.start_reading_timer();
         }
         if self.ui.button(cx, ids!(nav_chat)).clicked(actions)
             || self.ui.button(cx, ids!(mobile_nav_chat)).clicked(actions)
