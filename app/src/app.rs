@@ -9164,6 +9164,8 @@ pub struct App {
     #[rust]
     library_tag_filter: Option<String>,
     #[rust]
+    import_picker_frame: Option<NextFrame>,
+    #[rust]
     editing_book_tags_id: Option<String>,
     #[rust]
     editing_book_title_id: Option<String>,
@@ -12959,6 +12961,35 @@ impl MatchEvent for App {
                     self.page_scroll(cx, turn.0);
                 }
             }
+            #[cfg(target_os = "macos")]
+            if let Some(import_action) =
+                action.downcast_ref::<crate::desktop_import::DesktopImportAction>()
+            {
+                match import_action {
+                    crate::desktop_import::DesktopImportAction::Picked(paths) => {
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            localized("正在导入所选 EPUB…", "Importing selected EPUB files…"),
+                        );
+                        spawn_import(paths.clone(), false);
+                    }
+                    crate::desktop_import::DesktopImportAction::Cancelled => {
+                        self.ui
+                            .label(cx, ids!(library_hint))
+                            .set_text(cx, localized("已取消导入", "Import cancelled"));
+                    }
+                    crate::desktop_import::DesktopImportAction::Error(error) => {
+                        self.ui.label(cx, ids!(library_hint)).set_text(
+                            cx,
+                            &if app_language() == AppLanguage::English {
+                                format!("Could not open the file picker: {error}")
+                            } else {
+                                format!("无法打开文件选择器：{error}")
+                            },
+                        );
+                    }
+                }
+            }
             #[cfg(target_os = "ios")]
             if let Some(import_action) =
                 action.downcast_ref::<crate::mobile_import::IosImportAction>()
@@ -14336,29 +14367,11 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(import_epub_btn)).clicked(actions) {
             #[cfg(target_os = "macos")]
-            match crate::desktop_import::open_epub_picker(
-                localized("导入 EPUB", "Import EPUB"),
-                localized("导入", "Import"),
-            ) {
-                Ok(Some(paths)) => {
-                    self.ui.label(cx, ids!(library_hint)).set_text(
-                        cx,
-                        localized("正在导入所选 EPUB…", "Importing selected EPUB files…"),
-                    );
-                    spawn_import(paths, false);
-                }
-                Ok(None) => self
-                    .ui
-                    .label(cx, ids!(library_hint))
-                    .set_text(cx, localized("已取消导入", "Import cancelled")),
-                Err(error) => self.ui.label(cx, ids!(library_hint)).set_text(
-                    cx,
-                    &if app_language() == AppLanguage::English {
-                        format!("Could not open the file picker: {error}")
-                    } else {
-                        format!("无法打开文件选择器：{error}")
-                    },
-                ),
+            if self.import_picker_frame.is_none() {
+                // The action is delivered inside Makepad's MouseUp dispatch,
+                // before it clears the pressed finger. Present the native
+                // sheet after that event has fully unwound.
+                self.import_picker_frame = Some(cx.new_next_frame());
             }
             #[cfg(target_os = "ios")]
             match crate::mobile_import::open_epub_picker() {
@@ -15368,6 +15381,28 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        #[cfg(target_os = "macos")]
+        if self
+            .import_picker_frame
+            .as_ref()
+            .and_then(|frame| frame.is_event(event))
+            .is_some()
+        {
+            self.import_picker_frame = None;
+            if let Err(error) = crate::desktop_import::open_epub_picker(
+                localized("导入 EPUB", "Import EPUB"),
+                localized("导入", "Import"),
+            ) {
+                self.ui.label(cx, ids!(library_hint)).set_text(
+                    cx,
+                    &if app_language() == AppLanguage::English {
+                        format!("Could not open the file picker: {error}")
+                    } else {
+                        format!("无法打开文件选择器：{error}")
+                    },
+                );
+            }
+        }
         // The word card owns pointer input while open. A press outside closes
         // it immediately; a press inside must not start selection underneath.
         let word_card_press = match event {
