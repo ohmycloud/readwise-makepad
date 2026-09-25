@@ -6845,16 +6845,21 @@ script_mod! {
                                         reader_customise_margin_slider := ReaderLayoutSlider{min: -10. max: 10.}
                                         reader_customise_margin_value := Label{width: 58 text: "0%"}
                                     }
-                                    reader_customise_columns_title := Label{
-                                        text: "Columns"
-                                        draw_text.text_style.font_size: 13
-                                    }
                                     reader_customise_columns_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
-                                        reader_customise_columns_one := ButtonFlat{text: "1"}
-                                        reader_customise_columns_two := ButtonFlat{text: "2"}
-                                        reader_customise_columns_auto := ButtonFlat{text: "Auto Set"}
+                                        align: Align{y: 0.5}
+                                        reader_customise_columns_title := Label{
+                                            width: Fill
+                                            text: "Columns"
+                                            draw_text.text_style.font_size: 13
+                                        }
+                                        reader_customise_columns_choice := DropDown{
+                                            width: 180 height: 32
+                                            align: Align{x: 0.0 y: 0.5}
+                                            padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
+                                            labels: ["1", "2", "Auto Set"]
+                                        }
                                     }
                                     reader_customise_justify := CheckBox{text: "Justify Text"}
                                     reader_customise_reset := ButtonFlatter{
@@ -11289,19 +11294,14 @@ impl App {
                 .collect(),
         );
         font_choice.set_selected_item(cx, font.index());
+        self.ui
+            .drop_down(cx, ids!(reader_customise_columns_choice))
+            .set_selected_item(cx, match columns {
+                ReaderColumns::One => 0,
+                ReaderColumns::Two => 1,
+                ReaderColumns::Auto => 2,
+            });
         for (id, selected) in [
-            (
-                id!(reader_customise_columns_one),
-                columns == ReaderColumns::One,
-            ),
-            (
-                id!(reader_customise_columns_two),
-                columns == ReaderColumns::Two,
-            ),
-            (
-                id!(reader_customise_columns_auto),
-                columns == ReaderColumns::Auto,
-            ),
             (
                 id!(reader_customise_gloss_color_green),
                 settings.gloss_color_slot == 0,
@@ -11811,6 +11811,7 @@ impl App {
             id!(reader_customise_cancel),
             id!(reader_customise_save),
             id!(reader_customise_font_choice),
+            id!(reader_customise_columns_choice),
             id!(reader_customise_size_down),
             id!(reader_customise_size_up),
             id!(reader_customise_gloss_size_down),
@@ -11831,9 +11832,6 @@ impl App {
             id!(reader_customise_word_bg_gray),
             id!(reader_customise_word_bg_green),
             id!(reader_customise_word_bg_blue),
-            id!(reader_customise_columns_one),
-            id!(reader_customise_columns_two),
-            id!(reader_customise_columns_auto),
             id!(reader_customise_reset),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
@@ -16867,16 +16865,18 @@ impl MatchEvent for App {
                 self.sync_reader_customise_controls(cx);
             }
         }
-        for (id, columns) in [
-            (id!(reader_customise_columns_one), ReaderColumns::One),
-            (id!(reader_customise_columns_two), ReaderColumns::Two),
-            (id!(reader_customise_columns_auto), ReaderColumns::Auto),
-        ] {
-            if self.ui.button(cx, &[id]).clicked(actions) {
-                if let Some(draft) = self.reader_customise_draft.as_mut() {
-                    draft.columns = columns;
-                    self.sync_reader_customise_controls(cx);
-                }
+        if let Some(index) = self
+            .ui
+            .drop_down(cx, ids!(reader_customise_columns_choice))
+            .selected(actions)
+        {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.columns = match index {
+                    0 => ReaderColumns::One,
+                    1 => ReaderColumns::Two,
+                    _ => ReaderColumns::Auto,
+                };
+                self.sync_reader_customise_controls(cx);
             }
         }
         if let Some(justify) = self
