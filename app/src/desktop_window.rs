@@ -24,15 +24,15 @@ extern "C" fn reader_window_should_zoom(
     _new_frame: NSRect,
 ) -> BOOL {
     unsafe {
-        // AppKit can zoom a titled window on the second click even after the
-        // Makepad button received its first click. Keep that native gesture
-        // away from the reader's toolbar; the green zoom button still works.
+        // Rapid separate clicks can reach AppKit's zoom path with a mouse
+        // click count of one. Reject any mouse-initiated zoom from the reader
+        // toolbar buttons; the green zoom button remains outside these areas.
         let event: ObjcId = msg_send![window, currentEvent];
         if event == nil {
             return YES;
         }
         let click_count: isize = msg_send![event, clickCount];
-        if click_count < 2 {
+        if click_count < 1 {
             return YES;
         }
         let point: NSPoint = msg_send![event, locationInWindow];
