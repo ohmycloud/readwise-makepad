@@ -370,6 +370,8 @@ impl Db {
                 .await
                 .map_err(|e| format!("读取阅读设置失败: {e}"))?;
             let mut settings = crate::settings::ReaderSettings::default();
+            let mut legacy_margin_pixels = None;
+            let mut margin_percent = None;
             for row in rows {
                 let key: String = row.get("key");
                 let value: String = row.get("value");
@@ -405,7 +407,8 @@ impl Db {
                     "reader.word_spacing" => {
                         settings.word_spacing = value.parse().unwrap_or(settings.word_spacing)
                     }
-                    "reader.margin" => settings.margin = value.parse().unwrap_or(settings.margin),
+                    "reader.margin" => legacy_margin_pixels = value.parse::<f32>().ok(),
+                    "reader.margin_percent" => margin_percent = value.parse::<f32>().ok(),
                     "reader.justify_text" => settings.justify_text = value == "1",
                     "reader.font_size" => settings.font_size = value.parse().ok(),
                     "reader.gloss_enabled" => settings.gloss_enabled = value == "1",
@@ -440,6 +443,9 @@ impl Db {
                     _ => {}
                 }
             }
+            settings.margin = margin_percent
+                .or_else(|| legacy_margin_pixels.map(|pixels| (pixels / 28.0 - 1.0) * 100.0))
+                .unwrap_or(settings.margin);
             Ok(settings.normalized())
         })
     }
@@ -482,10 +488,10 @@ impl Db {
                 ("reader.turn_mode", turn_mode),
                 ("reader.font", font),
                 ("reader.bold_text", bold_text),
-                ("reader.spacing", spacing),
+                ("reader.spacing", spacing.as_str()),
                 ("reader.character_spacing", character_spacing.as_str()),
                 ("reader.word_spacing", word_spacing.as_str()),
-                ("reader.margin", margin.as_str()),
+                ("reader.margin_percent", margin.as_str()),
                 ("reader.justify_text", justify_text),
                 ("reader.font_size", font_size.as_str()),
                 ("reader.gloss_enabled", gloss_enabled),
@@ -1093,12 +1099,47 @@ mod migration_tests {
         let mut settings = db.load_reader_settings().unwrap();
         settings.background = crate::settings::ReaderBackground::Bold;
         settings.bold_text = true;
-        settings.character_spacing = 0.06;
-        settings.word_spacing = 0.15;
-        settings.margin = 52.0;
+        settings.spacing = crate::settings::ReaderSpacing::Custom(1.7);
+        settings.character_spacing = -0.06;
+        settings.word_spacing = -0.15;
+        settings.margin = 7.0;
         settings.justify_text = true;
         db.save_reader_settings(&settings).unwrap();
         assert_eq!(db.load_reader_settings().unwrap(), settings);
+    }
+
+    #[test]
+    fn legacy_reader_layout_values_are_preserved_when_loaded() {
+        let (rt, pool) = runtime_and_pool();
+        rt.block_on(initialize_schema(&pool)).unwrap();
+        rt.block_on(async {
+            sqlx::query("INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)")
+                .bind("reader.margin")
+                .bind("28")
+                .bind(0_i64)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)")
+                .bind("reader.spacing")
+                .bind("comfortable")
+                .bind(0_i64)
+                .execute(&pool)
+                .await
+                .unwrap();
+        });
+        let db = Db {
+            rt,
+            pool,
+            data_dir: std::path::PathBuf::new(),
+        };
+        let settings = db.load_reader_settings().unwrap();
+        assert_eq!(settings.margin, 0.0);
+        assert_eq!(settings.spacing.plain_line_spacing(), 1.45);
+        let mut settings = settings;
+        settings.margin = -5.0;
+        db.save_reader_settings(&settings).unwrap();
+        assert_eq!(db.load_reader_settings().unwrap().margin, -5.0);
     }
 
     fn runtime_and_pool() -> (tokio::runtime::Runtime, SqlitePool) {

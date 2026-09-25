@@ -264,45 +264,64 @@ impl ReaderFont {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum ReaderSpacing {
     #[default]
     Default,
     Comfortable,
     Relaxed,
+    Custom(f32),
 }
 
 impl ReaderSpacing {
-    pub fn as_str(self) -> &'static str {
+    pub const MIN: f32 = 0.8;
+    pub const MAX: f32 = 2.5;
+
+    pub fn as_str(self) -> String {
         match self {
-            Self::Default => "default",
-            Self::Comfortable => "comfortable",
-            Self::Relaxed => "relaxed",
+            Self::Default => "default".to_string(),
+            Self::Comfortable => "1.85".to_string(),
+            Self::Relaxed => "2.15".to_string(),
+            Self::Custom(value) => value.to_string(),
         }
     }
 
     pub fn from_str(value: &str) -> Self {
         match value {
-            "comfortable" => Self::Comfortable,
-            "relaxed" => Self::Relaxed,
-            _ => Self::Default,
+            "comfortable" => Self::Custom(1.45),
+            "relaxed" => Self::Custom(1.75),
+            "default" => Self::Default,
+            _ => value.parse().map(Self::from_value).unwrap_or_default(),
+        }
+    }
+
+    pub fn from_value(value: f32) -> Self {
+        if !value.is_finite() {
+            return Self::Default;
+        }
+        let value = value.clamp(Self::MIN, Self::MAX);
+        if (value - 1.55).abs() < 0.005 {
+            Self::Default
+        } else if (value - 1.85).abs() < 0.005 {
+            Self::Comfortable
+        } else if (value - 2.15).abs() < 0.005 {
+            Self::Relaxed
+        } else {
+            Self::Custom(value)
         }
     }
 
     pub fn plain_line_spacing(self) -> f32 {
         match self {
-            Self::Default => 1.2,
-            Self::Comfortable => 1.45,
-            Self::Relaxed => 1.75,
+            Self::Default => 1.55,
+            Self::Comfortable => 1.85,
+            Self::Relaxed => 2.15,
+            Self::Custom(value) => value,
         }
     }
 
     pub fn gloss_line_spacing(self) -> f32 {
-        match self {
-            Self::Default => 2.2,
-            Self::Comfortable => 2.45,
-            Self::Relaxed => 2.75,
-        }
+        self.plain_line_spacing() + 1.0
     }
 }
 
@@ -319,6 +338,7 @@ pub struct ReaderSettings {
     pub spacing: ReaderSpacing,
     pub character_spacing: f32,
     pub word_spacing: f32,
+    /// Percentage adjustment to the default reader margin, from -10 to 10.
     pub margin: f32,
     pub justify_text: bool,
     pub font_size: Option<f32>,
@@ -346,7 +366,7 @@ impl Default for ReaderSettings {
             spacing: ReaderSpacing::Default,
             character_spacing: 0.0,
             word_spacing: 0.0,
-            margin: 28.0,
+            margin: 0.0,
             justify_text: false,
             font_size: None,
             gloss_enabled: true,
@@ -363,6 +383,7 @@ impl Default for ReaderSettings {
 
 impl ReaderSettings {
     pub fn normalized(mut self) -> Self {
+        self.spacing = ReaderSpacing::from_value(self.spacing.plain_line_spacing());
         self.font_size = self
             .font_size
             .filter(|value| value.is_finite())
@@ -370,15 +391,15 @@ impl ReaderSettings {
         if !self.character_spacing.is_finite() {
             self.character_spacing = 0.0;
         }
-        self.character_spacing = self.character_spacing.clamp(0.0, 0.12);
+        self.character_spacing = self.character_spacing.clamp(-0.1, 0.1);
         if !self.word_spacing.is_finite() {
             self.word_spacing = 0.0;
         }
-        self.word_spacing = self.word_spacing.clamp(0.0, 0.3);
+        self.word_spacing = self.word_spacing.clamp(-0.2, 0.2);
         if !self.margin.is_finite() {
             self.margin = Self::default().margin;
         }
-        self.margin = self.margin.clamp(12.0, 80.0);
+        self.margin = self.margin.clamp(-10.0, 10.0);
         if !self.gloss_font_size.is_finite() {
             self.gloss_font_size = Self::default().gloss_font_size;
         }
@@ -390,6 +411,10 @@ impl ReaderSettings {
         self.selection_color_slot = self.selection_color_slot.min(3);
         self.highlight_color_slot = self.highlight_color_slot.min(3);
         self
+    }
+
+    pub fn margin_pixels(margin_percent: f32) -> f32 {
+        28.0 * (1.0 + margin_percent.clamp(-10.0, 10.0) / 100.0)
     }
 }
 
@@ -504,11 +529,37 @@ mod tests {
             ReaderSpacing::Default,
             ReaderSpacing::Comfortable,
             ReaderSpacing::Relaxed,
+            ReaderSpacing::Custom(0.8),
+            ReaderSpacing::Custom(2.5),
         ] {
             assert!(spacing.gloss_line_spacing() > spacing.plain_line_spacing());
-            assert!(spacing.gloss_line_spacing() >= 2.2);
-            assert_eq!(ReaderSpacing::from_str(spacing.as_str()), spacing);
+            assert_eq!(ReaderSpacing::from_str(&spacing.as_str()), spacing);
         }
         assert_eq!(ReaderSpacing::from_str("unknown"), ReaderSpacing::Default);
+        assert_eq!(
+            ReaderSpacing::from_str("comfortable").plain_line_spacing(),
+            1.45
+        );
+        assert_eq!(
+            ReaderSpacing::from_str("relaxed").plain_line_spacing(),
+            1.75
+        );
+        assert_eq!(ReaderSpacing::Default.plain_line_spacing(), 1.55);
+        assert_eq!(ReaderSpacing::from_value(9.0).plain_line_spacing(), 2.5);
+    }
+
+    #[test]
+    fn reader_layout_ranges_include_negative_adjustments() {
+        let mut settings = ReaderSettings::default();
+        assert_eq!(settings.margin, 0.0);
+        assert_eq!(ReaderSettings::margin_pixels(settings.margin), 28.0);
+        settings.character_spacing = -0.2;
+        settings.word_spacing = 0.4;
+        settings.margin = -15.0;
+        let settings = settings.normalized();
+        assert_eq!(settings.character_spacing, -0.1);
+        assert_eq!(settings.word_spacing, 0.2);
+        assert_eq!(settings.margin, -10.0);
+        assert!(ReaderSettings::margin_pixels(settings.margin) < 28.0);
     }
 }

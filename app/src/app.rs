@@ -2022,7 +2022,7 @@ static READER_FONT_SIZE: LazyLock<RwLock<Option<f32>>> = LazyLock::new(|| RwLock
 static READER_BOLD_TEXT: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
 static READER_CHARACTER_SPACING: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(0.0));
 static READER_WORD_SPACING: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(0.0));
-static READER_MARGIN: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(28.0));
+static READER_MARGIN: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(0.0));
 static READER_JUSTIFY_TEXT: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
 static READER_CUSTOMISE_OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -6818,15 +6818,15 @@ script_mod! {
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_line_label := Label{width: 164 text: "LINE SPACING"}
-                                        reader_customise_line_slider := ReaderLayoutSlider{min: 0. max: 2.}
-                                        reader_customise_line_value := Label{width: 58 text: "1.2×"}
+                                        reader_customise_line_slider := ReaderLayoutSlider{min: 0.8 max: 2.5}
+                                        reader_customise_line_value := Label{width: 58 text: "1.55×"}
                                     }
                                     reader_customise_character_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_character_label := Label{width: 164 text: "CHARACTER SPACING"}
-                                        reader_customise_character_slider := ReaderLayoutSlider{min: 0. max: 6.}
+                                        reader_customise_character_slider := ReaderLayoutSlider{min: -10. max: 10.}
                                         reader_customise_character_value := Label{width: 58 text: "0%"}
                                     }
                                     reader_customise_word_row := View{
@@ -6834,7 +6834,7 @@ script_mod! {
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_word_label := Label{width: 164 text: "WORD SPACING"}
-                                        reader_customise_word_slider := ReaderLayoutSlider{min: 0. max: 6.}
+                                        reader_customise_word_slider := ReaderLayoutSlider{min: -20. max: 20.}
                                         reader_customise_word_value := Label{width: 58 text: "0%"}
                                     }
                                     reader_customise_margin_row := View{
@@ -6842,8 +6842,8 @@ script_mod! {
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_margin_label := Label{width: 164 text: "MARGINS"}
-                                        reader_customise_margin_slider := ReaderLayoutSlider{min: 12. max: 80.}
-                                        reader_customise_margin_value := Label{width: 58 text: "28 px"}
+                                        reader_customise_margin_slider := ReaderLayoutSlider{min: -10. max: 10.}
+                                        reader_customise_margin_value := Label{width: 58 text: "0%"}
                                     }
                                     reader_customise_columns_title := Label{
                                         text: "Columns"
@@ -7631,7 +7631,7 @@ impl ChapterList {
             viewport.size.y,
             font as f64,
             self.pager.layout.count,
-            *READER_MARGIN.read().unwrap() as f64,
+            ReaderSettings::margin_pixels(*READER_MARGIN.read().unwrap()) as f64,
         );
         let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
         let signature = reader_source_hash(&format!(
@@ -8042,7 +8042,7 @@ impl ChapterList {
     }
 
     fn apply_reader_margin(&mut self, cx: &mut Cx) {
-        let margin = *READER_MARGIN.read().unwrap() as f64;
+        let margin = ReaderSettings::margin_pixels(*READER_MARGIN.read().unwrap()) as f64;
         let edge = if self.compact_layout {
             margin.min(24.0)
         } else {
@@ -11235,14 +11235,7 @@ impl App {
             .set_text(cx, &format!("{size:.0}"));
         self.ui
             .label(cx, ids!(reader_customise_line_value))
-            .set_text(
-                cx,
-                match spacing {
-                    ReaderSpacing::Default => "1.2×",
-                    ReaderSpacing::Comfortable => "1.45×",
-                    ReaderSpacing::Relaxed => "1.75×",
-                },
-            );
+            .set_text(cx, &format!("{:.2}×", spacing.plain_line_spacing()));
         self.ui
             .label(cx, ids!(reader_customise_character_value))
             .set_text(cx, &format!("{:.0}%", character * 100.0));
@@ -11251,20 +11244,16 @@ impl App {
             .set_text(cx, &format!("{:.0}%", word * 100.0));
         self.ui
             .label(cx, ids!(reader_customise_margin_value))
-            .set_text(cx, &format!("{margin:.0} px"));
+            .set_text(cx, &format!("{margin:.0}%"));
         self.ui
             .slider(cx, ids!(reader_customise_line_slider))
-            .set_value(cx, match spacing {
-                ReaderSpacing::Default => 0.0,
-                ReaderSpacing::Comfortable => 1.0,
-                ReaderSpacing::Relaxed => 2.0,
-            });
+            .set_value(cx, spacing.plain_line_spacing() as f64);
         self.ui
             .slider(cx, ids!(reader_customise_character_slider))
-            .set_value(cx, (character * 50.0).round() as f64);
+            .set_value(cx, (character * 100.0).round() as f64);
         self.ui
             .slider(cx, ids!(reader_customise_word_slider))
-            .set_value(cx, (word * 20.0).round() as f64);
+            .set_value(cx, (word * 100.0).round() as f64);
         self.ui
             .slider(cx, ids!(reader_customise_margin_slider))
             .set_value(cx, margin as f64);
@@ -11419,7 +11408,7 @@ impl App {
             .widget(cx, ids!(reader_preview))
             .borrow_mut::<View>()
         {
-            let inset = (margin * 0.3).clamp(8.0, 24.0) as f64;
+            let inset = (ReaderSettings::margin_pixels(margin) * 0.3).clamp(8.0, 24.0) as f64;
             preview.layout.padding = Inset {
                 left: inset,
                 right: inset,
@@ -16840,26 +16829,38 @@ impl MatchEvent for App {
             .ui
             .slider(cx, ids!(reader_customise_margin_slider))
             .slided(actions);
+        // Makepad measures the drag against the full widget width, while the
+        // visible thumb stops inside it. Snap that small edge gap to the limit.
+        let snap_edge = |value: f64, min: f64, max: f64| {
+            let edge = (max - min) * 0.1;
+            if value <= min + edge {
+                min
+            } else if value >= max - edge {
+                max
+            } else {
+                value
+            }
+        };
         if let Some(draft) = self.reader_customise_draft.as_mut() {
             let mut changed = false;
             if let Some(value) = line_value {
-                draft.spacing = match value.round() as usize {
-                    1 => ReaderSpacing::Comfortable,
-                    2 => ReaderSpacing::Relaxed,
-                    _ => ReaderSpacing::Default,
-                };
+                draft.spacing = ReaderSpacing::from_value(
+                    (snap_edge(value, 0.8, 2.5) * 100.0).round() as f32 / 100.0,
+                );
                 changed = true;
             }
             if let Some(value) = character_value {
-                draft.character_spacing = (value.round() as f32 * 0.02).clamp(0.0, 0.12);
+                draft.character_spacing =
+                    (snap_edge(value, -10.0, 10.0).round() as f32 / 100.0).clamp(-0.1, 0.1);
                 changed = true;
             }
             if let Some(value) = word_value {
-                draft.word_spacing = (value.round() as f32 * 0.05).clamp(0.0, 0.3);
+                draft.word_spacing =
+                    (snap_edge(value, -20.0, 20.0).round() as f32 / 100.0).clamp(-0.2, 0.2);
                 changed = true;
             }
             if let Some(value) = margin_value {
-                draft.margin = (value.round() as f32).clamp(12.0, 80.0);
+                draft.margin = (snap_edge(value, -10.0, 10.0).round() as f32).clamp(-10.0, 10.0);
                 changed = true;
             }
             if changed {
