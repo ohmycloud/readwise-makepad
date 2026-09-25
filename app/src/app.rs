@@ -5893,12 +5893,14 @@ script_mod! {
                                     }
                                 }
                                 reader_theme_layer := View{
-                                    visible: false
+                                    // Keep the overlay owner mounted so its first popup
+                                    // frame has an Area that can be redrawn.
                                     width: Fill height: Fill
                                     flow: Overlay
                                     align: Align{x: 1.0 y: 0.0}
                                     padding: Inset{right: 18 top: 0}
                                     reader_theme_arrow_row := View{
+                                        visible: false
                                         width: 316 height: 10
                                         flow: Right
                                         align: Align{x: 1.0}
@@ -10464,7 +10466,7 @@ impl App {
                 .widget(cx, ids!(reader_theme_menu))
                 .set_visible(cx, false);
             self.ui
-                .widget(cx, ids!(reader_theme_layer))
+                .widget(cx, ids!(reader_theme_arrow_row))
                 .set_visible(cx, false);
         }
         self.ui
@@ -11957,7 +11959,7 @@ impl App {
             .widget(cx, ids!(reader_theme_menu))
             .set_visible(cx, false);
         self.ui
-            .widget(cx, ids!(reader_theme_layer))
+            .widget(cx, ids!(reader_theme_arrow_row))
             .set_visible(cx, false);
         self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
     }
@@ -12343,7 +12345,7 @@ impl App {
         );
         self.apply_reader_settings(cx, current_reader_settings());
         self.ui
-            .widget(cx, ids!(reader_theme_layer))
+            .widget(cx, ids!(reader_theme_arrow_row))
             .set_visible(cx, self.on_reader_page && self.reader_theme_open);
         self.ui
             .widget(cx, ids!(reader_theme_menu))
@@ -16585,7 +16587,7 @@ impl MatchEvent for App {
                 .widget(cx, ids!(reader_theme_menu))
                 .set_visible(cx, self.reader_theme_open);
             self.ui
-                .widget(cx, ids!(reader_theme_layer))
+                .widget(cx, ids!(reader_theme_arrow_row))
                 .set_visible(cx, self.reader_theme_open);
             self.set_reader_toolbar_visible(cx, true);
             self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
@@ -16631,7 +16633,7 @@ impl MatchEvent for App {
                 .widget(cx, ids!(reader_theme_menu))
                 .set_visible(cx, false);
             self.ui
-                .widget(cx, ids!(reader_theme_layer))
+                .widget(cx, ids!(reader_theme_arrow_row))
                 .set_visible(cx, false);
             self.open_reader_customise(cx);
         }
@@ -17434,7 +17436,7 @@ impl MatchEvent for App {
                     .widget(cx, ids!(reader_theme_menu))
                     .set_visible(cx, false);
                 self.ui
-                    .widget(cx, ids!(reader_theme_layer))
+                    .widget(cx, ids!(reader_theme_arrow_row))
                     .set_visible(cx, false);
             }
             self.sync_reader_panel_layout(cx);
@@ -18115,7 +18117,7 @@ impl AppMain for App {
                         .widget(cx, ids!(reader_theme_menu))
                         .set_visible(cx, false);
                     self.ui
-                        .widget(cx, ids!(reader_theme_layer))
+                        .widget(cx, ids!(reader_theme_arrow_row))
                         .set_visible(cx, false);
                     self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
                 }
@@ -18361,14 +18363,12 @@ impl AppMain for App {
         }
         if let Event::WindowDragQuery(query) = event {
             // Makepad treats the whole caption bar as a window drag target.
-            // Give the reader controls their own pointer area after Window's
-            // default caption response has been recorded.
+            // The button groups disappear when the toolbar is idle, so their
+            // Areas can be empty when the drag query arrives. Their enclosing
+            // slots stay laid out and keep clicks out of titlebar drag handling.
             if self.on_reader_page
                 && self.ui.widget(cx, ids!(reader_titlebar)).visible()
-                && [
-                    id!(reader_titlebar_left_buttons),
-                    id!(reader_titlebar_right_buttons),
-                ]
+                && [id!(reader_titlebar_left), id!(reader_titlebar_right)]
                 .into_iter()
                 .any(|id| {
                     self.ui
