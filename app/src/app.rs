@@ -4348,6 +4348,35 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    // Keep the slider's native drag handling while drawing the reading controls
+    // as a quiet gray track, cyan progress, and an always-visible white thumb.
+    let ReaderLayoutSlider = SliderMinimal{
+        width: Fill height: 24
+        margin: 0
+        label_walk: Walk{width: 0 height: 0 margin: 0}
+        text_input: TextInput{visible: false width: 0 height: 0}
+        draw_bg +: {
+            label_size: 0.
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let radius = 8.
+                let center_y = self.rect_size.y * 0.5
+                let track_x = radius
+                let track_width = max(0., self.rect_size.x - radius * 2.)
+                let thumb_x = track_x + track_width * self.slide_pos
+
+                sdf.box(track_x, center_y - 2.5, track_width, 5., 2.)
+                sdf.fill(#b9c2c6)
+                sdf.box(track_x, center_y - 2.5, max(0., thumb_x - track_x), 5., 2.)
+                sdf.fill(#20b9c5)
+                sdf.circle(thumb_x, center_y, radius)
+                sdf.fill_keep(#fff)
+                sdf.stroke(#cbd5d8, 1.)
+                return sdf.result
+            }
+        }
+    }
+
     mod.widgets.BookShelfCard = RoundedView{
         width: Fill height: Fit
         new_batch: true
@@ -6788,37 +6817,33 @@ script_mod! {
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
-                                        reader_customise_line_label := Label{width: Fill text: "LINE SPACING"}
-                                        reader_customise_line_down := ButtonFlat{text: "-"}
-                                        reader_customise_line_value := Label{text: "Default"}
-                                        reader_customise_line_up := ButtonFlat{text: "+"}
+                                        reader_customise_line_label := Label{width: 164 text: "LINE SPACING"}
+                                        reader_customise_line_slider := ReaderLayoutSlider{min: 0. max: 2.}
+                                        reader_customise_line_value := Label{width: 58 text: "1.2×"}
                                     }
                                     reader_customise_character_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
-                                        reader_customise_character_label := Label{width: Fill text: "CHARACTER SPACING"}
-                                        reader_customise_character_down := ButtonFlat{text: "-"}
-                                        reader_customise_character_value := Label{text: "Default"}
-                                        reader_customise_character_up := ButtonFlat{text: "+"}
+                                        reader_customise_character_label := Label{width: 164 text: "CHARACTER SPACING"}
+                                        reader_customise_character_slider := ReaderLayoutSlider{min: 0. max: 6.}
+                                        reader_customise_character_value := Label{width: 58 text: "0%"}
                                     }
                                     reader_customise_word_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
-                                        reader_customise_word_label := Label{width: Fill text: "WORD SPACING"}
-                                        reader_customise_word_down := ButtonFlat{text: "-"}
-                                        reader_customise_word_value := Label{text: "Default"}
-                                        reader_customise_word_up := ButtonFlat{text: "+"}
+                                        reader_customise_word_label := Label{width: 164 text: "WORD SPACING"}
+                                        reader_customise_word_slider := ReaderLayoutSlider{min: 0. max: 6.}
+                                        reader_customise_word_value := Label{width: 58 text: "0%"}
                                     }
                                     reader_customise_margin_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
-                                        reader_customise_margin_label := Label{width: Fill text: "MARGINS"}
-                                        reader_customise_margin_down := ButtonFlat{text: "-"}
-                                        reader_customise_margin_value := Label{text: "Default"}
-                                        reader_customise_margin_up := ButtonFlat{text: "+"}
+                                        reader_customise_margin_label := Label{width: 164 text: "MARGINS"}
+                                        reader_customise_margin_slider := ReaderLayoutSlider{min: 12. max: 80.}
+                                        reader_customise_margin_value := Label{width: 58 text: "28 px"}
                                     }
                                     reader_customise_columns_title := Label{
                                         text: "Columns"
@@ -11228,6 +11253,22 @@ impl App {
             .label(cx, ids!(reader_customise_margin_value))
             .set_text(cx, &format!("{margin:.0} px"));
         self.ui
+            .slider(cx, ids!(reader_customise_line_slider))
+            .set_value(cx, match spacing {
+                ReaderSpacing::Default => 0.0,
+                ReaderSpacing::Comfortable => 1.0,
+                ReaderSpacing::Relaxed => 2.0,
+            });
+        self.ui
+            .slider(cx, ids!(reader_customise_character_slider))
+            .set_value(cx, (character * 50.0).round() as f64);
+        self.ui
+            .slider(cx, ids!(reader_customise_word_slider))
+            .set_value(cx, (word * 20.0).round() as f64);
+        self.ui
+            .slider(cx, ids!(reader_customise_margin_slider))
+            .set_value(cx, margin as f64);
+        self.ui
             .check_box(cx, ids!(reader_customise_bold))
             .set_active(cx, settings.bold_text, Animate::No);
         self.ui
@@ -11710,6 +11751,10 @@ impl App {
             id!(reader_customise_gloss_title),
             id!(reader_customise_layout_title),
             id!(reader_customise_columns_title),
+            id!(reader_customise_line_value),
+            id!(reader_customise_character_value),
+            id!(reader_customise_word_value),
+            id!(reader_customise_margin_value),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
@@ -11797,14 +11842,6 @@ impl App {
             id!(reader_customise_word_bg_gray),
             id!(reader_customise_word_bg_green),
             id!(reader_customise_word_bg_blue),
-            id!(reader_customise_line_down),
-            id!(reader_customise_line_up),
-            id!(reader_customise_character_down),
-            id!(reader_customise_character_up),
-            id!(reader_customise_word_down),
-            id!(reader_customise_word_up),
-            id!(reader_customise_margin_down),
-            id!(reader_customise_margin_up),
             id!(reader_customise_columns_one),
             id!(reader_customise_columns_two),
             id!(reader_customise_columns_auto),
@@ -16787,74 +16824,45 @@ impl MatchEvent for App {
         if gloss_preview_changed {
             self.sync_reader_customise_controls(cx);
         }
-        let line_delta = i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_line_up))
-                .clicked(actions),
-        ) - i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_line_down))
-                .clicked(actions),
-        );
-        if line_delta != 0 {
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                let index = match draft.spacing {
-                    ReaderSpacing::Default => 0,
-                    ReaderSpacing::Comfortable => 1,
-                    ReaderSpacing::Relaxed => 2,
-                };
-                draft.spacing = match (index + line_delta).clamp(0, 2) {
+        let line_value = self
+            .ui
+            .slider(cx, ids!(reader_customise_line_slider))
+            .slided(actions);
+        let character_value = self
+            .ui
+            .slider(cx, ids!(reader_customise_character_slider))
+            .slided(actions);
+        let word_value = self
+            .ui
+            .slider(cx, ids!(reader_customise_word_slider))
+            .slided(actions);
+        let margin_value = self
+            .ui
+            .slider(cx, ids!(reader_customise_margin_slider))
+            .slided(actions);
+        if let Some(draft) = self.reader_customise_draft.as_mut() {
+            let mut changed = false;
+            if let Some(value) = line_value {
+                draft.spacing = match value.round() as usize {
                     1 => ReaderSpacing::Comfortable,
                     2 => ReaderSpacing::Relaxed,
                     _ => ReaderSpacing::Default,
                 };
-                self.sync_reader_customise_controls(cx);
+                changed = true;
             }
-        }
-        let character_delta = i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_character_up))
-                .clicked(actions),
-        ) - i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_character_down))
-                .clicked(actions),
-        );
-        if character_delta != 0 {
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                draft.character_spacing =
-                    (draft.character_spacing + character_delta as f32 * 0.02).clamp(0.0, 0.12);
-                self.sync_reader_customise_controls(cx);
+            if let Some(value) = character_value {
+                draft.character_spacing = (value.round() as f32 * 0.02).clamp(0.0, 0.12);
+                changed = true;
             }
-        }
-        let word_delta = i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_word_up))
-                .clicked(actions),
-        ) - i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_word_down))
-                .clicked(actions),
-        );
-        if word_delta != 0 {
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                draft.word_spacing =
-                    (draft.word_spacing + word_delta as f32 * 0.05).clamp(0.0, 0.3);
-                self.sync_reader_customise_controls(cx);
+            if let Some(value) = word_value {
+                draft.word_spacing = (value.round() as f32 * 0.05).clamp(0.0, 0.3);
+                changed = true;
             }
-        }
-        let margin_delta = i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_margin_up))
-                .clicked(actions),
-        ) - i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_margin_down))
-                .clicked(actions),
-        );
-        if margin_delta != 0 {
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                draft.margin = (draft.margin + margin_delta as f32 * 8.0).clamp(12.0, 80.0);
+            if let Some(value) = margin_value {
+                draft.margin = (value.round() as f32).clamp(12.0, 80.0);
+                changed = true;
+            }
+            if changed {
                 self.sync_reader_customise_controls(cx);
             }
         }
