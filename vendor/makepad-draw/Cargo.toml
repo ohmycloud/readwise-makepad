@@ -1,0 +1,38 @@
+[package]
+name = "makepad-draw"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad 2d drawing API"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "4ghwd5Pq8xlLJrln_NpXXshbpeE="
+
+[dependencies]
+makepad-platform = { git = "https://github.com/makepad/makepad", branch = "dev", version = "2.0.0" }
+makepad-math = { git = "https://github.com/makepad/makepad", branch = "dev", version = "1.0.0" }
+makepad-svg = { git = "https://github.com/makepad/makepad", branch = "dev", version = "1.0.0" }
+makepad-live-id = { git = "https://github.com/makepad/makepad", branch = "dev", version = "1.0.0" }
+
+rustybuzz = { version = "0.18.0", git = "https://github.com/makepad/makepad", branch = "dev" }
+unicode-bidi = { version = "0.3", git = "https://github.com/makepad/makepad", branch = "dev" }
+ab_glyph_rasterizer = { version = "0.1.8", git = "https://github.com/makepad/makepad", branch = "dev" }
+sdfer = { version = "0.2.1", git = "https://github.com/makepad/makepad", branch = "dev" }
+fxhash = { version = "0.2.1", git = "https://github.com/makepad/makepad", branch = "dev" }
+unicode-linebreak = { version = "0.1.5", git = "https://github.com/makepad/makepad", branch = "dev" }
+unicode-segmentation = { version = "1.12.0", git = "https://github.com/makepad/makepad", branch = "dev" }
+makepad-zune-png = { version = "0.5.2", git = "https://github.com/makepad/makepad", branch = "dev" }
+makepad-zune-jpeg = { version = "0.5.15", git = "https://github.com/makepad/makepad", branch = "dev" }
+makepad-zune-bmp = { version = "0.5.2", git = "https://github.com/makepad/makepad", branch = "dev" }
+makepad-zune-qoi = { version = "0.5.2", git = "https://github.com/makepad/makepad", branch = "dev" }
+makepad-webp = { version = "0.2.4", git = "https://github.com/makepad/makepad", branch = "dev" }
+makepad-gif = { version = "0.1.0", git = "https://github.com/makepad/makepad", branch = "dev" }
+
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+default = []
+
+## Enables certain public-facing types to derive serde serialization traits.
+serde = ["dep:serde", "makepad-live-id/serde"]

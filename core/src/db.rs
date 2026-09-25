@@ -263,6 +263,20 @@ impl Db {
             .block_on(books::get_highlights_by_chapter(&self.pool, book_id))
     }
 
+    pub fn get_bookmarks(&self, book_id: &str) -> Result<Vec<books::Bookmark>, String> {
+        self.rt.block_on(books::get_bookmarks(&self.pool, book_id))
+    }
+
+    pub fn add_bookmark(&self, book_id: &str, location: &str, label: &str) -> Result<(), String> {
+        self.rt
+            .block_on(books::add_bookmark(&self.pool, book_id, location, label))
+    }
+
+    pub fn delete_bookmark(&self, book_id: &str, bookmark_id: &str) -> Result<(), String> {
+        self.rt
+            .block_on(books::delete_bookmark(&self.pool, book_id, bookmark_id))
+    }
+
     pub fn delete_highlights(&self, book_id: &str, ids: &[String]) -> Result<usize, String> {
         self.rt
             .block_on(books::delete_highlights(&self.pool, book_id, ids))
@@ -380,9 +394,19 @@ impl Db {
                         settings.turn_mode = crate::settings::ReaderTurnMode::from_str(&value)
                     }
                     "reader.font" => settings.font = crate::settings::ReaderFont::from_str(&value),
+                    "reader.bold_text" => settings.bold_text = value == "1",
                     "reader.spacing" => {
                         settings.spacing = crate::settings::ReaderSpacing::from_str(&value)
                     }
+                    "reader.character_spacing" => {
+                        settings.character_spacing =
+                            value.parse().unwrap_or(settings.character_spacing)
+                    }
+                    "reader.word_spacing" => {
+                        settings.word_spacing = value.parse().unwrap_or(settings.word_spacing)
+                    }
+                    "reader.margin" => settings.margin = value.parse().unwrap_or(settings.margin),
+                    "reader.justify_text" => settings.justify_text = value == "1",
                     "reader.font_size" => settings.font_size = value.parse().ok(),
                     "reader.gloss_enabled" => settings.gloss_enabled = value == "1",
                     "reader.gloss_font_size" => {
@@ -434,7 +458,12 @@ impl Db {
             let columns = settings.columns.as_str();
             let turn_mode = settings.turn_mode.as_str();
             let font = settings.font.as_str();
+            let bold_text = if settings.bold_text { "1" } else { "0" };
             let spacing = settings.spacing.as_str();
+            let character_spacing = settings.character_spacing.to_string();
+            let word_spacing = settings.word_spacing.to_string();
+            let margin = settings.margin.to_string();
+            let justify_text = if settings.justify_text { "1" } else { "0" };
             let font_size = settings.font_size.map(|value| value.to_string()).unwrap_or_default();
             let gloss_enabled = if settings.gloss_enabled { "1" } else { "0" };
             let gloss_font_size = settings.gloss_font_size.to_string();
@@ -452,7 +481,12 @@ impl Db {
                 ("reader.columns", columns),
                 ("reader.turn_mode", turn_mode),
                 ("reader.font", font),
+                ("reader.bold_text", bold_text),
                 ("reader.spacing", spacing),
+                ("reader.character_spacing", character_spacing.as_str()),
+                ("reader.word_spacing", word_spacing.as_str()),
+                ("reader.margin", margin.as_str()),
+                ("reader.justify_text", justify_text),
                 ("reader.font_size", font_size.as_str()),
                 ("reader.gloss_enabled", gloss_enabled),
                 ("reader.gloss_font_size", gloss_font_size.as_str()),
@@ -1045,6 +1079,26 @@ mod migration_tests {
             db.save_reader_settings(&settings).unwrap();
             assert_eq!(db.load_reader_settings().unwrap().columns, columns);
         }
+    }
+
+    #[test]
+    fn reader_customisation_survives_database_round_trip() {
+        let (rt, pool) = runtime_and_pool();
+        rt.block_on(initialize_schema(&pool)).unwrap();
+        let db = Db {
+            rt,
+            pool,
+            data_dir: std::path::PathBuf::new(),
+        };
+        let mut settings = db.load_reader_settings().unwrap();
+        settings.background = crate::settings::ReaderBackground::Bold;
+        settings.bold_text = true;
+        settings.character_spacing = 0.06;
+        settings.word_spacing = 0.15;
+        settings.margin = 52.0;
+        settings.justify_text = true;
+        db.save_reader_settings(&settings).unwrap();
+        assert_eq!(db.load_reader_settings().unwrap(), settings);
     }
 
     fn runtime_and_pool() -> (tokio::runtime::Runtime, SqlitePool) {

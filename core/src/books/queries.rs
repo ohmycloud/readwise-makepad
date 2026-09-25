@@ -353,6 +353,71 @@ pub struct Highlight {
     pub color: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct Bookmark {
+    pub id: String,
+    pub location: String,
+    pub label: String,
+    pub created_at: i64,
+}
+
+pub async fn get_bookmarks(pool: &SqlitePool, book_id: &str) -> Result<Vec<Bookmark>, String> {
+    let rows = sqlx::query(
+        "SELECT id, cfi, text, created_at FROM book_notes \
+         WHERE book_id = ? AND type = 'bookmark' ORDER BY created_at DESC",
+    )
+    .bind(book_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("读取书签失败: {e}"))?;
+    Ok(rows
+        .iter()
+        .map(|row| Bookmark {
+            id: row.get("id"),
+            location: row.get("cfi"),
+            label: row.get::<Option<String>, _>("text").unwrap_or_default(),
+            created_at: row.get("created_at"),
+        })
+        .collect())
+}
+
+pub async fn add_bookmark(
+    pool: &SqlitePool,
+    book_id: &str,
+    location: &str,
+    label: &str,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "INSERT INTO book_notes (id, book_id, type, cfi, text, note, created_at, updated_at) \
+         VALUES (?, ?, 'bookmark', ?, ?, '', ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(book_id)
+    .bind(location)
+    .bind(label)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("保存书签失败: {e}"))?;
+    Ok(())
+}
+
+pub async fn delete_bookmark(
+    pool: &SqlitePool,
+    book_id: &str,
+    bookmark_id: &str,
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM book_notes WHERE id = ? AND book_id = ? AND type = 'bookmark'")
+        .bind(bookmark_id)
+        .bind(book_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("删除书签失败: {e}"))?;
+    Ok(())
+}
+
 const PACK: i64 = 1_000_000;
 
 /// 新增一条高亮（book_notes: type=annotation, style=highlight）。
@@ -617,6 +682,45 @@ mod highlight_tests {
                 .unwrap()[&0][0]
                 .id,
             other_book
+        );
+    }
+
+    #[test]
+    fn bookmarks_are_scoped_to_their_book_and_do_not_mix_with_highlights() {
+        let (runtime, pool) = pool();
+        runtime
+            .block_on(add_bookmark(&pool, "book-1", "v3:2:4:30", "Chapter 3"))
+            .unwrap();
+        runtime
+            .block_on(add_bookmark(&pool, "book-2", "v3:0:1:0", "Other"))
+            .unwrap();
+        runtime
+            .block_on(add_highlight(&pool, "book-1", 2, (4, 0, 4, 5), "yellow"))
+            .unwrap();
+        let bookmarks = runtime.block_on(get_bookmarks(&pool, "book-1")).unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].location, "v3:2:4:30");
+        assert_eq!(bookmarks[0].label, "Chapter 3");
+        runtime
+            .block_on(delete_bookmark(&pool, "book-1", &bookmarks[0].id))
+            .unwrap();
+        assert!(runtime
+            .block_on(get_bookmarks(&pool, "book-1"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            runtime
+                .block_on(get_bookmarks(&pool, "book-2"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .block_on(get_highlights_by_chapter(&pool, "book-1"))
+                .unwrap()[&2]
+                .len(),
+            1
         );
     }
 }

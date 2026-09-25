@@ -7,16 +7,29 @@ pub struct ColumnLayout {
     pub width: f64,
     pub height: f64,
     pub left: f64,
+    pub top: f64,
     pub gap: f64,
 }
 
 impl ColumnLayout {
+    #[cfg(test)]
     pub fn resolve(
         mode: ReaderColumns,
         width: f64,
         height: f64,
         font: f64,
         previous: usize,
+    ) -> Self {
+        Self::resolve_with_margin(mode, width, height, font, previous, 28.0)
+    }
+
+    pub fn resolve_with_margin(
+        mode: ReaderColumns,
+        width: f64,
+        height: f64,
+        font: f64,
+        previous: usize,
+        margin: f64,
     ) -> Self {
         let width = if width.is_finite() {
             width.max(1.0)
@@ -33,7 +46,13 @@ impl ColumnLayout {
         } else {
             12.0
         };
-        let edge = if width < 600.0 { 12.0 } else { 28.0 };
+        let edge = if width < 600.0 {
+            margin.min(24.0)
+        } else {
+            margin
+        }
+        .clamp(12.0, 80.0);
+        let top = (margin - 20.0).clamp(8.0, 60.0);
         let gap = 40.0;
         let minimum = (font * 25.0).max(300.0);
         let usable = (width - edge * 2.0).max(1.0);
@@ -55,8 +74,9 @@ impl ColumnLayout {
         Self {
             count,
             width: column_width,
-            height: (height - 16.0).max(1.0),
+            height: (height - top * 2.0).max(1.0),
             left: (width - column_width * count as f64 - (count - 1) as f64 * gap) * 0.5,
+            top,
             gap,
         }
     }
@@ -258,6 +278,20 @@ fn page_starts(metrics: &[Option<BlockMetrics>], height: f64) -> (Vec<PageAnchor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn larger_reader_margins_reduce_page_area_without_changing_column_mode() {
+        let narrow =
+            ColumnLayout::resolve_with_margin(ReaderColumns::Two, 1200.0, 800.0, 14.0, 2, 16.0);
+        let wide =
+            ColumnLayout::resolve_with_margin(ReaderColumns::Two, 1200.0, 800.0, 14.0, 2, 64.0);
+        assert_eq!(narrow.count, 2);
+        assert_eq!(wide.count, 2);
+        assert!(wide.left > narrow.left);
+        assert!(wide.top > narrow.top);
+        assert!(wide.width < narrow.width);
+        assert!(wide.height < narrow.height);
+    }
 
     #[test]
     fn unfinished_index_does_not_block_a_measured_spread() {

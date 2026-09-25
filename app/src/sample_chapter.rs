@@ -43,17 +43,62 @@ pub fn build_glossed_paragraph() -> String {
         "<h2>Ruby 注音验证</h2>\
          <p><b>下面段落里带绿色小字注音的生词可以点击，点击后看右上角状态栏：</b></p><p>",
     );
-    for (word, gloss) in GLOSSED_TEXT {
+    append_glossed_words(&mut html, GLOSSED_TEXT, true);
+    html.push_str("</p>");
+    html
+}
+
+fn append_glossed_words(html: &mut String, words: &[(&str, Option<&str>)], show_gloss: bool) {
+    for (word, gloss) in words {
         match gloss {
-            Some(g) => html.push_str(&format!("<ruby t=\"{}\">{}</ruby> ", g, word)),
+            Some(g) if show_gloss => {
+                html.push_str(&format!("<ruby t=\"{}\">{}</ruby> ", g, word));
+            }
             None => {
+                html.push_str(word);
+                html.push(' ');
+            }
+            Some(_) => {
                 html.push_str(word);
                 html.push(' ');
             }
         }
     }
-    html.push_str("</p>");
-    html
+}
+
+/// Customise 预览使用示例章节的前两句，单双栏共用同一份词和释义。
+pub fn build_glossed_preview(show_gloss: bool, two_columns: bool) -> (String, String) {
+    let mut first = String::from("<p>");
+    let first_end = if two_columns { 11 } else { 25 };
+    append_glossed_words(&mut first, &GLOSSED_TEXT[..first_end], show_gloss);
+    first.push_str("</p>");
+
+    let mut second = String::new();
+    if two_columns {
+        second.push_str("<p>");
+        append_glossed_words(&mut second, &GLOSSED_TEXT[11..25], show_gloss);
+        second.push_str("</p>");
+    }
+    (first, second)
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::build_glossed_preview;
+
+    #[test]
+    fn preview_uses_sample_words_and_drops_ruby_when_disabled() {
+        let (one_column, empty) = build_glossed_preview(true, false);
+        assert!(one_column.contains("<ruby t=\"灯塔\">lighthouse</ruby>"));
+        assert!(one_column.contains("<ruby t=\"低语\">murmur</ruby>"));
+        assert!(empty.is_empty());
+
+        let (first, second) = build_glossed_preview(false, true);
+        assert!(first.contains("lighthouse"));
+        assert!(second.contains("murmur"));
+        assert!(!first.contains("<ruby"));
+        assert!(!second.contains("<ruby"));
+    }
 }
 
 /// 生成章节的段落列表（PortalList 虚拟化按段渲染）。

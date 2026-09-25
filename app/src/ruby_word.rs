@@ -48,6 +48,47 @@ pub const WORD_COLOR_PRESETS: &[(&str, Option<(f32, f32, f32)>)] = &[
     ("橙", Some(GLOSS_PRESETS[2].1)),
 ];
 
+#[derive(Clone, Copy)]
+struct RubyAppearance {
+    font_size: f32,
+    color: (f32, f32, f32),
+    background: Option<(f32, f32, f32, f32)>,
+    word_color: Option<(f32, f32, f32)>,
+    word_background: Option<(f32, f32, f32, f32)>,
+}
+
+static PREVIEW_APPEARANCE: LazyLock<RwLock<RubyAppearance>> = LazyLock::new(|| {
+    RwLock::new(RubyAppearance {
+        font_size: 7.5,
+        color: GLOSS_PRESETS[0].1,
+        background: None,
+        word_color: None,
+        word_background: None,
+    })
+});
+
+pub fn set_preview_appearance(settings: &readwise_core::settings::ReaderSettings) {
+    *PREVIEW_APPEARANCE.write().unwrap() = RubyAppearance {
+        font_size: settings.gloss_font_size,
+        color: GLOSS_PRESETS
+            .get(settings.gloss_color_slot)
+            .unwrap_or(&GLOSS_PRESETS[0])
+            .1,
+        background: BG_PRESETS
+            .get(settings.gloss_background_slot)
+            .unwrap_or(&BG_PRESETS[0])
+            .1,
+        word_color: WORD_COLOR_PRESETS
+            .get(settings.word_color_slot)
+            .unwrap_or(&WORD_COLOR_PRESETS[0])
+            .1,
+        word_background: BG_PRESETS
+            .get(settings.word_background_slot)
+            .unwrap_or(&BG_PRESETS[0])
+            .1,
+    };
+}
+
 /// 注音词自身的可选背景仍沿用 TextFlow 的既有样式。永久高亮绝不走这条
 /// 排版分支，而是在 ChapterList 完成正文排版后统一覆盖绘制。
 fn draw_word_with_background(tf: &mut TextFlow, cx: &mut Cx2d, text: &str, color: Vec4f) {
@@ -114,6 +155,8 @@ pub struct RubyWord {
     draw_fill: DrawColor,
     #[live(2.0f32)]
     gloss_gap: f32,
+    #[live]
+    preview: bool,
     #[rust]
     drawn_areas: Vec<Area>,
     #[rust]
@@ -190,10 +233,22 @@ impl Widget for RubyWord {
             return DrawStep::done();
         };
 
+        let appearance = if self.preview {
+            *PREVIEW_APPEARANCE.read().unwrap()
+        } else {
+            RubyAppearance {
+                font_size: *GLOSS_FONT_SIZE.read().unwrap(),
+                color: *GLOSS_COLOR.read().unwrap(),
+                background: *GLOSS_BG.read().unwrap(),
+                word_color: *WORD_COLOR.read().unwrap(),
+                word_background: *WORD_BG.read().unwrap(),
+            }
+        };
+
         let word_color = if self.gloss.is_empty() {
             None
         } else {
-            *WORD_COLOR.read().unwrap()
+            appearance.word_color
         };
         if let Some((r, g, b)) = word_color {
             tf.font_colors.push(Vec4f {
@@ -204,7 +259,7 @@ impl Widget for RubyWord {
             });
         }
         tf.areas_tracker.push_tracker();
-        if let Some((r, g, b, a)) = *WORD_BG.read().unwrap() {
+        if let Some((r, g, b, a)) = appearance.word_background {
             draw_word_with_background(
                 tf,
                 cx,
@@ -250,8 +305,8 @@ impl Widget for RubyWord {
                 .copied();
             if let Some(first) = widest {
                 // 设置页可配置的注音字号/颜色
-                self.draw_gloss.text_style.font_size = *GLOSS_FONT_SIZE.read().unwrap();
-                let (r, g, b) = *GLOSS_COLOR.read().unwrap();
+                self.draw_gloss.text_style.font_size = appearance.font_size;
+                let (r, g, b) = appearance.color;
                 self.draw_gloss.color = Vec4f {
                     x: r,
                     y: g,
@@ -281,7 +336,7 @@ impl Widget for RubyWord {
                     .unwrap_or(self.draw_gloss.text_style.font_size as f64 * 1.4);
                 let x = rect.pos.x + (rect.size.x - gloss_w) * 0.5;
                 let y = rect.pos.y - gloss_box_h - self.gloss_gap as f64;
-                if let Some((r, g, b, a)) = *GLOSS_BG.read().unwrap() {
+                if let Some((r, g, b, a)) = appearance.background {
                     self.draw_fill.color = Vec4f {
                         x: r,
                         y: g,
@@ -326,7 +381,7 @@ impl Widget for RubyWord {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if self.gloss.is_empty() {
+        if self.preview || self.gloss.is_empty() {
             return;
         }
         for area in self.drawn_areas.clone() {

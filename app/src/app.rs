@@ -33,6 +33,28 @@ type VocabEntry = readwise_core::vocab::models::VocabBookEntry;
 
 app_main!(App);
 
+#[cfg(test)]
+mod reader_icon_tests {
+    #[test]
+    fn toolbar_icons_have_renderable_svg_geometry() {
+        let icons = [
+            include_str!("../resources/icons/reader_back.svg"),
+            include_str!("../resources/icons/reader_contents.svg"),
+            include_str!("../resources/icons/reader_bookmarks.svg"),
+            include_str!("../resources/icons/reader_notes.svg"),
+            include_str!("../resources/icons/reader_search.svg"),
+            include_str!("../resources/icons/reader_bookmark.svg"),
+            include_str!("../resources/icons/reader_bookmark_filled.svg"),
+            include_str!("../resources/icons/reader_settings.svg"),
+        ];
+        for svg in icons {
+            let document = makepad_widgets::makepad_draw::svg::parse_svg(svg);
+            let (left, top, right, bottom) = document.compute_bounds().expect("icon geometry");
+            assert!(right > left && bottom > top);
+        }
+    }
+}
+
 const PARA_COUNT: usize = 200;
 const COMPACT_LAYOUT_BREAKPOINT: f64 = 720.0;
 const DESKTOP_MIN_WINDOW_WIDTH: f64 = COMPACT_LAYOUT_BREAKPOINT;
@@ -1891,6 +1913,19 @@ mod reader_pagination_tests {
 
 /// 当前打开的书（后台线程写入，UI 读）。
 static CURRENT_BOOK: LazyLock<RwLock<Option<OpenBook>>> = LazyLock::new(|| RwLock::new(None));
+static READER_BOOKMARKS: LazyLock<RwLock<Vec<readwise_core::books::Bookmark>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+static READER_SEARCH_RESULTS: LazyLock<RwLock<Vec<ReaderSearchHit>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+static READER_HIGHLIGHT_JUMPS: LazyLock<RwLock<Vec<ReaderSearchHit>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+#[derive(Debug, Clone)]
+struct ReaderSearchHit {
+    chapter: usize,
+    block: usize,
+    excerpt: String,
+}
 static OPEN_BOOK_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// 当前打开的书对应的书架项（"标为已认识"后重开重注音用）。
@@ -1984,6 +2019,12 @@ fn spawn_mark_known(lemma: String, book_id: Option<String>) {
 
 /// 阅读字号（None = 用主题默认；A+/A- 调整后生效）。
 static READER_FONT_SIZE: LazyLock<RwLock<Option<f32>>> = LazyLock::new(|| RwLock::new(None));
+static READER_BOLD_TEXT: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
+static READER_CHARACTER_SPACING: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(0.0));
+static READER_WORD_SPACING: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(0.0));
+static READER_MARGIN: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(28.0));
+static READER_JUSTIFY_TEXT: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
+static READER_CUSTOMISE_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// 选中文字的高亮色槽位：0=青 1=蓝 2=橙 3=黄。
 static SELECTION_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(0));
@@ -2031,7 +2072,7 @@ fn localized(chinese: &'static str, english: &'static str) -> &'static str {
 
 /// EPUB 正文字体；应用 UI 与注音释义不跟随此设置。
 static READER_FONT: LazyLock<RwLock<ReaderFont>> =
-    LazyLock::new(|| RwLock::new(ReaderFont::Standard));
+    LazyLock::new(|| RwLock::new(ReaderFont::Original));
 
 /// EPUB 正文行距；带注音段落始终比普通段落保留更多垂直空间。
 static READER_SPACING: LazyLock<RwLock<ReaderSpacing>> =
@@ -2041,9 +2082,11 @@ fn reader_palette(background: ReaderBackground, theme: ReaderTheme) -> (Vec4f, V
     let (surface, text) = match background {
         ReaderBackground::FollowTheme if theme == ReaderTheme::Light => (0xd9d9_d9ff, 0x3333_33ff),
         ReaderBackground::FollowTheme => (0x4d4d_4dff, 0xd9d9_d9ff),
+        ReaderBackground::Original => (0xffffff_ff, 0x2020_20ff),
         ReaderBackground::Paper => (0xf7f4_eaff, 0x2b29_25ff),
         ReaderBackground::Sepia => (0xf2e3_c6ff, 0x3b30_25ff),
         ReaderBackground::Sage => (0xe7ef_e3ff, 0x2734_2bff),
+        ReaderBackground::Bold => (0xfaf8_f2ff, 0x1717_17ff),
         ReaderBackground::Night => (0x2025_2bff, 0xd8d4_caff),
     };
     (Vec4f::from_u32(surface), Vec4f::from_u32(text))
@@ -2094,6 +2137,14 @@ struct ReaderScenePalette {
 fn reader_scene_palette(background: ReaderBackground, theme: ReaderTheme) -> ReaderScenePalette {
     let (surface, text) = reader_palette(background, theme);
     let values = match background {
+        ReaderBackground::Original => (
+            0xf3f3_f3ff,
+            0xd8d8_d8ff,
+            0x6666_66ff,
+            0x365f_8dff,
+            0x2222_2214,
+            0x2222_2228,
+        ),
         ReaderBackground::Paper => (
             0xe9e4_d7ff,
             0xd5cd_bdff,
@@ -2117,6 +2168,14 @@ fn reader_scene_palette(background: ReaderBackground, theme: ReaderTheme) -> Rea
             0x3e68_50ff,
             0x2734_2b14,
             0x2734_2b28,
+        ),
+        ReaderBackground::Bold => (
+            0xeae8_e2ff,
+            0xbdb9_afff,
+            0x5555_55ff,
+            0x2b2b_2bff,
+            0x1111_1118,
+            0x1111_112e,
         ),
         ReaderBackground::Night => (
             0x343b_43ff,
@@ -2196,6 +2255,10 @@ fn apply_reader_button_palette_with_focus(
 
 fn apply_reader_button_palette(cx: &mut Cx, widget: WidgetRef, palette: ReaderScenePalette) {
     apply_reader_button_palette_with_focus(cx, widget, palette, palette.hover);
+}
+
+fn apply_reader_icon_palette(cx: &mut Cx, mut widget: WidgetRef, color: Vec4f) {
+    script_apply_eval!(cx, widget, { draw_icon +: { color: #(color) } });
 }
 
 fn apply_reader_input_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
@@ -3050,6 +3113,7 @@ enum ReaderAction {
     Opened {
         request_id: u64,
         resume: ReaderLocation,
+        bookmarks: Vec<readwise_core::books::Bookmark>,
         gloss_count: usize,
         parse_ms: u128,
         initial_gloss_ms: u128,
@@ -3058,6 +3122,96 @@ enum ReaderAction {
         request_id: u64,
         error: String,
     },
+}
+
+#[derive(Debug)]
+enum BookmarkAction {
+    Updated {
+        book_id: String,
+        bookmarks: Vec<readwise_core::books::Bookmark>,
+    },
+    Error {
+        book_id: String,
+        error: String,
+    },
+}
+
+#[derive(Debug)]
+enum ReaderSearchAction {
+    Results {
+        book_id: String,
+        query: String,
+        hits: Vec<ReaderSearchHit>,
+    },
+}
+
+fn spawn_reader_search(book_id: String, query: String) {
+    std::thread::spawn(move || {
+        let chapters = CURRENT_BOOK
+            .read()
+            .unwrap()
+            .as_ref()
+            .filter(|book| book.id == book_id)
+            .map(|book| book.chapters.clone());
+        let mut hits = Vec::new();
+        if let Some(chapters) = chapters {
+            let needle = query.trim().to_lowercase();
+            if !needle.is_empty() {
+                for (chapter, html) in chapters.iter().enumerate() {
+                    for (block, fragment) in readwise_core::books::epub_meta::split_blocks(html)
+                        .iter()
+                        .enumerate()
+                    {
+                        let plain = readwise_core::vocab::annotate::rendered_text(fragment);
+                        if plain.to_lowercase().contains(&needle) {
+                            let excerpt = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+                            hits.push(ReaderSearchHit {
+                                chapter,
+                                block,
+                                excerpt: excerpt.chars().take(120).collect(),
+                            });
+                            if hits.len() >= 100 {
+                                break;
+                            }
+                        }
+                    }
+                    if hits.len() >= 100 {
+                        break;
+                    }
+                }
+            }
+        }
+        Cx::post_action(ReaderSearchAction::Results {
+            book_id,
+            query,
+            hits,
+        });
+    });
+}
+
+fn spawn_bookmark_change(
+    book_id: String,
+    remove_id: Option<String>,
+    location: String,
+    label: String,
+) {
+    std::thread::spawn(move || {
+        let result = DB
+            .get()
+            .ok_or_else(|| "数据库尚未就绪".to_string())
+            .and_then(|db| {
+                if let Some(id) = remove_id {
+                    db.delete_bookmark(&book_id, &id)?;
+                } else {
+                    db.add_bookmark(&book_id, &location, &label)?;
+                }
+                db.get_bookmarks(&book_id)
+            });
+        match result {
+            Ok(bookmarks) => Cx::post_action(BookmarkAction::Updated { book_id, bookmarks }),
+            Err(error) => Cx::post_action(BookmarkAction::Error { book_id, error }),
+        }
+    });
 }
 
 #[derive(Debug)]
@@ -3182,6 +3336,15 @@ impl ReaderLocation {
             source,
         }
     }
+}
+
+fn bookmark_covers_location(bookmark: ReaderLocation, current: ReaderLocation) -> bool {
+    bookmark.chapter == current.chapter
+        && bookmark.block == current.block
+        && bookmark
+            .source
+            .zip(current.source)
+            .is_none_or(|(saved, now)| saved.abs_diff(now) < 256)
 }
 
 #[cfg(test)]
@@ -3326,6 +3489,10 @@ fn spawn_open_book(item: ShelfItem) {
             .get()
             .and_then(|db| db.get_highlights_by_chapter(&item.id).ok())
             .unwrap_or_default();
+        let bookmarks = DB
+            .get()
+            .and_then(|db| db.get_bookmarks(&item.id).ok())
+            .unwrap_or_default();
         let (glosses, known_words) = DB
             .get()
             .and_then(|db| db.gloss_context(Some(&item.id)).ok())
@@ -3361,6 +3528,7 @@ fn spawn_open_book(item: ShelfItem) {
         Cx::post_action(ReaderAction::Opened {
             request_id,
             resume,
+            bookmarks,
             gloss_count,
             parse_ms,
             initial_gloss_ms,
@@ -3995,7 +4163,12 @@ fn current_reader_settings() -> ReaderSettings {
         columns: *READER_COLUMNS.read().unwrap(),
         turn_mode: *READER_TURN_MODE.read().unwrap(),
         font: *READER_FONT.read().unwrap(),
+        bold_text: *READER_BOLD_TEXT.read().unwrap(),
         spacing: *READER_SPACING.read().unwrap(),
+        character_spacing: *READER_CHARACTER_SPACING.read().unwrap(),
+        word_spacing: *READER_WORD_SPACING.read().unwrap(),
+        margin: *READER_MARGIN.read().unwrap(),
+        justify_text: *READER_JUSTIFY_TEXT.read().unwrap(),
         font_size: *READER_FONT_SIZE.read().unwrap(),
         gloss_enabled: *GLOSS_ENABLED.read().unwrap(),
         gloss_font_size: *GLOSS_FONT_SIZE.read().unwrap(),
@@ -4403,6 +4576,43 @@ script_mod! {
         }
     }
 
+    mod.widgets.ReaderJumpListBase = #(ReaderJumpList::register_widget(vm))
+    mod.widgets.ReaderJumpList = set_type_default() do mod.widgets.ReaderJumpListBase{
+        width: Fill height: Fill
+        text_color: theme.color_text
+        list := PortalList{
+            width: Fill height: Fill
+            padding: Inset{left: 8 right: 8 top: 8 bottom: 8}
+            spacing: 5
+            scroll_bar: ScrollBar{}
+            JumpItem := RoundedView{
+                width: Fill height: Fit
+                new_batch: true
+                flow: Overlay
+                draw_bg.color: theme.color_bg_container
+                draw_bg.border_radius: 7.0
+                jump_label := Label{
+                    width: Fill height: Fit
+                    padding: 10
+                    max_lines: 3
+                    text_overflow: Ellipsis
+                    text: ""
+                    draw_text.text_style.font_size: 10
+                }
+                jump_btn := ButtonFlatter{
+                    width: Fill height: Fill
+                    text: ""
+                    draw_bg.color: #0000
+                    draw_bg.color_hover: #x66877c20
+                    draw_bg.color_down: #x66877c30
+                    draw_bg.border_color: #0000
+                    draw_bg.border_color_hover: #0000
+                    draw_bg.border_color_down: #0000
+                }
+            }
+        }
+    }
+
     let NoteCardTemplate = RoundedView{
         width: Fill height: Fit
         new_batch: true
@@ -4794,7 +5004,14 @@ script_mod! {
         font_standard_italic: theme.font_italic{}
         font_standard_bold: theme.font_bold{}
         font_standard_bold_italic: theme.font_bold_italic{}
-        font_monospace: theme.font_code{}
+        font_preview_normal: theme.font_regular{}
+        font_preview_italic: theme.font_italic{}
+        font_preview_bold: theme.font_bold{}
+        font_preview_bold_italic: theme.font_bold_italic{}
+        font_active_normal: theme.font_regular{}
+        font_active_italic: theme.font_italic{}
+        font_active_bold: theme.font_bold{}
+        font_active_bold_italic: theme.font_bold_italic{}
         html_default_inset: theme.space_1
         draw_reader_selection.color: #0000
         draw_page_turn: mod.draw.DrawReaderPageTurn{}
@@ -5110,23 +5327,70 @@ script_mod! {
                             flow: Down
                             draw_bg.color: #xf7f4ea
                             header := SolidView{
-                                width: Fill height: Fit
-                                padding: 12 spacing: 12
+                                width: Fill height: 54
+                                padding: Inset{left: 18 right: 18 top: 6 bottom: 6}
+                                flow: Right
                                 align: Align{ y: 0.5 }
                                 draw_bg.color: #xf0ecdf
-                                toc_btn := ButtonFlat{ text: "目录" }
-                                notes_btn := ButtonFlat{ text: "笔记" }
-                                reader_ai_btn := ButtonFlat{ text: "AI" }
-                                title := Label{
-                                    text: "阅读 · 示例章节"
-                                    draw_text.text_style.font_size: 15
+                                reader_toolbar_left := View{
+                                    width: 180 height: Fit
+                                    flow: Right spacing: 4
+                                    reader_toolbar_left_buttons := View{
+                                        visible: false
+                                        width: Fit height: Fit
+                                        flow: Right spacing: 4
+                                        reader_back_btn := ButtonFlatterIcon{
+                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_back.svg")}
+                                        }
+                                        toc_btn := ButtonFlatterIcon{
+                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_contents.svg")}
+                                        }
+                                        reader_bookmarks_btn := ButtonFlatterIcon{
+                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmarks.svg")}
+                                        }
+                                        notes_btn := ButtonFlatterIcon{
+                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_notes.svg")}
+                                        }
+                                    }
                                 }
-                                spacer := View{ width: Fill height: Fit }
-                                status := Label{ text: "" }
-                                chapter_pos := Label{
-                                    text: ""
-                                    draw_text.color: theme.color_label_inner_inactive
-                                    draw_text.text_style.font_size: 9.5
+                                reader_title_slot := View{
+                                    width: Fill height: Fit
+                                    align: Center
+                                    title := Label{
+                                        text: "阅读 · 示例章节"
+                                        draw_text.text_style.font_size: 14
+                                    }
+                                }
+                                reader_toolbar_right := View{
+                                    width: 180 height: Fit
+                                    flow: Right spacing: 4
+                                    align: Align{x: 1.0 y: 0.5}
+                                    reader_toolbar_right_buttons := View{
+                                        visible: false
+                                        width: Fit height: Fit
+                                        flow: Right spacing: 4
+                                        reader_appearance_btn := ButtonFlatter{
+                                            width: 36 height: 36 text: "aA"
+                                            draw_text.text_style.font_size: 13
+                                        }
+                                        reader_search_btn := ButtonFlatterIcon{
+                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_search.svg")}
+                                        }
+                                        reader_bookmark_btn := ButtonFlatterIcon{
+                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmark.svg")}
+                                        }
+                                        reader_bookmark_filled_btn := ButtonFlatterIcon{
+                                            visible: false
+                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmark_filled.svg")}
+                                        }
+                                    }
                                 }
                             }
                             reader_body := SolidView{
@@ -5149,6 +5413,29 @@ script_mod! {
                                         draw_text.color: theme.color_label_inner_inactive
                                     }
                                     toc_list := mod.widgets.TocList{}
+                                    }
+                                    reader_bookmarks_panel := SolidView{
+                                        visible: false
+                                        width: 280 height: Fill
+                                        new_batch: true
+                                        flow: Down spacing: 8 padding: 12
+                                        draw_bg.color: theme.color_bg_app
+                                        reader_bookmarks_header := View{
+                                            width: Fill height: Fit
+                                            flow: Right
+                                            align: Align{y: 0.5}
+                                            reader_bookmarks_title := Label{
+                                                width: Fill text: "Bookmarks"
+                                                draw_text.text_style.font_size: 14
+                                            }
+                                            reader_bookmarks_close := ButtonFlatter{text: "X"}
+                                        }
+                                        reader_bookmarks_hint := Label{
+                                            width: Fill height: Fit
+                                            text: "当前书籍还没有书签"
+                                            draw_text.text_style.font_size: 9
+                                        }
+                                        reader_bookmark_list := mod.widgets.ReaderJumpList{bookmarks: true}
                                     }
                                     reader_surface := SolidView{
                                         width: Fill height: Fill
@@ -5174,8 +5461,21 @@ script_mod! {
                                             }
                                             reader_page_right_layer := View{
                                                 width: Fill height: Fill
-                                                align: Align{x: 1.0 y: 0.5}
-                                                padding: Inset{right: 18}
+                                                flow: Right
+                                                align: Align{y: 0.5}
+                                                padding: Inset{left: 18 right: 18}
+                                                status := Label{
+                                                    width: Fill height: Fit
+                                                    text: ""
+                                                    draw_text.color: theme.color_label_inner_inactive
+                                                    draw_text.text_style.font_size: 8.5
+                                                }
+                                                chapter_pos := Label{
+                                                    width: Fit height: Fit
+                                                    text: ""
+                                                    draw_text.color: theme.color_label_inner_inactive
+                                                    draw_text.text_style.font_size: 8.5
+                                                }
                                                 reader_pages_left := Label{
                                                     width: Fit height: Fit
                                                     text: ""
@@ -5197,9 +5497,10 @@ script_mod! {
                                         align: Align{y: 0.5}
                                         note_panel_title := Label{
                                             width: Fill
-                                            text: "笔记"
+                                            text: "高亮与笔记"
                                             draw_text.text_style.font_size: 14
                                         }
+                                        reader_ai_btn := ButtonFlatter{ text: "AI" }
                                         note_close_btn := ButtonFlatter{ text: "关闭" }
                                     }
                                     note_composer := RoundedView{
@@ -5240,6 +5541,17 @@ script_mod! {
                                         draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
+                                    reader_highlights_title := Label{
+                                        visible: false
+                                        width: Fill height: Fit
+                                        text: "Highlights"
+                                        draw_text.text_style.font_size: 11
+                                    }
+                                    reader_highlight_list := mod.widgets.ReaderJumpList{
+                                        visible: false
+                                        highlights: true
+                                        width: Fill height: 180
+                                    }
                                     note_empty := View{
                                         visible: true
                                         width: Fill height: 110
@@ -5256,6 +5568,36 @@ script_mod! {
                                         }
                                     }
                                     note_list := mod.widgets.NoteList{visible: false}
+                                    }
+                                    reader_search_panel := SolidView{
+                                        visible: false
+                                        width: 320 height: Fill
+                                        new_batch: true
+                                        flow: Down spacing: 9 padding: 12
+                                        draw_bg.color: theme.color_bg_app
+                                        reader_search_header := View{
+                                            width: Fill height: Fit
+                                            flow: Right
+                                            align: Align{y: 0.5}
+                                            reader_search_title := Label{
+                                                width: Fill text: "Search in Book"
+                                                draw_text.text_style.font_size: 14
+                                            }
+                                            reader_search_close := ButtonFlatter{text: "X"}
+                                        }
+                                        reader_search_input := TextInput{
+                                            width: Fill height: 40
+                                            empty_text: "搜索书中内容"
+                                        }
+                                        reader_search_submit := ButtonFlat{
+                                            width: Fill height: 36 text: "搜索"
+                                        }
+                                        reader_search_hint := Label{
+                                            width: Fill height: Fit
+                                            text: "输入关键词后按回车搜索"
+                                            draw_text.text_style.font_size: 9
+                                        }
+                                        reader_search_list := mod.widgets.ReaderJumpList{bookmarks: false}
                                     }
                                     reader_ai_panel := SolidView{
                                     visible: false
@@ -5381,6 +5723,45 @@ script_mod! {
                                                 draw_text.color: theme.color_label_inner_inactive
                                                 draw_text.text_style.font_size: 9
                                             }
+                                        }
+                                    }
+                                }
+                                reader_theme_layer := View{
+                                    visible: false
+                                    width: Fill height: Fill
+                                    flow: Overlay
+                                    align: Align{x: 1.0 y: 0.0}
+                                    padding: Inset{right: 18 top: 8}
+                                    reader_theme_menu := RoundedShadowView{
+                                        visible: false
+                                        width: 316 height: Fit
+                                        new_batch: true
+                                        flow: Down spacing: 12 padding: 16
+                                        draw_bg.color: theme.color_bg_container
+                                        draw_bg.border_radius: 14.0
+                                        draw_bg.shadow_color: #0003
+                                        draw_bg.shadow_radius: 16.0
+                                        draw_bg.shadow_offset: vec2(0, 5)
+                                        reader_theme_title := Label{
+                                            text: "Themes & Settings"
+                                            draw_text.text_style.font_size: 15
+                                        }
+                                        reader_theme_modes := View{
+                                            width: Fill height: Fit
+                                            flow: Flow.Right{wrap: true}
+                                            spacing: 7
+                                            reader_mode_original := ButtonFlat{width: 88 height: 42 text: "Original"}
+                                            reader_mode_quiet := ButtonFlat{width: 88 height: 42 text: "Quiet"}
+                                            reader_mode_paper := ButtonFlat{width: 88 height: 42 text: "Paper"}
+                                            reader_mode_bold := ButtonFlat{width: 88 height: 42 text: "Bold"}
+                                            reader_mode_calm := ButtonFlat{width: 88 height: 42 text: "Calm"}
+                                            reader_mode_focus := ButtonFlat{width: 88 height: 42 text: "Focus"}
+                                        }
+                                        reader_customise_btn := ButtonFlat{
+                                            width: Fill height: 42
+                                            text: "Customise"
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_settings.svg")}
                                         }
                                     }
                                 }
@@ -5820,8 +6201,12 @@ script_mod! {
                                 flow: Right spacing: 12
                                 align: Align{y: 0.5}
                                 font_family_label := Label{text: "正文字体"}
-                                reader_font_standard := RadioButtonTabFlat{text: "标准"}
-                                reader_font_monospace := RadioButtonTabFlat{text: "等宽"}
+                                reader_font_choice := DropDown{
+                                    width: 190 height: 32
+                                    align: Align{x: 0.0 y: 0.5}
+                                    padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
+                                    labels: ["Original"]
+                                }
                             }
                             line_spacing_row := View{
                                 width: Fill height: Fit
@@ -6082,6 +6467,214 @@ script_mod! {
                             }
                         }
                     }
+                    reader_customise_modal := Modal{
+                        content +: {
+                            width: 560 height: 620
+                            reader_customise_card := RoundedView{
+                                width: Fill height: Fill
+                                new_batch: true
+                                flow: Down spacing: 16 padding: 20
+                                draw_bg.color: theme.color_bg_container
+                                draw_bg.border_radius: 16.0
+                                reader_customise_header := View{
+                                    width: Fill height: Fit
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    reader_customise_title := Label{
+                                        width: Fill
+                                        text: "Customise"
+                                        draw_text.text_style.font_size: 17
+                                    }
+                                    reader_customise_close := ButtonFlatter{text: "X"}
+                                }
+                                reader_preview := RoundedView{
+                                    width: Fill height: 180
+                                    new_batch: true
+                                    flow: Down spacing: 6 padding: 16
+                                    draw_bg.color: #f7f4ea
+                                    draw_bg.border_radius: 10.0
+                                    reader_preview_heading := Label{
+                                        width: Fill height: Fit
+                                        text: "Ruby 注音验证"
+                                        draw_text.text_style.font_size: 15
+                                    }
+                                    reader_preview_scroll := ScrollYView{
+                                        width: Fill height: Fill
+                                        scroll_bars +: {scroll_bar_y +: {draw_bg +: {
+                                            color: #0000 color_hover: #0000 color_drag: #0000
+                                            border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
+                                            border_size: 0.0
+                                        }}}
+                                        reader_preview_columns := View{
+                                            width: Fill height: Fit
+                                            flow: Right spacing: 12
+                                            reader_preview_text := Html{
+                                                width: Fill height: Fit
+                                                selectable: false
+                                                ruby := mod.widgets.RubyWord{preview: true}
+                                            }
+                                            reader_preview_second_column := View{
+                                                visible: false
+                                                width: Fill height: Fit
+                                                reader_preview_text_second := Html{
+                                                    width: Fill height: Fit
+                                                    selectable: false
+                                                    ruby := mod.widgets.RubyWord{preview: true}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                reader_customise_scroll := ScrollYView{
+                                    width: Fill height: Fill
+                                    flow: Down spacing: 14
+                                    scroll_bars +: {scroll_bar_y +: {draw_bg +: {
+                                        color: #0000 color_hover: #0000 color_drag: #0000
+                                        border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
+                                        border_size: 0.0
+                                    }}}
+                                    reader_customise_text_title := Label{
+                                        text: "Text"
+                                        draw_text.text_style.font_size: 13
+                                    }
+                                    reader_customise_font_row := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        reader_customise_font_label := Label{width: Fill text: "Font"}
+                                        reader_customise_font_choice := DropDown{
+                                            width: 180 height: 32
+                                            align: Align{x: 0.0 y: 0.5}
+                                            padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
+                                            labels: ["Original"]
+                                        }
+                                    }
+                                    reader_customise_size_row := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        reader_customise_size_label := Label{width: Fill text: "Text Size"}
+                                        reader_customise_size_down := ButtonFlat{text: "A-"}
+                                        reader_customise_size_value := Label{text: "12"}
+                                        reader_customise_size_up := ButtonFlat{text: "A+"}
+                                    }
+                                    reader_customise_bold := CheckBox{text: "Bold Text"}
+                                    reader_customise_gloss_title := Label{
+                                        text: "Word Annotations"
+                                        draw_text.text_style.font_size: 13
+                                    }
+                                    reader_customise_gloss_enable := CheckBox{text: "Show word annotations"}
+                                    reader_customise_gloss_size_row := View{
+                                        width: Fill height: Fit flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        reader_customise_gloss_size_label := Label{width: Fill text: "Annotation Size"}
+                                        reader_customise_gloss_size_down := ButtonFlat{text: "-"}
+                                        reader_customise_gloss_size_value := Label{text: "7.5"}
+                                        reader_customise_gloss_size_up := ButtonFlat{text: "+"}
+                                    }
+                                    reader_customise_gloss_color_row := View{
+                                        width: Fill height: Fit flow: Right spacing: 5
+                                        reader_customise_gloss_color_label := Label{width: Fill text: "Annotation Color"}
+                                        reader_customise_gloss_color_green := ButtonFlat{text: "Green"}
+                                        reader_customise_gloss_color_blue := ButtonFlat{text: "Blue"}
+                                        reader_customise_gloss_color_orange := ButtonFlat{text: "Orange"}
+                                        reader_customise_gloss_color_gray := ButtonFlat{text: "Gray"}
+                                    }
+                                    reader_customise_gloss_bg_row := View{
+                                        width: Fill height: Fit flow: Right spacing: 5
+                                        reader_customise_gloss_bg_label := Label{width: Fill text: "Annotation Background"}
+                                        reader_customise_gloss_bg_none := ButtonFlat{text: "None"}
+                                        reader_customise_gloss_bg_gray := ButtonFlat{text: "Gray"}
+                                        reader_customise_gloss_bg_green := ButtonFlat{text: "Green"}
+                                        reader_customise_gloss_bg_blue := ButtonFlat{text: "Blue"}
+                                    }
+                                    reader_customise_word_color_row := View{
+                                        width: Fill height: Fit flow: Right spacing: 5
+                                        reader_customise_word_color_label := Label{width: Fill text: "Word Color"}
+                                        reader_customise_word_color_default := ButtonFlat{text: "Default"}
+                                        reader_customise_word_color_green := ButtonFlat{text: "Green"}
+                                        reader_customise_word_color_blue := ButtonFlat{text: "Blue"}
+                                        reader_customise_word_color_orange := ButtonFlat{text: "Orange"}
+                                    }
+                                    reader_customise_word_bg_row := View{
+                                        width: Fill height: Fit flow: Right spacing: 5
+                                        reader_customise_word_bg_label := Label{width: Fill text: "Word Background"}
+                                        reader_customise_word_bg_none := ButtonFlat{text: "None"}
+                                        reader_customise_word_bg_gray := ButtonFlat{text: "Gray"}
+                                        reader_customise_word_bg_green := ButtonFlat{text: "Green"}
+                                        reader_customise_word_bg_blue := ButtonFlat{text: "Blue"}
+                                    }
+                                    reader_customise_layout_title := Label{
+                                        text: "Accessibility & Layout"
+                                        draw_text.text_style.font_size: 13
+                                    }
+                                    reader_customise_line_row := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        reader_customise_line_label := Label{width: Fill text: "LINE SPACING"}
+                                        reader_customise_line_down := ButtonFlat{text: "-"}
+                                        reader_customise_line_value := Label{text: "Default"}
+                                        reader_customise_line_up := ButtonFlat{text: "+"}
+                                    }
+                                    reader_customise_character_row := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        reader_customise_character_label := Label{width: Fill text: "CHARACTER SPACING"}
+                                        reader_customise_character_down := ButtonFlat{text: "-"}
+                                        reader_customise_character_value := Label{text: "Default"}
+                                        reader_customise_character_up := ButtonFlat{text: "+"}
+                                    }
+                                    reader_customise_word_row := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        reader_customise_word_label := Label{width: Fill text: "WORD SPACING"}
+                                        reader_customise_word_down := ButtonFlat{text: "-"}
+                                        reader_customise_word_value := Label{text: "Default"}
+                                        reader_customise_word_up := ButtonFlat{text: "+"}
+                                    }
+                                    reader_customise_margin_row := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        reader_customise_margin_label := Label{width: Fill text: "MARGINS"}
+                                        reader_customise_margin_down := ButtonFlat{text: "-"}
+                                        reader_customise_margin_value := Label{text: "Default"}
+                                        reader_customise_margin_up := ButtonFlat{text: "+"}
+                                    }
+                                    reader_customise_columns_title := Label{
+                                        text: "Columns"
+                                        draw_text.text_style.font_size: 13
+                                    }
+                                    reader_customise_columns_row := View{
+                                        width: Fill height: Fit
+                                        flow: Right spacing: 8
+                                        reader_customise_columns_one := ButtonFlat{text: "1"}
+                                        reader_customise_columns_two := ButtonFlat{text: "2"}
+                                        reader_customise_columns_auto := ButtonFlat{text: "Auto Set"}
+                                    }
+                                    reader_customise_justify := CheckBox{text: "Justify Text"}
+                                    reader_customise_reset := ButtonFlatter{
+                                        width: Fill height: 42
+                                        text: "Reset Theme"
+                                    }
+                                }
+                                reader_customise_actions := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 10
+                                    align: Align{x: 1.0 y: 0.5}
+                                    reader_customise_cancel := ButtonFlatter{
+                                        width: 100 height: 38 text: "Cancel"
+                                    }
+                                    reader_customise_save := ButtonFlat{
+                                        width: 148 height: 38 text: "Save & Apply"
+                                    }
+                                }
+                            }
+                        }
+                    }
                     library_tag_modal := Modal{
                 content +: {
                     width: 360 height: Fit
@@ -6329,6 +6922,8 @@ impl Widget for StatsBars {
 
 #[derive(Script, ScriptHook, Widget)]
 struct ChapterList {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     view: View,
     #[live]
@@ -6342,7 +6937,21 @@ struct ChapterList {
     #[live]
     font_standard_bold_italic: TextStyle,
     #[live]
-    font_monospace: TextStyle,
+    font_preview_normal: TextStyle,
+    #[live]
+    font_preview_italic: TextStyle,
+    #[live]
+    font_preview_bold: TextStyle,
+    #[live]
+    font_preview_bold_italic: TextStyle,
+    #[live]
+    font_active_normal: TextStyle,
+    #[live]
+    font_active_italic: TextStyle,
+    #[live]
+    font_active_bold: TextStyle,
+    #[live]
+    font_active_bold_italic: TextStyle,
     #[live]
     html_default_inset: f64,
     #[live]
@@ -6469,7 +7078,7 @@ fn reader_range_geometry_key(
         viewport_width_half_px: (viewport_width * 2.0).round() as i64,
         font_size_bits: font_size.to_bits(),
         line_spacing_bits: line_spacing.to_bits(),
-        font_kind: u8::from(font == ReaderFont::Monospace),
+        font_kind: font.index() as u8,
         source_hash: reader_source_hash(source),
     }
 }
@@ -6691,14 +7300,19 @@ impl ChapterList {
         let list_ref = self.view.portal_list(cx, ids!(list));
         let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
         let signature = reader_source_hash(&format!(
-            "scroll:{content_version}:{}:{}:{:?}:{:?}:{:?}:{}:{}",
+            "scroll:{content_version}:{}:{}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{}:{}:{}",
             viewport.size.x,
             self.compact_layout,
             *READER_FONT.read().unwrap(),
             *READER_FONT_SIZE.read().unwrap(),
             *READER_SPACING.read().unwrap(),
             *crate::ruby_word::GLOSS_FONT_SIZE.read().unwrap(),
-            *GLOSS_ENABLED.read().unwrap()
+            *GLOSS_ENABLED.read().unwrap(),
+            *READER_BOLD_TEXT.read().unwrap(),
+            *READER_MARGIN.read().unwrap(),
+            *READER_CHARACTER_SPACING.read().unwrap(),
+            *READER_WORD_SPACING.read().unwrap(),
+            *READER_JUSTIFY_TEXT.read().unwrap()
         ));
         let paragraphs = PARAGRAPHS.read().unwrap();
         let code_blocks = CODE_BLOCKS.read().unwrap();
@@ -6810,16 +7424,17 @@ impl ChapterList {
             .read()
             .unwrap()
             .unwrap_or(self.font_default_size);
-        let layout = ColumnLayout::resolve(
+        let layout = ColumnLayout::resolve_with_margin(
             *READER_COLUMNS.read().unwrap(),
             viewport.size.x,
             viewport.size.y,
             font as f64,
             self.pager.layout.count,
+            *READER_MARGIN.read().unwrap() as f64,
         );
         let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
         let signature = reader_source_hash(&format!(
-            "{}:{:.1}:{:.1}:{}:{:?}:{:?}:{}:{}:{}",
+            "{}:{:.1}:{:.1}:{}:{:?}:{:?}:{}:{}:{}:{}:{}:{}:{}",
             content_version,
             layout.width,
             layout.height,
@@ -6828,7 +7443,11 @@ impl ChapterList {
             *READER_SPACING.read().unwrap(),
             font,
             *crate::ruby_word::GLOSS_FONT_SIZE.read().unwrap(),
-            *GLOSS_ENABLED.read().unwrap()
+            *GLOSS_ENABLED.read().unwrap(),
+            *READER_BOLD_TEXT.read().unwrap(),
+            *READER_CHARACTER_SPACING.read().unwrap(),
+            *READER_WORD_SPACING.read().unwrap(),
+            *READER_JUSTIFY_TEXT.read().unwrap()
         ));
         let list_ref = self.view.portal_list(cx, ids!(list));
         let mut anchor = PageAnchor {
@@ -7003,7 +7622,7 @@ impl ChapterList {
                 let pos = viewport.pos
                     + dvec2(
                         layout.left + column as f64 * (layout.width + layout.gap),
-                        8.0 + fragment.top,
+                        layout.top + fragment.top,
                     );
                 let clip = Rect {
                     pos,
@@ -7203,25 +7822,10 @@ impl ChapterList {
             return;
         }
         self.compact_layout = compact_layout;
-        let reader_padding = if compact_layout {
-            Inset {
-                left: 12.0,
-                right: 12.0,
-                top: 8.0,
-                bottom: 8.0,
-            }
-        } else {
-            Inset {
-                left: 32.0,
-                right: 32.0,
-                top: 8.0,
-                bottom: 8.0,
-            }
-        };
+        self.apply_reader_margin(cx);
         let drag_scrolling = compact_layout || cfg!(any(target_os = "android", target_os = "ios"));
         let mut list_widget = self.view.widget(cx, ids!(list));
         script_apply_eval!(cx, list_widget, {
-            padding: #(reader_padding)
             drag_scrolling: #(drag_scrolling)
         });
         let list = self.view.portal_list(cx, ids!(list));
@@ -7233,6 +7837,25 @@ impl ChapterList {
         *SEL_RANGE.write().unwrap() = None;
         SELECTED_TEXT.write().unwrap().clear();
         Cx::post_action(SelAction::Hide);
+        self.view.redraw(cx);
+    }
+
+    fn apply_reader_margin(&mut self, cx: &mut Cx) {
+        let margin = *READER_MARGIN.read().unwrap() as f64;
+        let edge = if self.compact_layout {
+            margin.min(24.0)
+        } else {
+            margin
+        };
+        let top = (margin - 20.0).clamp(8.0, 60.0);
+        let reader_padding = Inset {
+            left: edge,
+            right: edge,
+            top,
+            bottom: top,
+        };
+        let mut list_widget = self.view.widget(cx, ids!(list));
+        script_apply_eval!(cx, list_widget, {padding: #(reader_padding)});
         self.view.redraw(cx);
     }
 
@@ -7762,15 +8385,18 @@ impl ChapterList {
         measure: bool,
     ) -> crate::reader_columns::BlockMetrics {
         let reader_font = *READER_FONT.read().unwrap();
+        let bold_text = *READER_BOLD_TEXT.read().unwrap();
         let reader_spacing = *READER_SPACING.read().unwrap();
         let reader_background = *READER_BACKGROUND.read().unwrap();
         let reader_theme = *READER_THEME.read().unwrap();
         let (_, reader_text_color) = reader_palette(reader_background, reader_theme);
         let reader_scene = reader_scene_palette(reader_background, reader_theme);
         let code_template = match reader_background {
+            ReaderBackground::Original => id!(CodeThemeLight),
             ReaderBackground::Paper => id!(CodePaper),
             ReaderBackground::Sepia => id!(CodeSepia),
             ReaderBackground::Sage => id!(CodeSage),
+            ReaderBackground::Bold => id!(CodePaper),
             ReaderBackground::Night => id!(CodeNight),
             ReaderBackground::FollowTheme if reader_theme == ReaderTheme::Light => {
                 id!(CodeThemeLight)
@@ -7797,23 +8423,35 @@ impl ChapterList {
             .and_then(|book| book.highlights.get(&chapter_idx))
             .cloned()
             .unwrap_or_default();
-        let normal_family = if reader_font == ReaderFont::Monospace {
-            self.font_monospace.font_family.clone()
+        let normal_family = if reader_font != ReaderFont::Original {
+            if bold_text {
+                self.font_active_bold.font_family.clone()
+            } else {
+                self.font_active_normal.font_family.clone()
+            }
+        } else if bold_text {
+            self.font_standard_bold.font_family.clone()
         } else {
             self.font_standard_normal.font_family.clone()
         };
-        let italic_family = if reader_font == ReaderFont::Monospace {
-            self.font_monospace.font_family.clone()
+        let italic_family = if reader_font != ReaderFont::Original {
+            if bold_text {
+                self.font_active_bold_italic.font_family.clone()
+            } else {
+                self.font_active_italic.font_family.clone()
+            }
+        } else if bold_text {
+            self.font_standard_bold_italic.font_family.clone()
         } else {
             self.font_standard_italic.font_family.clone()
         };
-        let bold_family = if reader_font == ReaderFont::Monospace {
-            self.font_monospace.font_family.clone()
+        let bold_family = if reader_font != ReaderFont::Original {
+            self.font_active_bold.font_family.clone()
         } else {
             self.font_standard_bold.font_family.clone()
         };
-        let bold_italic_family = if reader_font == ReaderFont::Monospace {
-            self.font_monospace.font_family.clone()
+        let bold_italic_family = if reader_font != ReaderFont::Original {
+            self.font_active_bold_italic.font_family.clone()
         } else {
             self.font_standard_bold_italic.font_family.clone()
         };
@@ -7961,6 +8599,20 @@ impl ChapterList {
                 inner.text_flow.text_style_bold.line_spacing = line_spacing;
                 inner.text_flow.text_style_bold_italic.line_spacing = line_spacing;
                 inner.text_flow.text_style_fixed.line_spacing = line_spacing;
+                let letter_spacing = *READER_CHARACTER_SPACING.read().unwrap();
+                let word_spacing = *READER_WORD_SPACING.read().unwrap();
+                let justify = *READER_JUSTIFY_TEXT.read().unwrap();
+                let flow = &mut inner.text_flow;
+                for style in [
+                    &mut flow.text_style_normal,
+                    &mut flow.text_style_italic,
+                    &mut flow.text_style_bold,
+                    &mut flow.text_style_bold_italic,
+                ] {
+                    style.letter_spacing = letter_spacing;
+                    style.word_spacing = word_spacing;
+                    style.justify = justify;
+                }
             };
         }
         let native_probe = if measure {
@@ -8253,6 +8905,21 @@ impl Widget for ChapterList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
+            && matches!(
+                event,
+                Event::MouseDown(_)
+                    | Event::MouseMove(_)
+                    | Event::MouseUp(_)
+                    | Event::Scroll(_)
+                    | Event::TouchUpdate(_)
+                    | Event::LongPress(_)
+                    | Event::KeyDown(_)
+                    | Event::KeyUp(_)
+            )
+        {
+            return;
+        }
         self.page_turn.handle_event(cx, event, self.view.area());
         if matches!(event, Event::WindowGeomChange(_)) {
             self.page_turn.cancel();
@@ -8443,6 +9110,69 @@ impl Widget for TocList {
                             id!(color),
                             &[color.x, color.y, color.z, color.w],
                         );
+                    }
+                    item.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
+struct ReaderJumpList {
+    #[deref]
+    view: View,
+    #[live]
+    bookmarks: bool,
+    #[live]
+    highlights: bool,
+    #[live]
+    text_color: Vec4f,
+}
+
+impl Widget for ReaderJumpList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let labels: Vec<String> = if self.bookmarks {
+            READER_BOOKMARKS
+                .read()
+                .unwrap()
+                .iter()
+                .map(|bookmark| bookmark.label.clone())
+                .collect()
+        } else if self.highlights {
+            READER_HIGHLIGHT_JUMPS
+                .read()
+                .unwrap()
+                .iter()
+                .map(|hit| format!("{} · {}", hit.chapter + 1, hit.excerpt))
+                .collect()
+        } else {
+            READER_SEARCH_RESULTS
+                .read()
+                .unwrap()
+                .iter()
+                .map(|hit| format!("{} · {}", hit.chapter + 1, hit.excerpt))
+                .collect()
+        };
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, labels.len());
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let Some(text) = labels.get(item_id) else {
+                        continue;
+                    };
+                    let item = list.item(cx, item_id, id!(JumpItem));
+                    let label = item.label(cx, ids!(jump_label));
+                    if label.text() != *text {
+                        label.set_text(cx, text);
+                    }
+                    if let Some(mut inner) = label.borrow_mut() {
+                        inner.draw_text.color = self.text_color;
                     }
                     item.draw_all_unscoped(cx);
                 }
@@ -9248,11 +9978,29 @@ pub struct App {
     #[rust]
     on_reader_page: bool,
     #[rust]
+    reader_toolbar_visible: bool,
+    #[rust]
+    reader_theme_open: bool,
+    #[rust]
+    reader_customise_draft: Option<ReaderSettings>,
+    #[rust]
+    active_font_applied: Option<ReaderFont>,
+    #[rust]
+    preview_font_applied: Option<ReaderFont>,
+    #[rust]
+    pending_customise_preview_after_draw: bool,
+    #[rust]
     active_page: AppPage,
     #[rust]
     pending_theme_reapply: bool,
     #[rust]
     toc_open: bool,
+    #[rust]
+    bookmarks_open: bool,
+    #[rust]
+    search_open: bool,
+    #[rust]
+    reader_search_query: String,
     /// The TOC may be opened before its hidden panel has painted its first frame.
     #[rust]
     pending_toc_first_draw: bool,
@@ -9284,6 +10032,165 @@ pub struct App {
 }
 
 impl App {
+    /// Load a macOS font into the separate preview or saved-reading style.
+    /// The preview slots never change the active chapter's font before Save.
+    fn load_reader_font(&mut self, cx: &mut Cx, font: ReaderFont, preview: bool) {
+        if (if preview {
+            self.preview_font_applied
+        } else {
+            self.active_font_applied
+        }) == Some(font)
+        {
+            return;
+        }
+        if font == ReaderFont::Original {
+            if preview {
+                self.preview_font_applied = Some(font);
+            } else {
+                self.active_font_applied = Some(font);
+            }
+            return;
+        }
+        let Some(files) = crate::reader_fonts::prepare_reader_font(font) else {
+            ::log::warn!("Reader font {} is unavailable", font.label());
+            if let Some(mut reader) = self
+                .ui
+                .widget(cx, ids!(chapter_list))
+                .borrow_mut::<ChapterList>()
+            {
+                let normal = reader.font_standard_normal.font_family.clone();
+                let italic = reader.font_standard_italic.font_family.clone();
+                let bold = reader.font_standard_bold.font_family.clone();
+                let bold_italic = reader.font_standard_bold_italic.font_family.clone();
+                if preview {
+                    reader.font_preview_normal.font_family = normal;
+                    reader.font_preview_italic.font_family = italic;
+                    reader.font_preview_bold.font_family = bold;
+                    reader.font_preview_bold_italic.font_family = bold_italic;
+                } else {
+                    reader.font_active_normal.font_family = normal;
+                    reader.font_active_italic.font_family = italic;
+                    reader.font_active_bold.font_family = bold;
+                    reader.font_active_bold_italic.font_family = bold_italic;
+                }
+                if !preview {
+                    reader.view.redraw(cx);
+                }
+            }
+            if preview {
+                self.preview_font_applied = Some(font);
+            } else {
+                self.active_font_applied = Some(font);
+            }
+            return;
+        };
+        let regular_path = files.regular.path;
+        let italic_path = files.italic.path;
+        let bold_path = files.bold.path;
+        let bold_italic_path = files.bold_italic.path;
+        let regular_weight = files.regular.weight;
+        let italic_weight = files.italic.weight;
+        let bold_weight = files.bold.weight;
+        let bold_italic_weight = files.bold_italic.weight;
+        let mut reader = self.ui.widget(cx, ids!(chapter_list));
+        if reader.borrow::<ChapterList>().is_none() {
+            return;
+        }
+        if preview {
+            script_apply_eval!(cx, reader, {
+                font_preview_normal +: {font_family: mod.prelude.widgets.FontFamily{
+                    latin := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.file_resource(#(regular_path)) weight: #(regular_weight)}
+                    chinese := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf")}
+                    emoji := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")}
+                }}
+                font_preview_italic +: {font_family: mod.prelude.widgets.FontFamily{
+                    latin := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.file_resource(#(italic_path)) weight: #(italic_weight)}
+                    chinese := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf")}
+                    emoji := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")}
+                }}
+                font_preview_bold +: {font_family: mod.prelude.widgets.FontFamily{
+                    latin := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.file_resource(#(bold_path)) weight: #(bold_weight)}
+                    chinese := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf")}
+                    emoji := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")}
+                }}
+                font_preview_bold_italic +: {font_family: mod.prelude.widgets.FontFamily{
+                    latin := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.file_resource(#(bold_italic_path)) weight: #(bold_italic_weight)}
+                    chinese := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf")}
+                    emoji := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")}
+                }}
+            });
+        } else {
+            script_apply_eval!(cx, reader, {
+                font_active_normal +: {font_family: mod.prelude.widgets.FontFamily{
+                    latin := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.file_resource(#(regular_path)) weight: #(regular_weight)}
+                    chinese := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf")}
+                    emoji := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")}
+                }}
+                font_active_italic +: {font_family: mod.prelude.widgets.FontFamily{
+                    latin := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.file_resource(#(italic_path)) weight: #(italic_weight)}
+                    chinese := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf")}
+                    emoji := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")}
+                }}
+                font_active_bold +: {font_family: mod.prelude.widgets.FontFamily{
+                    latin := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.file_resource(#(bold_path)) weight: #(bold_weight)}
+                    chinese := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf")}
+                    emoji := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")}
+                }}
+                font_active_bold_italic +: {font_family: mod.prelude.widgets.FontFamily{
+                    latin := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.file_resource(#(bold_italic_path)) weight: #(bold_italic_weight)}
+                    chinese := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf")}
+                    emoji := mod.prelude.widgets.FontMember{res: mod.prelude.widgets.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")}
+                }}
+            });
+        }
+        if !preview {
+            reader.redraw(cx);
+        }
+        if preview {
+            self.preview_font_applied = Some(font);
+        } else {
+            self.active_font_applied = Some(font);
+        }
+    }
+
+    fn open_reader_customise(&mut self, cx: &mut Cx) {
+        self.reader_customise_draft = Some(current_reader_settings());
+        self.pending_customise_preview_after_draw = true;
+        READER_CUSTOMISE_OPEN.store(true, Ordering::Release);
+        self.reader_swipe.cancel();
+        if let Some(mut reader) = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow_mut::<ChapterList>()
+        {
+            reader.page_turn.cancel();
+            reader.pager.pending_turn = None;
+        }
+        self.ui.modal(cx, ids!(reader_customise_modal)).open(cx);
+        self.load_reader_font(cx, self.reader_customise_draft.as_ref().unwrap().font, true);
+        self.sync_reader_customise_controls(cx);
+    }
+
+    fn close_reader_customise(&mut self, cx: &mut Cx) {
+        READER_CUSTOMISE_OPEN.store(false, Ordering::Release);
+        self.reader_customise_draft = None;
+        self.pending_customise_preview_after_draw = false;
+        self.ui.modal(cx, ids!(reader_customise_modal)).close(cx);
+    }
+
+    fn save_reader_customise(&mut self, cx: &mut Cx) {
+        let draft = self.reader_customise_draft.take();
+        READER_CUSTOMISE_OPEN.store(false, Ordering::Release);
+        self.pending_customise_preview_after_draw = false;
+        self.ui.modal(cx, ids!(reader_customise_modal)).close(cx);
+        if let Some(settings) = draft {
+            if settings != current_reader_settings() {
+                self.apply_reader_settings(cx, settings);
+                self.persist_reader_settings(cx);
+            }
+        }
+    }
+
     fn project_db_counts(&self, cx: &mut Cx, vocab_count: usize, known_count: usize) {
         let status = if app_language() == AppLanguage::English {
             format!(
@@ -9369,7 +10276,35 @@ impl App {
         self.active_page = page;
         ACTIVE_PAGE.store(page.persisted(), Ordering::Relaxed);
         self.on_reader_page = page == AppPage::Reader;
+        if !self.on_reader_page {
+            if self.reader_customise_draft.is_some() {
+                self.close_reader_customise(cx);
+            }
+            self.reader_theme_open = false;
+            self.ui
+                .widget(cx, ids!(reader_theme_menu))
+                .set_visible(cx, false);
+            self.ui
+                .widget(cx, ids!(reader_theme_layer))
+                .set_visible(cx, false);
+        }
+        self.ui
+            .widget(cx, ids!(sidebar))
+            .set_visible(cx, !self.compact_layout && !self.on_reader_page);
+        self.sync_mobile_chrome(cx);
+        self.set_reader_toolbar_visible(cx, self.on_reader_page && self.compact_layout);
         self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
+    }
+
+    fn set_reader_toolbar_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.reader_toolbar_visible = visible;
+        for id in [
+            id!(reader_toolbar_left_buttons),
+            id!(reader_toolbar_right_buttons),
+        ] {
+            self.ui.widget(cx, &[id]).set_visible(cx, visible);
+        }
+        self.ui.widget(cx, ids!(header)).redraw(cx);
     }
 
     fn apply_navigation_palette(&self, cx: &mut Cx, page: AppPage) {
@@ -9646,7 +10581,16 @@ impl App {
         self.toc_open = false;
         self.note_open = false;
         self.reader_ai_open = false;
+        self.bookmarks_open = false;
+        self.search_open = false;
+        self.reader_search_query.clear();
         self.pending_toc_first_draw = false;
+        READER_BOOKMARKS.write().unwrap().clear();
+        READER_SEARCH_RESULTS.write().unwrap().clear();
+        READER_HIGHLIGHT_JUMPS.write().unwrap().clear();
+        self.ui
+            .text_input(cx, ids!(reader_search_input))
+            .set_text(cx, "");
         self.ui
             .widget(cx, ids!(toc_list))
             .portal_list(cx, ids!(list))
@@ -9865,6 +10809,20 @@ impl App {
         }
     }
 
+    fn set_reader_columns(&mut self, cx: &mut Cx, columns: ReaderColumns) {
+        if *READER_COLUMNS.read().unwrap() == columns {
+            self.sync_reader_columns_controls(cx, columns);
+            self.sync_reader_customise_controls(cx);
+            return;
+        }
+        *READER_COLUMNS.write().unwrap() = columns;
+        self.sync_reader_columns_controls(cx, columns);
+        self.sync_reader_customise_controls(cx);
+        self.clear_reader_selection(cx);
+        self.invalidate_reader_pagination_layout(cx);
+        self.persist_reader_settings(cx);
+    }
+
     fn sync_reader_turn_controls(&self, cx: &mut Cx, mode: ReaderTurnMode) {
         for (id, option) in [
             (id!(reader_turn_curl), ReaderTurnMode::Curl),
@@ -9894,6 +10852,362 @@ impl App {
             self.ui
                 .radio_button(cx, &[id])
                 .set_active(cx, background == option, Animate::No);
+        }
+    }
+
+    fn sync_reader_mode_controls(&self, cx: &mut Cx, background: ReaderBackground) {
+        let accent = reader_scene_palette(background, *READER_THEME.read().unwrap()).accent;
+        for (id, mode, surface, text) in [
+            (
+                id!(reader_mode_original),
+                ReaderBackground::Original,
+                0xffff_ffff,
+                0x2020_20ff,
+            ),
+            (
+                id!(reader_mode_quiet),
+                ReaderBackground::Sepia,
+                0xf2e3_c6ff,
+                0x3b30_25ff,
+            ),
+            (
+                id!(reader_mode_paper),
+                ReaderBackground::Paper,
+                0xf7f4_eaff,
+                0x2b29_25ff,
+            ),
+            (
+                id!(reader_mode_bold),
+                ReaderBackground::Bold,
+                0xfaf8_f2ff,
+                0x1717_17ff,
+            ),
+            (
+                id!(reader_mode_calm),
+                ReaderBackground::Sage,
+                0xe7ef_e3ff,
+                0x2734_2bff,
+            ),
+            (
+                id!(reader_mode_focus),
+                ReaderBackground::Night,
+                0x2025_2bff,
+                0xd8d4_caff,
+            ),
+        ] {
+            let mut button = self.ui.widget(cx, &[id]);
+            let surface = Vec4f::from_u32(surface);
+            let text = Vec4f::from_u32(text);
+            let border = if mode == background { accent } else { surface };
+            script_apply_eval!(cx, button, {
+                draw_bg +: {
+                    color: #(surface)
+                    color_hover: #(surface)
+                    color_down: #(surface)
+                    color_focus: #(surface)
+                    border_color: #(border)
+                    border_color_focus: #(border)
+                    border_color_hover: #(border)
+                    border_color_down: #(border)
+                    border_size: 2.0
+                }
+                draw_text +: {
+                    color: #(text)
+                    color_focus: #(text)
+                    color_hover: #(text)
+                    color_down: #(text)
+                }
+            });
+        }
+    }
+
+    fn paint_customise_choice(
+        &self,
+        cx: &mut Cx,
+        id: LiveId,
+        selected: bool,
+        palette: ReaderScenePalette,
+    ) {
+        let fill = if selected {
+            palette.hover
+        } else {
+            palette.field
+        };
+        let border = if selected {
+            palette.accent
+        } else {
+            palette.border
+        };
+        let mut button = self.ui.widget(cx, &[id]);
+        script_apply_eval!(cx, button, {
+            draw_bg +: {
+                color: #(fill)
+                color_focus: #(fill)
+                border_color: #(border)
+                border_color_focus: #(border)
+                border_size: 1.0
+            }
+        });
+    }
+
+    fn sync_reader_customise_controls(&self, cx: &mut Cx) {
+        let settings = self
+            .reader_customise_draft
+            .clone()
+            .unwrap_or_else(current_reader_settings);
+        let background = settings.background;
+        let palette = reader_scene_palette(background, settings.theme);
+        let font = settings.font;
+        let columns = settings.columns;
+        let spacing = settings.spacing;
+        let size = settings.font_size.unwrap_or(READER_FONT_DEFAULT);
+        let character = settings.character_spacing;
+        let word = settings.word_spacing;
+        let margin = settings.margin;
+        self.ui
+            .label(cx, ids!(reader_customise_size_value))
+            .set_text(cx, &format!("{size:.0}"));
+        self.ui
+            .label(cx, ids!(reader_customise_line_value))
+            .set_text(
+                cx,
+                match spacing {
+                    ReaderSpacing::Default => "1.2×",
+                    ReaderSpacing::Comfortable => "1.45×",
+                    ReaderSpacing::Relaxed => "1.75×",
+                },
+            );
+        self.ui
+            .label(cx, ids!(reader_customise_character_value))
+            .set_text(cx, &format!("{:.0}%", character * 100.0));
+        self.ui
+            .label(cx, ids!(reader_customise_word_value))
+            .set_text(cx, &format!("{:.0}%", word * 100.0));
+        self.ui
+            .label(cx, ids!(reader_customise_margin_value))
+            .set_text(cx, &format!("{margin:.0} px"));
+        self.ui
+            .check_box(cx, ids!(reader_customise_bold))
+            .set_active(cx, settings.bold_text, Animate::No);
+        self.ui
+            .check_box(cx, ids!(reader_customise_justify))
+            .set_active(cx, settings.justify_text, Animate::No);
+        self.ui
+            .check_box(cx, ids!(reader_customise_gloss_enable))
+            .set_active(cx, settings.gloss_enabled, Animate::No);
+        self.ui
+            .label(cx, ids!(reader_customise_gloss_size_value))
+            .set_text(cx, &format!("{:.1}", settings.gloss_font_size));
+        for id in [
+            id!(reader_customise_gloss_size_row),
+            id!(reader_customise_gloss_color_row),
+            id!(reader_customise_gloss_bg_row),
+            id!(reader_customise_word_color_row),
+            id!(reader_customise_word_bg_row),
+        ] {
+            self.ui
+                .widget(cx, &[id])
+                .set_visible(cx, settings.gloss_enabled);
+        }
+        let font_choice = self.ui.drop_down(cx, ids!(reader_customise_font_choice));
+        font_choice.set_labels(
+            cx,
+            ReaderFont::ALL
+                .iter()
+                .map(|font| font.label().to_string())
+                .collect(),
+        );
+        font_choice.set_selected_item(cx, font.index());
+        for (id, selected) in [
+            (
+                id!(reader_customise_columns_one),
+                columns == ReaderColumns::One,
+            ),
+            (
+                id!(reader_customise_columns_two),
+                columns == ReaderColumns::Two,
+            ),
+            (
+                id!(reader_customise_columns_auto),
+                columns == ReaderColumns::Auto,
+            ),
+            (
+                id!(reader_customise_gloss_color_green),
+                settings.gloss_color_slot == 0,
+            ),
+            (
+                id!(reader_customise_gloss_color_blue),
+                settings.gloss_color_slot == 1,
+            ),
+            (
+                id!(reader_customise_gloss_color_orange),
+                settings.gloss_color_slot == 2,
+            ),
+            (
+                id!(reader_customise_gloss_color_gray),
+                settings.gloss_color_slot == 3,
+            ),
+            (
+                id!(reader_customise_gloss_bg_none),
+                settings.gloss_background_slot == 0,
+            ),
+            (
+                id!(reader_customise_gloss_bg_gray),
+                settings.gloss_background_slot == 1,
+            ),
+            (
+                id!(reader_customise_gloss_bg_green),
+                settings.gloss_background_slot == 2,
+            ),
+            (
+                id!(reader_customise_gloss_bg_blue),
+                settings.gloss_background_slot == 3,
+            ),
+            (
+                id!(reader_customise_word_color_default),
+                settings.word_color_slot == 0,
+            ),
+            (
+                id!(reader_customise_word_color_green),
+                settings.word_color_slot == 1,
+            ),
+            (
+                id!(reader_customise_word_color_blue),
+                settings.word_color_slot == 2,
+            ),
+            (
+                id!(reader_customise_word_color_orange),
+                settings.word_color_slot == 3,
+            ),
+            (
+                id!(reader_customise_word_bg_none),
+                settings.word_background_slot == 0,
+            ),
+            (
+                id!(reader_customise_word_bg_gray),
+                settings.word_background_slot == 1,
+            ),
+            (
+                id!(reader_customise_word_bg_green),
+                settings.word_background_slot == 2,
+            ),
+            (
+                id!(reader_customise_word_bg_blue),
+                settings.word_background_slot == 3,
+            ),
+        ] {
+            self.paint_customise_choice(cx, id, selected, palette);
+        }
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_preview)),
+            palette.surface,
+            palette.border,
+        );
+        apply_reader_label_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_preview_heading)),
+            palette.text,
+        );
+        let two_columns = match columns {
+            ReaderColumns::One => false,
+            ReaderColumns::Two => true,
+            ReaderColumns::Auto => self
+                .ui
+                .widget(cx, ids!(chapter_list))
+                .borrow::<ChapterList>()
+                .is_some_and(|reader| reader.pager.layout.count > 1),
+        };
+        self.ui
+            .widget(cx, ids!(reader_preview_second_column))
+            .set_visible(cx, two_columns);
+        crate::ruby_word::set_preview_appearance(&settings);
+        let (first_body, second_body) =
+            sample_chapter::build_glossed_preview(settings.gloss_enabled, two_columns);
+        if let Some(mut columns_view) = self
+            .ui
+            .widget(cx, ids!(reader_preview_columns))
+            .borrow_mut::<View>()
+        {
+            columns_view.layout.padding.top = if settings.gloss_enabled { 22.0 } else { 0.0 };
+            columns_view.redraw(cx);
+        }
+        if let Some(mut preview) = self
+            .ui
+            .widget(cx, ids!(reader_preview))
+            .borrow_mut::<View>()
+        {
+            let inset = (margin * 0.3).clamp(8.0, 24.0) as f64;
+            preview.layout.padding = Inset {
+                left: inset,
+                right: inset,
+                top: 12.0,
+                bottom: 12.0,
+            };
+            preview.redraw(cx);
+        }
+        let preview_families = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow::<ChapterList>()
+            .map(|reader| match font == ReaderFont::Original {
+                false => [
+                    reader.font_preview_normal.font_family.clone(),
+                    reader.font_preview_bold.font_family.clone(),
+                    reader.font_preview_italic.font_family.clone(),
+                    reader.font_preview_bold_italic.font_family.clone(),
+                ],
+                true => [
+                    reader.font_standard_normal.font_family.clone(),
+                    reader.font_standard_bold.font_family.clone(),
+                    reader.font_standard_italic.font_family.clone(),
+                    reader.font_standard_bold_italic.font_family.clone(),
+                ],
+            });
+        for (id, body) in [
+            (id!(reader_preview_text), first_body.as_str()),
+            (id!(reader_preview_text_second), second_body.as_str()),
+        ] {
+            if let Some(mut html) = self.ui.widget(cx, &[id]).borrow_mut::<Html>() {
+                if html.body.as_ref() != body {
+                    html.text_flow.clear_items();
+                    html.set_text(cx, body);
+                }
+                let flow = &mut html.text_flow;
+                flow.font_size = size;
+                flow.font_color = palette.text;
+                flow.draw_text.color = palette.text;
+                let line_spacing = if settings.gloss_enabled {
+                    spacing.gloss_line_spacing()
+                } else {
+                    spacing.plain_line_spacing()
+                };
+                for (index, style) in [
+                    &mut flow.text_style_normal,
+                    &mut flow.text_style_bold,
+                    &mut flow.text_style_italic,
+                    &mut flow.text_style_bold_italic,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    style.line_spacing = line_spacing;
+                    style.letter_spacing = character;
+                    style.word_spacing = word;
+                    style.justify = settings.justify_text;
+                    if let Some(families) = &preview_families {
+                        let index = if settings.bold_text && index == 0 {
+                            1
+                        } else if settings.bold_text && index == 2 {
+                            3
+                        } else {
+                            index
+                        };
+                        style.font_family = families[index].clone();
+                    }
+                }
+                html.redraw(cx);
+            }
         }
     }
 
@@ -9998,8 +11312,7 @@ impl App {
             id!(reader_turn_slide),
             id!(reader_turn_scroll),
             id!(reader_background_theme),
-            id!(reader_font_standard),
-            id!(reader_font_monospace),
+            id!(reader_font_choice),
             id!(reader_spacing_default),
             id!(reader_spacing_comfortable),
             id!(reader_spacing_relaxed),
@@ -10077,7 +11390,13 @@ impl App {
             palette.surface,
             palette.border,
         );
-        for id in [id!(toc_panel), id!(note_panel), id!(reader_ai_panel)] {
+        for id in [
+            id!(toc_panel),
+            id!(reader_bookmarks_panel),
+            id!(note_panel),
+            id!(reader_search_panel),
+            id!(reader_ai_panel),
+        ] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),
@@ -10090,6 +11409,7 @@ impl App {
             id!(word_card),
             id!(indicator_bg),
             id!(library_rename_card),
+            id!(reader_customise_card),
         ] {
             apply_reader_surface_palette(
                 cx,
@@ -10100,7 +11420,11 @@ impl App {
         }
         // 临时菜单不能与页面共用 surface；按钮再回到 surface，
         // 形成“正文 → field 浮层 → surface 操作”的稳定层级。
-        for id in [id!(selection_popup), id!(library_action_menu)] {
+        for id in [
+            id!(selection_popup),
+            id!(library_action_menu),
+            id!(reader_theme_menu),
+        ] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),
@@ -10119,12 +11443,21 @@ impl App {
             id!(title),
             id!(status),
             id!(note_panel_title),
+            id!(reader_highlights_title),
             id!(note_empty_title),
             id!(reader_ai_title),
+            id!(reader_bookmarks_title),
+            id!(reader_search_title),
             id!(card_word),
             id!(image_viewer_info),
             id!(library_rename_title),
             id!(reader_turn_mode_label),
+            id!(reader_theme_title),
+            id!(reader_customise_title),
+            id!(reader_customise_text_title),
+            id!(reader_customise_gloss_title),
+            id!(reader_customise_layout_title),
+            id!(reader_customise_columns_title),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
@@ -10135,10 +11468,23 @@ impl App {
             id!(note_hint),
             id!(note_empty_hint),
             id!(reader_chat_status),
+            id!(reader_bookmarks_hint),
+            id!(reader_search_hint),
             id!(sel_hint),
             id!(card_hint),
             id!(library_rename_status),
             id!(reader_scroll_hint),
+            id!(reader_customise_font_label),
+            id!(reader_customise_size_label),
+            id!(reader_customise_gloss_size_label),
+            id!(reader_customise_gloss_color_label),
+            id!(reader_customise_gloss_bg_label),
+            id!(reader_customise_word_color_label),
+            id!(reader_customise_word_bg_label),
+            id!(reader_customise_line_label),
+            id!(reader_customise_character_label),
+            id!(reader_customise_word_label),
+            id!(reader_customise_margin_label),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
         }
@@ -10163,9 +11509,86 @@ impl App {
             id!(image_viewer_close),
             id!(library_rename_cancel),
             id!(library_rename_save),
+            id!(reader_back_btn),
+            id!(reader_bookmarks_btn),
+            id!(reader_bookmarks_close),
+            id!(reader_appearance_btn),
+            id!(reader_search_btn),
+            id!(reader_search_close),
+            id!(reader_search_submit),
+            id!(reader_bookmark_btn),
+            id!(reader_bookmark_filled_btn),
+            id!(reader_customise_btn),
+            id!(reader_customise_close),
+            id!(reader_customise_cancel),
+            id!(reader_customise_save),
+            id!(reader_customise_font_choice),
+            id!(reader_customise_size_down),
+            id!(reader_customise_size_up),
+            id!(reader_customise_gloss_size_down),
+            id!(reader_customise_gloss_size_up),
+            id!(reader_customise_gloss_color_green),
+            id!(reader_customise_gloss_color_blue),
+            id!(reader_customise_gloss_color_orange),
+            id!(reader_customise_gloss_color_gray),
+            id!(reader_customise_gloss_bg_none),
+            id!(reader_customise_gloss_bg_gray),
+            id!(reader_customise_gloss_bg_green),
+            id!(reader_customise_gloss_bg_blue),
+            id!(reader_customise_word_color_default),
+            id!(reader_customise_word_color_green),
+            id!(reader_customise_word_color_blue),
+            id!(reader_customise_word_color_orange),
+            id!(reader_customise_word_bg_none),
+            id!(reader_customise_word_bg_gray),
+            id!(reader_customise_word_bg_green),
+            id!(reader_customise_word_bg_blue),
+            id!(reader_customise_line_down),
+            id!(reader_customise_line_up),
+            id!(reader_customise_character_down),
+            id!(reader_customise_character_up),
+            id!(reader_customise_word_down),
+            id!(reader_customise_word_up),
+            id!(reader_customise_margin_down),
+            id!(reader_customise_margin_up),
+            id!(reader_customise_columns_one),
+            id!(reader_customise_columns_two),
+            id!(reader_customise_columns_auto),
+            id!(reader_customise_reset),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
+        for id in [
+            id!(reader_back_btn),
+            id!(toc_btn),
+            id!(reader_bookmarks_btn),
+            id!(notes_btn),
+            id!(reader_appearance_btn),
+            id!(reader_search_btn),
+            id!(reader_bookmark_btn),
+            id!(reader_bookmark_filled_btn),
+        ] {
+            apply_reader_button_palette_with_focus(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette,
+                palette.field,
+            );
+        }
+        for id in [
+            id!(reader_back_btn),
+            id!(toc_btn),
+            id!(reader_bookmarks_btn),
+            id!(notes_btn),
+            id!(reader_search_btn),
+            id!(reader_bookmark_btn),
+            id!(reader_bookmark_filled_btn),
+            id!(reader_customise_btn),
+        ] {
+            apply_reader_icon_palette(cx, self.ui.widget(cx, &[id]), palette.text);
+        }
+        self.sync_reader_mode_controls(cx, background);
+        self.sync_reader_customise_controls(cx);
         let popup_button_palette = ReaderScenePalette {
             field: palette.surface,
             ..palette
@@ -10205,7 +11628,11 @@ impl App {
                 color_focus: #(destructive)
             }
         });
-        for id in [id!(reader_chat_input), id!(library_rename_input)] {
+        for id in [
+            id!(reader_chat_input),
+            id!(reader_search_input),
+            id!(library_rename_input),
+        ] {
             apply_reader_input_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
         let note_input_palette = ReaderScenePalette {
@@ -10220,6 +11647,16 @@ impl App {
             toc.active_bg = palette.field;
             toc.inactive_bg = palette.surface;
             toc.text_color = palette.text;
+        }
+        for id in [
+            id!(reader_bookmark_list),
+            id!(reader_search_list),
+            id!(reader_highlight_list),
+        ] {
+            if let Some(mut list) = self.ui.widget(cx, &[id]).borrow_mut::<ReaderJumpList>() {
+                list.text_color = palette.text;
+                list.redraw(cx);
+            }
         }
         self.apply_navigation_palette(cx, self.active_page);
         self.ui.widget(cx, ids!(main_column)).redraw(cx);
@@ -10237,6 +11674,25 @@ impl App {
         self.apply_reader_background(cx, background);
         self.persist_reader_settings(cx);
         self.apply_runtime_theme(cx, *READER_THEME.read().unwrap());
+    }
+
+    fn apply_reader_mode(&mut self, cx: &mut Cx, background: ReaderBackground) {
+        let bold_text = background == ReaderBackground::Bold;
+        let bold_changed = *READER_BOLD_TEXT.read().unwrap() != bold_text;
+        *READER_BOLD_TEXT.write().unwrap() = bold_text;
+        self.set_reader_background(cx, background);
+        if bold_changed {
+            self.invalidate_reader_pagination_layout(cx);
+            self.persist_reader_settings(cx);
+        }
+        self.reader_theme_open = false;
+        self.ui
+            .widget(cx, ids!(reader_theme_menu))
+            .set_visible(cx, false);
+        self.ui
+            .widget(cx, ids!(reader_theme_layer))
+            .set_visible(cx, false);
+        self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
     }
 
     fn sync_app_language_controls(&self, cx: &mut Cx, language: AppLanguage) {
@@ -10321,8 +11777,6 @@ impl App {
         set_text!(library_delete_confirm, "delete_book_confirm");
         set_text!(image_viewer_close, "close");
 
-        set_text!(toc_btn, "contents");
-        set_text!(notes_btn, "note");
         set_text!(note_panel_title, "note");
         set_text!(note_close_btn, "close");
         set_text!(note_quote_title, "quote");
@@ -10448,8 +11902,6 @@ impl App {
         ] {
             self.ui.widget(cx, &[id]).set_text(cx, localized(zh, en));
         }
-        set_text!(reader_font_standard, "standard");
-        set_text!(reader_font_monospace, "monospace");
         set_text!(line_spacing_label, "line_spacing");
         set_text!(reader_spacing_default, "default");
         set_text!(reader_spacing_comfortable, "comfortable");
@@ -10539,12 +11991,15 @@ impl App {
     }
 
     fn sync_reader_font_controls(&self, cx: &mut Cx, font: ReaderFont) {
-        self.ui
-            .radio_button(cx, ids!(reader_font_standard))
-            .set_active(cx, font == ReaderFont::Standard, Animate::No);
-        self.ui
-            .radio_button(cx, ids!(reader_font_monospace))
-            .set_active(cx, font == ReaderFont::Monospace, Animate::No);
+        let choice = self.ui.drop_down(cx, ids!(reader_font_choice));
+        choice.set_labels(
+            cx,
+            ReaderFont::ALL
+                .iter()
+                .map(|font| font.label().to_string())
+                .collect(),
+        );
+        choice.set_selected_item(cx, font.index());
     }
 
     fn set_reader_font(&mut self, cx: &mut Cx, font: ReaderFont) {
@@ -10553,8 +12008,10 @@ impl App {
             return;
         }
         *READER_FONT.write().unwrap() = font;
+        self.load_reader_font(cx, font, false);
         self.sync_reader_font_controls(cx, font);
         self.refresh_current_chapter(cx);
+        self.sync_reader_customise_controls(cx);
         self.persist_reader_settings(cx);
     }
 
@@ -10578,6 +12035,7 @@ impl App {
         *READER_SPACING.write().unwrap() = spacing;
         self.sync_reader_spacing_controls(cx, spacing);
         self.refresh_current_chapter(cx);
+        self.sync_reader_customise_controls(cx);
         self.persist_reader_settings(cx);
     }
 
@@ -10603,7 +12061,10 @@ impl App {
     /// ScriptReapply 不销毁 widget 树；这里只恢复可能由脚本默认值重写的
     /// 页面、响应式布局和投影视图，业务数据仍由 Rust 状态持有。
     fn restore_after_script_reload(&mut self, cx: &mut Cx) {
+        self.active_font_applied = None;
+        self.preview_font_applied = None;
         self.activate_page(cx, self.active_page);
+        self.pending_customise_preview_after_draw = self.reader_customise_draft.is_some();
         self.responsive_layout_initialized = false;
         self.update_responsive_layout(
             cx,
@@ -10611,6 +12072,12 @@ impl App {
             cx.display_context.safe_area_insets,
         );
         self.apply_reader_settings(cx, current_reader_settings());
+        self.ui
+            .widget(cx, ids!(reader_theme_layer))
+            .set_visible(cx, self.on_reader_page && self.reader_theme_open);
+        self.ui
+            .widget(cx, ids!(reader_theme_menu))
+            .set_visible(cx, self.on_reader_page && self.reader_theme_open);
         self.sync_reader_panel_layout(cx);
 
         self.refresh_shelf_projection(cx);
@@ -10646,6 +12113,10 @@ impl App {
     }
 
     fn track_reader_swipe(&mut self, cx: &mut Cx, event: &Event) -> Option<ReaderSwipeDirection> {
+        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
+            self.reader_swipe.cancel();
+            return None;
+        }
         let paged = READER_TURN_MODE.read().unwrap().is_paged();
         match event {
             Event::LongPress(_) | Event::SelectionHandleDrag(_) => {
@@ -10701,7 +12172,8 @@ impl App {
     fn sync_mobile_chrome(&self, cx: &mut Cx) {
         self.ui.widget(cx, ids!(mobile_nav)).set_visible(
             cx,
-            should_show_mobile_nav(self.compact_layout, self.virtual_keyboard_open),
+            !self.on_reader_page
+                && should_show_mobile_nav(self.compact_layout, self.virtual_keyboard_open),
         );
     }
 
@@ -10725,7 +12197,11 @@ impl App {
     }
 
     fn sync_reader_panel_layout(&mut self, cx: &mut Cx) {
-        let panel_open = self.toc_open || self.note_open || self.reader_ai_open;
+        let panel_open = self.toc_open
+            || self.note_open
+            || self.reader_ai_open
+            || self.bookmarks_open
+            || self.search_open;
         let toc_ready = requested_book_is_ready();
         if let Some(mut chapter_list) = self
             .ui
@@ -10753,22 +12229,45 @@ impl App {
             .widget(cx, ids!(note_panel))
             .set_visible(cx, self.note_open);
         self.ui
+            .widget(cx, ids!(reader_bookmarks_panel))
+            .set_visible(cx, self.bookmarks_open);
+        self.ui
+            .widget(cx, ids!(reader_bookmarks_hint))
+            .set_visible(cx, READER_BOOKMARKS.read().unwrap().is_empty());
+        self.ui
+            .widget(cx, ids!(reader_search_panel))
+            .set_visible(cx, self.search_open);
+        self.ui
+            .widget(cx, ids!(reader_highlights_title))
+            .set_visible(
+                cx,
+                self.note_open && !READER_HIGHLIGHT_JUMPS.read().unwrap().is_empty(),
+            );
+        self.ui.widget(cx, ids!(reader_highlight_list)).set_visible(
+            cx,
+            self.note_open && !READER_HIGHLIGHT_JUMPS.read().unwrap().is_empty(),
+        );
+        self.ui
             .widget(cx, ids!(reader_ai_panel))
             .set_visible(cx, self.reader_ai_open);
 
         let widths = if self.compact_layout {
-            [Size::fill(); 4]
+            [Size::fill(); 6]
         } else {
             [
                 Size::Fixed(260.0),
+                Size::Fixed(300.0),
                 Size::Fixed(320.0),
+                Size::Fixed(340.0),
                 Size::Fixed(360.0),
                 Size::Fixed(520.0),
             ]
         };
         for (widget, width) in [
             self.ui.widget(cx, ids!(toc_panel)),
+            self.ui.widget(cx, ids!(reader_bookmarks_panel)),
             self.ui.widget(cx, ids!(note_panel)),
+            self.ui.widget(cx, ids!(reader_search_panel)),
             self.ui.widget(cx, ids!(reader_ai_panel)),
             self.ui.widget(cx, ids!(selection_popup)),
         ]
@@ -10819,13 +12318,16 @@ impl App {
         self.responsive_layout_initialized = true;
         self.compact_layout = compact;
         self.safe_area_insets = safe_area_insets;
-        self.ui.widget(cx, ids!(sidebar)).set_visible(cx, !compact);
+        self.ui
+            .widget(cx, ids!(sidebar))
+            .set_visible(cx, !compact && !self.on_reader_page);
         self.sync_mobile_chrome(cx);
         self.ui
             .widget(cx, ids!(mobile_safe_top))
             .set_visible(cx, compact && safe_area_insets.top > 0.0);
-        self.ui.widget(cx, ids!(title)).set_visible(cx, !compact);
+        self.ui.widget(cx, ids!(title)).set_visible(cx, true);
         self.ui.widget(cx, ids!(status)).set_visible(cx, !compact);
+        self.set_reader_toolbar_visible(cx, self.on_reader_page && compact);
 
         let safe_top = safe_area_insets.top;
         let mobile_nav_padding = Inset {
@@ -11598,9 +13100,61 @@ impl App {
         if visible {
             self.toc_open = false;
             self.note_open = false;
+            self.bookmarks_open = false;
+            self.search_open = false;
         }
         self.sync_reader_panel_layout(cx);
         self.ui.redraw(cx);
+    }
+
+    fn refresh_reader_highlights(&self, cx: &mut Cx) {
+        let hits = {
+            let guard = CURRENT_BOOK.read().unwrap();
+            let Some(book) = guard.as_ref() else { return };
+            let mut chapters: Vec<_> = book.highlights.iter().collect();
+            chapters.sort_by_key(|(index, _)| **index);
+            let mut hits = Vec::new();
+            for (index, highlights) in chapters {
+                let Some(html) = book.chapters.get(*index) else {
+                    continue;
+                };
+                let blocks = readwise_core::books::epub_meta::split_blocks(html);
+                let mut highlights = highlights.clone();
+                highlights.sort_by_key(|highlight| highlight.start_block);
+                for highlight in highlights {
+                    let excerpt = blocks
+                        .get(highlight.start_block)
+                        .map(|block| readwise_core::vocab::annotate::rendered_text(block))
+                        .unwrap_or_default();
+                    let excerpt: String = excerpt
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(100)
+                        .collect();
+                    hits.push(ReaderSearchHit {
+                        chapter: *index,
+                        block: highlight.start_block,
+                        excerpt: if excerpt.is_empty() {
+                            localized("高亮", "Highlight").to_string()
+                        } else {
+                            excerpt
+                        },
+                    });
+                }
+            }
+            hits
+        };
+        let has_highlights = !hits.is_empty();
+        *READER_HIGHLIGHT_JUMPS.write().unwrap() = hits;
+        self.ui
+            .widget(cx, ids!(reader_highlights_title))
+            .set_visible(cx, has_highlights);
+        self.ui
+            .widget(cx, ids!(reader_highlight_list))
+            .set_visible(cx, has_highlights);
+        self.ui.widget(cx, ids!(reader_highlight_list)).redraw(cx);
     }
 
     fn configure_ai_backend(&mut self, cx: &mut Cx) {
@@ -11912,6 +13466,65 @@ impl App {
                 source,
             },
         })
+    }
+
+    fn refresh_bookmark_button(&self, cx: &mut Cx) {
+        let Some(snapshot) = self.current_reader_progress_snapshot(cx) else {
+            return;
+        };
+        let marked = READER_BOOKMARKS.read().unwrap().iter().any(|bookmark| {
+            bookmark_covers_location(
+                ReaderLocation::decode(&bookmark.location, snapshot.chapter_count),
+                snapshot.location,
+            )
+        });
+        self.ui
+            .widget(cx, ids!(reader_bookmark_btn))
+            .set_visible(cx, !marked);
+        self.ui
+            .widget(cx, ids!(reader_bookmark_filled_btn))
+            .set_visible(cx, marked);
+    }
+
+    fn toggle_reader_bookmark(&mut self, cx: &mut Cx) {
+        let Some(snapshot) = self.current_reader_progress_snapshot(cx) else {
+            return;
+        };
+        let remove_id = READER_BOOKMARKS
+            .read()
+            .unwrap()
+            .iter()
+            .find_map(|bookmark| {
+                bookmark_covers_location(
+                    ReaderLocation::decode(&bookmark.location, snapshot.chapter_count),
+                    snapshot.location,
+                )
+                .then(|| bookmark.id.clone())
+            });
+        let excerpt = PARAGRAPHS
+            .read()
+            .unwrap()
+            .get(snapshot.location.block)
+            .map(|block| readwise_core::vocab::annotate::rendered_text(block))
+            .unwrap_or_default();
+        let excerpt: String = excerpt
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(56)
+            .collect();
+        let label = if excerpt.is_empty() {
+            format!("第 {} 章", snapshot.location.chapter + 1)
+        } else {
+            format!("第 {} 章 · {excerpt}", snapshot.location.chapter + 1)
+        };
+        spawn_bookmark_change(
+            snapshot.book_id,
+            remove_id,
+            snapshot.location.encode(),
+            label,
+        );
     }
 
     fn queue_reader_progress_save(&self, cx: &mut Cx) {
@@ -12229,10 +13842,14 @@ impl App {
         let text = format!("{}/{} · {}%", self.chapter_idx + 1, total_ch, pct);
         self.ui.label(cx, ids!(chapter_pos)).set_text(cx, &text);
         self.update_reader_page_footer(cx);
+        self.refresh_bookmark_button(cx);
     }
 
     /// 视口翻屏；到底/到顶时跨章。
     fn page_scroll(&mut self, cx: &mut Cx, down: bool) {
+        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
+            return;
+        }
         let chapter_widget = self.ui.widget(cx, ids!(chapter_list));
         let selecting = chapter_widget
             .borrow::<ChapterList>()
@@ -12292,7 +13909,10 @@ impl App {
 
     /// 阅读页快捷键：空格/PgDn/→ 下一屏，PgUp/← 上一屏，Shift+←/→ 跨章，Home 回章首。
     fn handle_reader_key(&mut self, cx: &mut Cx, ke: &KeyEvent) {
-        if !self.on_reader_page || self.text_input_has_focus(cx) {
+        if !self.on_reader_page
+            || READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
+            || self.text_input_has_focus(cx)
+        {
             return;
         }
         let shift = ke.modifiers.shift;
@@ -12347,6 +13967,7 @@ impl App {
             .set_text(cx, &format!("{:.0}", new_size));
         self.invalidate_reader_pagination_layout(cx);
         self.ui.redraw(cx);
+        self.sync_reader_customise_controls(cx);
         self.persist_reader_settings(cx);
     }
 
@@ -12443,6 +14064,7 @@ impl App {
         use crate::ruby_word::*;
 
         let settings = settings.normalized();
+        self.load_reader_font(cx, settings.font, false);
         let scene_changed = *READER_THEME.read().unwrap() != settings.theme
             || *READER_BACKGROUND.read().unwrap() != settings.background;
         *APP_LANGUAGE.write().unwrap() = settings.language;
@@ -12452,7 +14074,19 @@ impl App {
         *READER_COLUMNS.write().unwrap() = settings.columns;
         *READER_TURN_MODE.write().unwrap() = settings.turn_mode;
         *READER_FONT.write().unwrap() = settings.font;
+        *READER_BOLD_TEXT.write().unwrap() = settings.bold_text;
         *READER_SPACING.write().unwrap() = settings.spacing;
+        *READER_CHARACTER_SPACING.write().unwrap() = settings.character_spacing;
+        *READER_WORD_SPACING.write().unwrap() = settings.word_spacing;
+        *READER_MARGIN.write().unwrap() = settings.margin;
+        *READER_JUSTIFY_TEXT.write().unwrap() = settings.justify_text;
+        if let Some(mut reader) = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow_mut::<ChapterList>()
+        {
+            reader.apply_reader_margin(cx);
+        }
         *READER_FONT_SIZE.write().unwrap() = settings.font_size;
         *GLOSS_ENABLED.write().unwrap() = settings.gloss_enabled;
         *GLOSS_FONT_SIZE.write().unwrap() = settings.gloss_font_size;
@@ -13006,7 +14640,7 @@ impl MatchEvent for App {
         }
         for action in actions {
             if let Some(turn) = action.downcast_ref::<ReaderPageTurn>() {
-                if self.on_reader_page {
+                if self.on_reader_page && !READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
                     self.page_scroll(cx, turn.0);
                 }
             }
@@ -13692,6 +15326,9 @@ impl MatchEvent for App {
                         }
                         self.clear_reader_selection(cx);
                         self.redraw_reader_annotations(cx);
+                        if self.note_open {
+                            self.refresh_reader_highlights(cx);
+                        }
                     }
                     HlAction::Deleted {
                         book_id,
@@ -13709,6 +15346,9 @@ impl MatchEvent for App {
                         if changed && *chapter == self.chapter_idx {
                             self.redraw_reader_annotations(cx);
                         }
+                        if changed && self.note_open {
+                            self.refresh_reader_highlights(cx);
+                        }
                     }
                     HlAction::DeleteFailed {
                         book_id,
@@ -13724,6 +15364,9 @@ impl MatchEvent for App {
                             .is_some_and(|book| book.restore_highlights(*chapter, removed));
                         if restored && *chapter == self.chapter_idx {
                             self.redraw_reader_annotations(cx);
+                        }
+                        if restored && self.note_open {
+                            self.refresh_reader_highlights(cx);
                         }
                         self.ui.label(cx, ids!(status)).set_text(
                             cx,
@@ -13795,6 +15438,7 @@ impl MatchEvent for App {
                     ReaderAction::Opened {
                         request_id,
                         resume,
+                        bookmarks,
                         gloss_count,
                         parse_ms,
                         initial_gloss_ms,
@@ -13809,6 +15453,7 @@ impl MatchEvent for App {
                             parse_ms,
                             initial_gloss_ms
                         );
+                        *READER_BOOKMARKS.write().unwrap() = bookmarks.clone();
                         self.reader_chapter_block_counts.clear();
                         self.reader_page_span = 0;
                         // The reader can receive a TOC click while the first
@@ -13816,6 +15461,9 @@ impl MatchEvent for App {
                         // that its chapter titles are available.
                         self.sync_reader_panel_layout(cx);
                         self.ui.widget(cx, ids!(toc_list)).redraw(cx);
+                        if self.note_open {
+                            self.refresh_reader_highlights(cx);
+                        }
                         self.set_chapter_at(cx, resume.chapter, resume.block, resume.scroll, false);
                         if let Some(mut reader) = self
                             .ui
@@ -13859,6 +15507,62 @@ impl MatchEvent for App {
                             },
                         );
                     }
+                }
+                continue;
+            }
+            if let Some(bookmark_action) = action.downcast_ref::<BookmarkAction>() {
+                let active_book_id = CURRENT_BOOK
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|book| book.id.clone());
+                match bookmark_action {
+                    BookmarkAction::Updated { book_id, bookmarks }
+                        if active_book_id.as_deref() == Some(book_id.as_str()) =>
+                    {
+                        *READER_BOOKMARKS.write().unwrap() = bookmarks.clone();
+                        self.refresh_bookmark_button(cx);
+                        self.ui
+                            .widget(cx, ids!(reader_bookmarks_hint))
+                            .set_visible(cx, bookmarks.is_empty());
+                        self.ui.widget(cx, ids!(reader_bookmark_list)).redraw(cx);
+                    }
+                    BookmarkAction::Error { book_id, error }
+                        if active_book_id.as_deref() == Some(book_id.as_str()) =>
+                    {
+                        self.ui.label(cx, ids!(status)).set_text(
+                            cx,
+                            &format!("{}: {error}", localized("书签操作失败", "Bookmark failed")),
+                        );
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Some(ReaderSearchAction::Results {
+                book_id,
+                query,
+                hits,
+            }) = action.downcast_ref::<ReaderSearchAction>()
+            {
+                let active_book_id = CURRENT_BOOK
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|book| book.id.clone());
+                if active_book_id.as_deref() == Some(book_id.as_str())
+                    && self.reader_search_query == *query
+                {
+                    *READER_SEARCH_RESULTS.write().unwrap() = hits.clone();
+                    self.ui.label(cx, ids!(reader_search_hint)).set_text(
+                        cx,
+                        &if app_language() == AppLanguage::English {
+                            format!("{} results", hits.len())
+                        } else {
+                            format!("找到 {} 处", hits.len())
+                        },
+                    );
+                    self.ui.widget(cx, ids!(reader_search_list)).redraw(cx);
                 }
                 continue;
             }
@@ -14546,6 +16250,333 @@ impl MatchEvent for App {
                 self.pending_ui_projection_after_draw = true;
             }
         }
+        if self.ui.button(cx, ids!(reader_back_btn)).clicked(actions) {
+            self.stop_reading_timer(cx, false);
+            self.activate_page(cx, AppPage::Library);
+            self.refresh_shelf_projection(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_appearance_btn))
+            .clicked(actions)
+        {
+            self.reader_theme_open = !self.reader_theme_open;
+            self.ui
+                .widget(cx, ids!(reader_theme_menu))
+                .set_visible(cx, self.reader_theme_open);
+            self.ui
+                .widget(cx, ids!(reader_theme_layer))
+                .set_visible(cx, self.reader_theme_open);
+            self.set_reader_toolbar_visible(cx, true);
+            self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_bookmark_btn))
+            .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(reader_bookmark_filled_btn))
+                .clicked(actions)
+        {
+            self.toggle_reader_bookmark(cx);
+        }
+        for (id, background) in [
+            (id!(reader_mode_original), ReaderBackground::Original),
+            (id!(reader_mode_quiet), ReaderBackground::Sepia),
+            (id!(reader_mode_paper), ReaderBackground::Paper),
+            (id!(reader_mode_bold), ReaderBackground::Bold),
+            (id!(reader_mode_calm), ReaderBackground::Sage),
+            (id!(reader_mode_focus), ReaderBackground::Night),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                self.apply_reader_mode(cx, background);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_customise_btn))
+            .clicked(actions)
+        {
+            self.reader_theme_open = false;
+            self.ui
+                .widget(cx, ids!(reader_theme_menu))
+                .set_visible(cx, false);
+            self.ui
+                .widget(cx, ids!(reader_theme_layer))
+                .set_visible(cx, false);
+            self.open_reader_customise(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_customise_close))
+            .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(reader_customise_cancel))
+                .clicked(actions)
+            || self
+                .ui
+                .modal(cx, ids!(reader_customise_modal))
+                .dismissed(actions)
+        {
+            self.close_reader_customise(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_customise_save))
+            .clicked(actions)
+        {
+            self.save_reader_customise(cx);
+        }
+        if let Some(index) = self
+            .ui
+            .drop_down(cx, ids!(reader_customise_font_choice))
+            .selected(actions)
+        {
+            if let (Some(draft), Some(font)) = (
+                self.reader_customise_draft.as_mut(),
+                ReaderFont::from_index(index),
+            ) {
+                draft.font = font;
+                self.load_reader_font(cx, font, true);
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_customise_size_down))
+            .clicked(actions)
+        {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                let size = draft.font_size.unwrap_or(READER_FONT_DEFAULT);
+                draft.font_size = Some((size - 1.0).clamp(READER_FONT_MIN, READER_FONT_MAX));
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_customise_size_up))
+            .clicked(actions)
+        {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                let size = draft.font_size.unwrap_or(READER_FONT_DEFAULT);
+                draft.font_size = Some((size + 1.0).clamp(READER_FONT_MIN, READER_FONT_MAX));
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        if let Some(bold) = self
+            .ui
+            .check_box(cx, ids!(reader_customise_bold))
+            .changed(actions)
+        {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.bold_text = bold;
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        let mut gloss_preview_changed = false;
+        if let Some(enabled) = self
+            .ui
+            .check_box(cx, ids!(reader_customise_gloss_enable))
+            .changed(actions)
+        {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.gloss_enabled = enabled;
+                gloss_preview_changed = true;
+            }
+        }
+        let gloss_size_delta = i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_gloss_size_up))
+                .clicked(actions),
+        ) - i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_gloss_size_down))
+                .clicked(actions),
+        );
+        if gloss_size_delta != 0 {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.gloss_font_size =
+                    (draft.gloss_font_size + gloss_size_delta as f32 * 0.5).clamp(6.0, 12.0);
+                gloss_preview_changed = true;
+            }
+        }
+        for (id, slot) in [
+            (id!(reader_customise_gloss_color_green), 0),
+            (id!(reader_customise_gloss_color_blue), 1),
+            (id!(reader_customise_gloss_color_orange), 2),
+            (id!(reader_customise_gloss_color_gray), 3),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.gloss_color_slot = slot;
+                    gloss_preview_changed = true;
+                }
+            }
+        }
+        for (id, slot) in [
+            (id!(reader_customise_gloss_bg_none), 0),
+            (id!(reader_customise_gloss_bg_gray), 1),
+            (id!(reader_customise_gloss_bg_green), 2),
+            (id!(reader_customise_gloss_bg_blue), 3),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.gloss_background_slot = slot;
+                    gloss_preview_changed = true;
+                }
+            }
+        }
+        for (id, slot) in [
+            (id!(reader_customise_word_color_default), 0),
+            (id!(reader_customise_word_color_green), 1),
+            (id!(reader_customise_word_color_blue), 2),
+            (id!(reader_customise_word_color_orange), 3),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.word_color_slot = slot;
+                    gloss_preview_changed = true;
+                }
+            }
+        }
+        for (id, slot) in [
+            (id!(reader_customise_word_bg_none), 0),
+            (id!(reader_customise_word_bg_gray), 1),
+            (id!(reader_customise_word_bg_green), 2),
+            (id!(reader_customise_word_bg_blue), 3),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.word_background_slot = slot;
+                    gloss_preview_changed = true;
+                }
+            }
+        }
+        if gloss_preview_changed {
+            self.sync_reader_customise_controls(cx);
+        }
+        let line_delta = i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_line_up))
+                .clicked(actions),
+        ) - i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_line_down))
+                .clicked(actions),
+        );
+        if line_delta != 0 {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                let index = match draft.spacing {
+                    ReaderSpacing::Default => 0,
+                    ReaderSpacing::Comfortable => 1,
+                    ReaderSpacing::Relaxed => 2,
+                };
+                draft.spacing = match (index + line_delta).clamp(0, 2) {
+                    1 => ReaderSpacing::Comfortable,
+                    2 => ReaderSpacing::Relaxed,
+                    _ => ReaderSpacing::Default,
+                };
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        let character_delta = i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_character_up))
+                .clicked(actions),
+        ) - i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_character_down))
+                .clicked(actions),
+        );
+        if character_delta != 0 {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.character_spacing =
+                    (draft.character_spacing + character_delta as f32 * 0.02).clamp(0.0, 0.12);
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        let word_delta = i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_word_up))
+                .clicked(actions),
+        ) - i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_word_down))
+                .clicked(actions),
+        );
+        if word_delta != 0 {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.word_spacing =
+                    (draft.word_spacing + word_delta as f32 * 0.05).clamp(0.0, 0.3);
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        let margin_delta = i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_margin_up))
+                .clicked(actions),
+        ) - i32::from(
+            self.ui
+                .button(cx, ids!(reader_customise_margin_down))
+                .clicked(actions),
+        );
+        if margin_delta != 0 {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.margin = (draft.margin + margin_delta as f32 * 8.0).clamp(12.0, 80.0);
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        for (id, columns) in [
+            (id!(reader_customise_columns_one), ReaderColumns::One),
+            (id!(reader_customise_columns_two), ReaderColumns::Two),
+            (id!(reader_customise_columns_auto), ReaderColumns::Auto),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.columns = columns;
+                    self.sync_reader_customise_controls(cx);
+                }
+            }
+        }
+        if let Some(justify) = self
+            .ui
+            .check_box(cx, ids!(reader_customise_justify))
+            .changed(actions)
+        {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.justify_text = justify;
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_customise_reset))
+            .clicked(actions)
+        {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                let default = ReaderSettings::default();
+                draft.theme = default.theme;
+                draft.background = default.background;
+                draft.columns = default.columns;
+                draft.font = default.font;
+                draft.bold_text = default.bold_text;
+                draft.spacing = default.spacing;
+                draft.character_spacing = default.character_spacing;
+                draft.word_spacing = default.word_spacing;
+                draft.margin = default.margin;
+                draft.justify_text = default.justify_text;
+                draft.font_size = default.font_size;
+                draft.gloss_enabled = default.gloss_enabled;
+                draft.gloss_font_size = default.gloss_font_size;
+                draft.gloss_color_slot = default.gloss_color_slot;
+                draft.gloss_background_slot = default.gloss_background_slot;
+                draft.word_color_slot = default.word_color_slot;
+                draft.word_background_slot = default.word_background_slot;
+                self.sync_reader_customise_controls(cx);
+            }
+        }
         if self.ui.button(cx, ids!(nav_reader)).clicked(actions)
             || self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions)
         {
@@ -14778,11 +16809,7 @@ impl MatchEvent for App {
                 1 => ReaderColumns::Two,
                 _ => ReaderColumns::Auto,
             };
-            *READER_COLUMNS.write().unwrap() = mode;
-            self.sync_reader_columns_controls(cx, mode);
-            self.clear_reader_selection(cx);
-            self.invalidate_reader_pagination_layout(cx);
-            self.persist_reader_settings(cx);
+            self.set_reader_columns(cx, mode);
         }
         if let Some(index) = self
             .ui
@@ -14808,17 +16835,12 @@ impl MatchEvent for App {
         }
         if let Some(index) = self
             .ui
-            .radio_button_set(cx, ids_array!(reader_font_standard, reader_font_monospace))
-            .selected(cx, actions)
+            .drop_down(cx, ids!(reader_font_choice))
+            .selected(actions)
         {
-            self.set_reader_font(
-                cx,
-                if index == 0 {
-                    ReaderFont::Standard
-                } else {
-                    ReaderFont::Monospace
-                },
-            );
+            if let Some(font) = ReaderFont::from_index(index) {
+                self.set_reader_font(cx, font);
+            }
         }
         if let Some(index) = self
             .ui
@@ -15003,6 +17025,8 @@ impl MatchEvent for App {
             if self.toc_open {
                 self.note_open = false;
                 self.reader_ai_open = false;
+                self.bookmarks_open = false;
+                self.search_open = false;
                 self.ui.widget(cx, ids!(toc_list)).redraw(cx);
             }
             self.sync_reader_panel_layout(cx);
@@ -15011,8 +17035,11 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(notes_btn)).clicked(actions) {
             self.note_open = !self.note_open;
             if self.note_open {
+                self.refresh_reader_highlights(cx);
                 self.toc_open = false;
                 self.reader_ai_open = false;
+                self.bookmarks_open = false;
+                self.search_open = false;
             }
             self.sync_reader_panel_layout(cx);
             self.ui.redraw(cx);
@@ -15023,6 +17050,142 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(reader_ai_close)).clicked(actions) {
             self.set_reader_ai_visible(cx, false);
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_bookmarks_btn))
+            .clicked(actions)
+        {
+            self.bookmarks_open = !self.bookmarks_open;
+            if self.bookmarks_open {
+                self.toc_open = false;
+                self.note_open = false;
+                self.reader_ai_open = false;
+                self.search_open = false;
+                self.ui.widget(cx, ids!(reader_bookmark_list)).redraw(cx);
+            }
+            self.sync_reader_panel_layout(cx);
+            self.ui.redraw(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_bookmarks_close))
+            .clicked(actions)
+        {
+            self.bookmarks_open = false;
+            self.sync_reader_panel_layout(cx);
+        }
+        if self.ui.button(cx, ids!(reader_search_btn)).clicked(actions) {
+            self.search_open = !self.search_open;
+            if self.search_open {
+                self.toc_open = false;
+                self.note_open = false;
+                self.reader_ai_open = false;
+                self.bookmarks_open = false;
+            }
+            self.sync_reader_panel_layout(cx);
+            self.ui.redraw(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_search_close))
+            .clicked(actions)
+        {
+            self.search_open = false;
+            self.sync_reader_panel_layout(cx);
+        }
+        let search_return = self
+            .ui
+            .text_input(cx, ids!(reader_search_input))
+            .returned(actions);
+        if self
+            .ui
+            .button(cx, ids!(reader_search_submit))
+            .clicked(actions)
+            || search_return.is_some()
+        {
+            let query = self
+                .ui
+                .text_input(cx, ids!(reader_search_input))
+                .text()
+                .trim()
+                .to_string();
+            self.reader_search_query = query.clone();
+            READER_SEARCH_RESULTS.write().unwrap().clear();
+            self.ui.widget(cx, ids!(reader_search_list)).redraw(cx);
+            if let Some(book_id) = CURRENT_BOOK
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|book| book.id.clone())
+            {
+                self.ui
+                    .label(cx, ids!(reader_search_hint))
+                    .set_text(cx, localized("正在搜索…", "Searching…"));
+                spawn_reader_search(book_id, query);
+            }
+        }
+        let bookmark_list = self
+            .ui
+            .widget(cx, ids!(reader_bookmark_list))
+            .portal_list(cx, ids!(list));
+        for (item_id, item) in bookmark_list.items_with_actions(actions) {
+            if item.button(cx, ids!(jump_btn)).clicked(actions) {
+                let bookmark = READER_BOOKMARKS.read().unwrap().get(item_id).cloned();
+                if let Some(bookmark) = bookmark {
+                    let chapter_count = CURRENT_BOOK
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .map_or(0, |book| book.chapters.len());
+                    let location = ReaderLocation::decode(&bookmark.location, chapter_count);
+                    self.set_chapter_at(
+                        cx,
+                        location.chapter,
+                        location.block,
+                        location.scroll,
+                        true,
+                    );
+                    if let (Some(source), Some(mut reader)) = (
+                        location.source,
+                        self.ui
+                            .widget(cx, ids!(chapter_list))
+                            .borrow_mut::<ChapterList>(),
+                    ) {
+                        reader.pager.requested_source = Some((location.block, source));
+                    }
+                    self.bookmarks_open = false;
+                    self.sync_reader_panel_layout(cx);
+                }
+            }
+        }
+        let search_list = self
+            .ui
+            .widget(cx, ids!(reader_search_list))
+            .portal_list(cx, ids!(list));
+        for (item_id, item) in search_list.items_with_actions(actions) {
+            if item.button(cx, ids!(jump_btn)).clicked(actions) {
+                let hit = READER_SEARCH_RESULTS.read().unwrap().get(item_id).cloned();
+                if let Some(hit) = hit {
+                    self.set_chapter_at(cx, hit.chapter, hit.block, 0.0, true);
+                    self.search_open = false;
+                    self.sync_reader_panel_layout(cx);
+                }
+            }
+        }
+        let highlight_list = self
+            .ui
+            .widget(cx, ids!(reader_highlight_list))
+            .portal_list(cx, ids!(list));
+        for (item_id, item) in highlight_list.items_with_actions(actions) {
+            if item.button(cx, ids!(jump_btn)).clicked(actions) {
+                let hit = READER_HIGHLIGHT_JUMPS.read().unwrap().get(item_id).cloned();
+                if let Some(hit) = hit {
+                    self.set_chapter_at(cx, hit.chapter, hit.block, 0.0, true);
+                    self.note_open = false;
+                    self.sync_reader_panel_layout(cx);
+                }
+            }
         }
         let toc_list = self
             .ui
@@ -15521,6 +17684,30 @@ impl AppMain for App {
                 .map(|touch| touch.abs),
             _ => None,
         };
+        if self.reader_theme_open {
+            if let Some(abs) = pointer_start {
+                let menu = self
+                    .ui
+                    .widget(cx, ids!(reader_theme_menu))
+                    .area()
+                    .clipped_rect(cx);
+                let trigger = self
+                    .ui
+                    .widget(cx, ids!(reader_appearance_btn))
+                    .area()
+                    .clipped_rect(cx);
+                if !menu.contains(abs) && !trigger.contains(abs) {
+                    self.reader_theme_open = false;
+                    self.ui
+                        .widget(cx, ids!(reader_theme_menu))
+                        .set_visible(cx, false);
+                    self.ui
+                        .widget(cx, ids!(reader_theme_layer))
+                        .set_visible(cx, false);
+                    self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
+                }
+            }
+        }
         if let Some(abs) = pointer_start {
             let selection_popup_open = self.on_reader_page
                 && self.selection_popup_anchor.is_some()
@@ -15713,6 +17900,13 @@ impl AppMain for App {
             }
             Event::VirtualKeyboard(event) => self.handle_virtual_keyboard(cx, event),
             Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
+            Event::MouseMove(event) if self.on_reader_page && !self.compact_layout => {
+                let header = self.ui.widget(cx, ids!(header)).area().clipped_rect(cx);
+                let visible = header.contains(event.abs) || self.reader_theme_open;
+                if visible != self.reader_toolbar_visible {
+                    self.set_reader_toolbar_visible(cx, visible);
+                }
+            }
             // 拖入悬停：声明接受拷贝，否则系统不触发 Drop。
             Event::Drag(de) => {
                 if de.items.iter().any(is_epub_item) {
@@ -15741,6 +17935,20 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if matches!(event, Event::Draw(_)) {
             self.finish_toc_first_draw(cx);
+            if self.on_reader_page {
+                self.load_reader_font(cx, *READER_FONT.read().unwrap(), false);
+            }
+            if self.pending_customise_preview_after_draw {
+                self.pending_customise_preview_after_draw = false;
+                if self.reader_customise_draft.is_some() {
+                    self.load_reader_font(
+                        cx,
+                        self.reader_customise_draft.as_ref().unwrap().font,
+                        true,
+                    );
+                    self.sync_reader_customise_controls(cx);
+                }
+            }
             if self.pending_ui_projection_after_draw {
                 self.pending_ui_projection_after_draw = false;
                 self.restore_projected_ui_after_draw(cx);

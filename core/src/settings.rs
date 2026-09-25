@@ -70,10 +70,12 @@ impl ReaderTheme {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderBackground {
     FollowTheme,
+    Original,
     #[default]
     Paper,
     Sepia,
     Sage,
+    Bold,
     Night,
 }
 
@@ -81,9 +83,11 @@ impl ReaderBackground {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FollowTheme => "theme",
+            Self::Original => "original",
             Self::Paper => "paper",
             Self::Sepia => "sepia",
             Self::Sage => "sage",
+            Self::Bold => "bold",
             Self::Night => "night",
         }
     }
@@ -91,8 +95,10 @@ impl ReaderBackground {
     pub fn from_str(value: &str) -> Self {
         match value {
             "theme" => Self::FollowTheme,
+            "original" => Self::Original,
             "sepia" => Self::Sepia,
             "sage" => Self::Sage,
+            "bold" => Self::Bold,
             "night" => Self::Night,
             _ => Self::Paper,
         }
@@ -157,23 +163,103 @@ impl ReaderColumns {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderFont {
+    Canela,
     #[default]
-    Standard,
-    Monospace,
+    Original,
+    Athelas,
+    AvenirNext,
+    Charter,
+    Georgia,
+    Iowan,
+    Palatino,
+    ProximaNova,
+    Publico,
+    SanFrancisco,
+    NewYork,
+    Seravek,
+    TimesNewRoman,
 }
 
 impl ReaderFont {
+    pub const ALL: [Self; 14] = [
+        Self::Canela,
+        Self::Original,
+        Self::Athelas,
+        Self::AvenirNext,
+        Self::Charter,
+        Self::Georgia,
+        Self::Iowan,
+        Self::Palatino,
+        Self::ProximaNova,
+        Self::Publico,
+        Self::SanFrancisco,
+        Self::NewYork,
+        Self::Seravek,
+        Self::TimesNewRoman,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Canela => "Canela",
+            Self::Original => "Original",
+            Self::Athelas => "Athelas",
+            Self::AvenirNext => "Avenir Next",
+            Self::Charter => "Charter",
+            Self::Georgia => "Georgia",
+            Self::Iowan => "Iowan",
+            Self::Palatino => "Palatino",
+            Self::ProximaNova => "Proxima Nova",
+            Self::Publico => "Publico",
+            Self::SanFrancisco => "San Francisco",
+            Self::NewYork => "New York",
+            Self::Seravek => "Seravek",
+            Self::TimesNewRoman => "Times New Roman",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|font| *font == self).unwrap()
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Standard => "standard",
-            Self::Monospace => "monospace",
+            Self::Canela => "canela",
+            Self::Original => "original",
+            Self::Athelas => "athelas",
+            Self::AvenirNext => "avenir_next",
+            Self::Charter => "charter",
+            Self::Georgia => "georgia",
+            Self::Iowan => "iowan",
+            Self::Palatino => "palatino",
+            Self::ProximaNova => "proxima_nova",
+            Self::Publico => "publico",
+            Self::SanFrancisco => "san_francisco",
+            Self::NewYork => "new_york",
+            Self::Seravek => "seravek",
+            Self::TimesNewRoman => "times_new_roman",
         }
     }
 
     pub fn from_str(value: &str) -> Self {
         match value {
-            "monospace" => Self::Monospace,
-            _ => Self::Standard,
+            "canela" => Self::Canela,
+            "athelas" => Self::Athelas,
+            "avenir_next" => Self::AvenirNext,
+            "charter" => Self::Charter,
+            "georgia" => Self::Georgia,
+            "iowan" => Self::Iowan,
+            "palatino" => Self::Palatino,
+            "proxima_nova" => Self::ProximaNova,
+            "publico" => Self::Publico,
+            "san_francisco" => Self::SanFrancisco,
+            "new_york" => Self::NewYork,
+            "seravek" => Self::Seravek,
+            "times_new_roman" => Self::TimesNewRoman,
+            _ => Self::Original,
         }
     }
 }
@@ -229,7 +315,12 @@ pub struct ReaderSettings {
     pub columns: ReaderColumns,
     pub turn_mode: ReaderTurnMode,
     pub font: ReaderFont,
+    pub bold_text: bool,
     pub spacing: ReaderSpacing,
+    pub character_spacing: f32,
+    pub word_spacing: f32,
+    pub margin: f32,
+    pub justify_text: bool,
     pub font_size: Option<f32>,
     pub gloss_enabled: bool,
     pub gloss_font_size: f32,
@@ -250,8 +341,13 @@ impl Default for ReaderSettings {
             background: ReaderBackground::Paper,
             columns: ReaderColumns::Auto,
             turn_mode: ReaderTurnMode::Curl,
-            font: ReaderFont::Standard,
+            font: ReaderFont::Original,
+            bold_text: false,
             spacing: ReaderSpacing::Default,
+            character_spacing: 0.0,
+            word_spacing: 0.0,
+            margin: 28.0,
+            justify_text: false,
             font_size: None,
             gloss_enabled: true,
             gloss_font_size: 7.5,
@@ -271,6 +367,18 @@ impl ReaderSettings {
             .font_size
             .filter(|value| value.is_finite())
             .map(|value| value.clamp(8.0, 20.0));
+        if !self.character_spacing.is_finite() {
+            self.character_spacing = 0.0;
+        }
+        self.character_spacing = self.character_spacing.clamp(0.0, 0.12);
+        if !self.word_spacing.is_finite() {
+            self.word_spacing = 0.0;
+        }
+        self.word_spacing = self.word_spacing.clamp(0.0, 0.3);
+        if !self.margin.is_finite() {
+            self.margin = Self::default().margin;
+        }
+        self.margin = self.margin.clamp(12.0, 80.0);
         if !self.gloss_font_size.is_finite() {
             self.gloss_font_size = Self::default().gloss_font_size;
         }
@@ -361,10 +469,33 @@ mod tests {
 
     #[test]
     fn reader_font_uses_stable_storage_values() {
-        assert_eq!(ReaderFont::Standard.as_str(), "standard");
-        assert_eq!(ReaderFont::Monospace.as_str(), "monospace");
-        assert_eq!(ReaderFont::from_str("monospace"), ReaderFont::Monospace);
-        assert_eq!(ReaderFont::from_str("unknown"), ReaderFont::Standard);
+        assert_eq!(
+            ReaderFont::ALL.map(ReaderFont::label),
+            [
+                "Canela",
+                "Original",
+                "Athelas",
+                "Avenir Next",
+                "Charter",
+                "Georgia",
+                "Iowan",
+                "Palatino",
+                "Proxima Nova",
+                "Publico",
+                "San Francisco",
+                "New York",
+                "Seravek",
+                "Times New Roman",
+            ]
+        );
+        for (index, font) in ReaderFont::ALL.into_iter().enumerate() {
+            assert_eq!(ReaderFont::from_str(font.as_str()), font);
+            assert_eq!(ReaderFont::from_index(index), Some(font));
+            assert!(!font.label().is_empty());
+        }
+        assert_eq!(ReaderFont::from_str("standard"), ReaderFont::Original);
+        assert_eq!(ReaderFont::from_str("monospace"), ReaderFont::Original);
+        assert_eq!(ReaderFont::from_str("unknown"), ReaderFont::Original);
     }
 
     #[test]
