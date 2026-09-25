@@ -4998,6 +4998,25 @@ script_mod! {
         }
     }
 
+    let ReaderPopoverArrow = View{
+        width: 16 height: 10
+        show_bg: true
+        draw_bg +: {
+            color: theme.color_bg_container
+            border_color: theme.color_bg_container
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.move_to(1.0, self.rect_size.y)
+                sdf.line_to(self.rect_size.x * 0.5, 1.0)
+                sdf.line_to(self.rect_size.x - 1.0, self.rect_size.y)
+                sdf.close_path()
+                sdf.fill_keep(self.color)
+                sdf.stroke(self.border_color, 1.25)
+                return sdf.result
+            }
+        }
+    }
+
     mod.widgets.ChapterListBase = #(ChapterList::register_widget(vm))
     mod.widgets.ChapterList = set_type_default() do mod.widgets.ChapterListBase{
         width: Fill height: Fill
@@ -5521,36 +5540,6 @@ script_mod! {
                                             }
                                         }
                                     }
-                                    reader_search_panel := SolidView{
-                                        visible: false
-                                        width: 320 height: Fill
-                                        new_batch: true
-                                        flow: Down spacing: 9 padding: 12
-                                        draw_bg.color: theme.color_bg_app
-                                        reader_search_header := View{
-                                            width: Fill height: Fit
-                                            flow: Right
-                                            align: Align{y: 0.5}
-                                            reader_search_title := Label{
-                                                width: Fill text: "Search in Book"
-                                                draw_text.text_style.font_size: 14
-                                            }
-                                            reader_search_close := ButtonFlatter{text: "X"}
-                                        }
-                                        reader_search_input := TextInput{
-                                            width: Fill height: 40
-                                            empty_text: "搜索书中内容"
-                                        }
-                                        reader_search_submit := ButtonFlat{
-                                            width: Fill height: 36 text: "搜索"
-                                        }
-                                        reader_search_hint := Label{
-                                            width: Fill height: Fit
-                                            text: "输入关键词后按回车搜索"
-                                            draw_text.text_style.font_size: 9
-                                        }
-                                        reader_search_list := mod.widgets.ReaderJumpList{bookmarks: false}
-                                    }
                                     reader_ai_panel := SolidView{
                                     visible: false
                                     width: 360 height: Fill
@@ -5598,149 +5587,219 @@ script_mod! {
                                 reader_panel_layer := View{
                                     width: Fill height: Fill
                                     flow: Overlay
-                                    padding: Inset{left: 18 right: 18 top: 8 bottom: 8}
-                                    toc_panel := RoundedShadowView{
+                                    padding: Inset{left: 18 right: 18 top: 0 bottom: 8}
+                                    toc_popup := View{
                                         visible: false
-                                        width: 320 height: Fill{max: 620}
-                                        new_batch: true
-                                        flow: Down spacing: 8 padding: 12
-                                        draw_bg.color: theme.color_bg_container
-                                        draw_bg.border_radius: 12.0
-                                        draw_bg.shadow_color: #0003
-                                        draw_bg.shadow_radius: 14.0
-                                        draw_bg.shadow_offset: vec2(0, 5)
-                                        toc_header := View{
-                                            width: Fill height: Fit
-                                            flow: Right align: Align{y: 0.5}
-                                            toc_title := Label{
-                                                width: Fill text: "目录"
-                                                draw_text.text_style.font_size: 14
-                                            }
-                                            toc_close_btn := ButtonFlatter{text: "关闭"}
-                                        }
-                                        toc_loading := Label{
-                                            visible: false
-                                            width: Fill height: Fit
-                                            padding: 12
-                                            text: "目录加载中…"
-                                            draw_text.color: theme.color_label_inner_inactive
-                                        }
-                                        toc_list := mod.widgets.TocList{}
-                                    }
-                                    reader_bookmarks_panel := RoundedShadowView{
-                                        visible: false
-                                        width: 340 height: Fill{max: 620}
-                                        new_batch: true
-                                        flow: Down spacing: 8 padding: 12
-                                        draw_bg.color: theme.color_bg_container
-                                        draw_bg.border_radius: 12.0
-                                        draw_bg.shadow_color: #0003
-                                        draw_bg.shadow_radius: 14.0
-                                        draw_bg.shadow_offset: vec2(0, 5)
-                                        reader_bookmarks_header := View{
-                                            width: Fill height: Fit
+                                        width: 320 height: Fill
+                                        flow: Down
+                                        toc_arrow_row := View{
+                                            width: Fill height: 10
                                             flow: Right
-                                            align: Align{y: 0.5}
-                                            reader_bookmarks_title := Label{
-                                                width: Fill text: "Bookmarks"
-                                                draw_text.text_style.font_size: 14
-                                            }
-                                            reader_bookmarks_close := ButtonFlatter{text: "X"}
+                                            padding: Inset{left: 112}
+                                            toc_arrow := ReaderPopoverArrow{}
                                         }
-                                        reader_bookmarks_hint := Label{
-                                            width: Fill height: Fit
-                                            text: "当前书籍还没有书签"
-                                            draw_text.text_style.font_size: 9
-                                        }
-                                        reader_bookmark_list := mod.widgets.ReaderJumpList{bookmarks: true}
-                                    }
-                                    note_panel := RoundedShadowView{
-                                        visible: false
-                                        width: 380 height: Fill{max: 620}
-                                        new_batch: true
-                                        flow: Down spacing: 10 padding: 12
-                                        draw_bg.color: theme.color_bg_container
-                                        draw_bg.border_radius: 12.0
-                                        draw_bg.shadow_color: #0003
-                                        draw_bg.shadow_radius: 14.0
-                                        draw_bg.shadow_offset: vec2(0, 5)
-                                        note_header := View{
-                                            width: Fill height: Fit
-                                            flow: Right spacing: 8
-                                            align: Align{y: 0.5}
-                                            note_panel_title := Label{
-                                                width: Fill
-                                                text: "高亮与笔记"
-                                                draw_text.text_style.font_size: 14
-                                            }
-                                            reader_ai_btn := ButtonFlatter{ text: "AI" }
-                                            note_close_btn := ButtonFlatter{ text: "关闭" }
-                                        }
-                                        note_composer := RoundedView{
-                                            visible: false
-                                            width: Fill height: Fit
+                                        toc_panel := RoundedShadowView{
+                                            width: Fill height: Fill{max: 620}
                                             new_batch: true
-                                            flow: Down spacing: 8 padding: 10
+                                            flow: Down spacing: 8 padding: 12
                                             draw_bg.color: theme.color_bg_container
-                                            draw_bg.border_radius: 8.0
-                                            note_quote_title := Label{
-                                                text: "引用"
-                                                draw_text.color: theme.color_highlight
+                                            draw_bg.border_radius: 12.0
+                                            draw_bg.shadow_color: #0003
+                                            draw_bg.shadow_radius: 14.0
+                                            draw_bg.shadow_offset: vec2(0, 5)
+                                            toc_header := View{
+                                                width: Fill height: Fit
+                                                flow: Right align: Align{y: 0.5}
+                                                toc_title := Label{
+                                                    width: Fill text: "目录"
+                                                    draw_text.text_style.font_size: 14
+                                                }
+                                                toc_close_btn := ButtonFlatter{text: "关闭"}
+                                            }
+                                            toc_loading := Label{
+                                                visible: false
+                                                width: Fill height: Fit
+                                                padding: 12
+                                                text: "目录加载中…"
+                                                draw_text.color: theme.color_label_inner_inactive
+                                            }
+                                            toc_list := mod.widgets.TocList{}
+                                        }
+                                    }
+                                    reader_bookmarks_popup := View{
+                                        visible: false
+                                        width: 340 height: Fill
+                                        flow: Down
+                                        reader_bookmarks_arrow_row := View{
+                                            width: Fill height: 10
+                                            flow: Right
+                                            padding: Inset{left: 144}
+                                            reader_bookmarks_arrow := ReaderPopoverArrow{}
+                                        }
+                                        reader_bookmarks_panel := RoundedShadowView{
+                                            width: Fill height: Fill{max: 620}
+                                            new_batch: true
+                                            flow: Down spacing: 8 padding: 12
+                                            draw_bg.color: theme.color_bg_container
+                                            draw_bg.border_radius: 12.0
+                                            draw_bg.shadow_color: #0003
+                                            draw_bg.shadow_radius: 14.0
+                                            draw_bg.shadow_offset: vec2(0, 5)
+                                            reader_bookmarks_header := View{
+                                                width: Fill height: Fit
+                                                flow: Right
+                                                align: Align{y: 0.5}
+                                                reader_bookmarks_title := Label{
+                                                    width: Fill text: "Bookmarks"
+                                                    draw_text.text_style.font_size: 14
+                                                }
+                                                reader_bookmarks_close := ButtonFlatter{text: "X"}
+                                            }
+                                            reader_bookmarks_hint := Label{
+                                                width: Fill height: Fit
+                                                text: "当前书籍还没有书签"
                                                 draw_text.text_style.font_size: 9
                                             }
-                                            note_quote := TextInput{
-                                                width: Fill
-                                                height: Fit
-                                                is_multiline: true
-                                                is_read_only: true
-                                                draw_text.color: theme.color_text
-                                                draw_text.text_style.font_size: 9.5
-                                            }
-                                            note_extra := TextInput{
-                                                width: Fill height: 38
-                                                empty_text: "补充内容（可选，回车保存）"
-                                            }
-                                            note_compose_actions := View{
+                                            reader_bookmark_list := mod.widgets.ReaderJumpList{bookmarks: true}
+                                        }
+                                    }
+                                    note_popup := View{
+                                        visible: false
+                                        width: 380 height: Fill
+                                        flow: Down
+                                        note_arrow_row := View{
+                                            width: Fill height: 10
+                                            flow: Right
+                                            padding: Inset{left: 176}
+                                            note_arrow := ReaderPopoverArrow{}
+                                        }
+                                        note_panel := RoundedShadowView{
+                                            width: Fill height: Fill{max: 620}
+                                            new_batch: true
+                                            flow: Down spacing: 10 padding: 12
+                                            draw_bg.color: theme.color_bg_container
+                                            draw_bg.border_radius: 12.0
+                                            draw_bg.shadow_color: #0003
+                                            draw_bg.shadow_radius: 14.0
+                                            draw_bg.shadow_offset: vec2(0, 5)
+                                            note_header := View{
                                                 width: Fill height: Fit
                                                 flow: Right spacing: 8
-                                                align: Align{x: 1.0 y: 0.5}
-                                                note_cancel_btn := ButtonFlatter{ text: "取消" }
-                                                note_save_btn := ButtonFlat{ text: "保存" }
+                                                align: Align{y: 0.5}
+                                                note_panel_title := Label{
+                                                    width: Fill
+                                                    text: "高亮与笔记"
+                                                    draw_text.text_style.font_size: 14
+                                                }
+                                                reader_ai_btn := ButtonFlatter{ text: "AI" }
+                                                note_close_btn := ButtonFlatter{ text: "关闭" }
                                             }
-                                        }
-                                        note_hint := Label{
-                                            width: Fill
-                                            text: "选中文本后可添加笔记"
-                                            draw_text.color: theme.color_label_inner_inactive
-                                            draw_text.text_style.font_size: 9
-                                        }
-                                        reader_highlights_title := Label{
-                                            visible: false
-                                            width: Fill height: Fit
-                                            text: "Highlights"
-                                            draw_text.text_style.font_size: 11
-                                        }
-                                        reader_highlight_list := mod.widgets.ReaderJumpList{
-                                            visible: false
-                                            highlights: true
-                                            width: Fill height: 180
-                                        }
-                                        note_empty := View{
-                                            visible: true
-                                            width: Fill height: 110
-                                            flow: Down spacing: 7
-                                            align: Center
-                                            note_empty_title := Label{
-                                                text: "还没有笔记"
-                                                draw_text.text_style.font_size: 12
+                                            note_composer := RoundedView{
+                                                visible: false
+                                                width: Fill height: Fit
+                                                new_batch: true
+                                                flow: Down spacing: 8 padding: 10
+                                                draw_bg.color: theme.color_bg_container
+                                                draw_bg.border_radius: 8.0
+                                                note_quote_title := Label{
+                                                    text: "引用"
+                                                    draw_text.color: theme.color_highlight
+                                                    draw_text.text_style.font_size: 9
+                                                }
+                                                note_quote := TextInput{
+                                                    width: Fill
+                                                    height: Fit
+                                                    is_multiline: true
+                                                    is_read_only: true
+                                                    draw_text.color: theme.color_text
+                                                    draw_text.text_style.font_size: 9.5
+                                                }
+                                                note_extra := TextInput{
+                                                    width: Fill height: 38
+                                                    empty_text: "补充内容（可选，回车保存）"
+                                                }
+                                                note_compose_actions := View{
+                                                    width: Fill height: Fit
+                                                    flow: Right spacing: 8
+                                                    align: Align{x: 1.0 y: 0.5}
+                                                    note_cancel_btn := ButtonFlatter{ text: "取消" }
+                                                    note_save_btn := ButtonFlat{ text: "保存" }
+                                                }
                                             }
-                                            note_empty_hint := Label{
-                                                text: "选中文本，点击「笔记」创建第一条。"
+                                            note_hint := Label{
+                                                width: Fill
+                                                text: "选中文本后可添加笔记"
                                                 draw_text.color: theme.color_label_inner_inactive
-                                                draw_text.text_style.font_size: 8.5
+                                                draw_text.text_style.font_size: 9
                                             }
+                                            reader_highlights_title := Label{
+                                                visible: false
+                                                width: Fill height: Fit
+                                                text: "Highlights"
+                                                draw_text.text_style.font_size: 11
+                                            }
+                                            reader_highlight_list := mod.widgets.ReaderJumpList{
+                                                visible: false
+                                                highlights: true
+                                                width: Fill height: 180
+                                            }
+                                            note_empty := View{
+                                                visible: true
+                                                width: Fill height: 110
+                                                flow: Down spacing: 7
+                                                align: Center
+                                                note_empty_title := Label{
+                                                    text: "还没有笔记"
+                                                    draw_text.text_style.font_size: 12
+                                                }
+                                                note_empty_hint := Label{
+                                                    text: "选中文本，点击「笔记」创建第一条。"
+                                                    draw_text.color: theme.color_label_inner_inactive
+                                                    draw_text.text_style.font_size: 8.5
+                                                }
+                                            }
+                                            note_list := mod.widgets.NoteList{visible: false}
                                         }
-                                        note_list := mod.widgets.NoteList{visible: false}
+                                    }
+                                    reader_search_popup_slot := View{
+                                        visible: false
+                                        width: Fill height: Fill
+                                        flow: Overlay
+                                        align: Align{x: 1.0 y: 0.0}
+                                        padding: Inset{top: 8}
+                                        reader_search_panel := RoundedShadowView{
+                                            width: 320 height: Fill{max: 620}
+                                            new_batch: true
+                                            flow: Down spacing: 9 padding: 12
+                                            draw_bg.color: theme.color_bg_container
+                                            draw_bg.border_radius: 12.0
+                                            draw_bg.shadow_color: #0003
+                                            draw_bg.shadow_radius: 14.0
+                                            draw_bg.shadow_offset: vec2(0, 5)
+                                            reader_search_header := View{
+                                                width: Fill height: Fit
+                                                flow: Right
+                                                align: Align{y: 0.5}
+                                                reader_search_title := Label{
+                                                    width: Fill text: "Search in Book"
+                                                    draw_text.text_style.font_size: 14
+                                                }
+                                                reader_search_close := ButtonFlatter{text: "X"}
+                                            }
+                                            reader_search_input := TextInput{
+                                                width: Fill height: 40
+                                                empty_text: "搜索书中内容"
+                                            }
+                                            reader_search_submit := ButtonFlat{
+                                                width: Fill height: 36 text: "搜索"
+                                            }
+                                            reader_search_hint := Label{
+                                                width: Fill height: Fit
+                                                text: "输入关键词后按回车搜索"
+                                                draw_text.text_style.font_size: 9
+                                            }
+                                            reader_search_list := mod.widgets.ReaderJumpList{bookmarks: false}
+                                        }
                                     }
                                 }
                                 sel_bar := View{
@@ -5831,10 +5890,18 @@ script_mod! {
                                     width: Fill height: Fill
                                     flow: Overlay
                                     align: Align{x: 1.0 y: 0.0}
-                                    padding: Inset{right: 18 top: 8}
+                                    padding: Inset{right: 18 top: 0}
+                                    reader_theme_arrow_row := View{
+                                        width: 316 height: 10
+                                        flow: Right
+                                        align: Align{x: 1.0}
+                                        padding: Inset{right: 70}
+                                        reader_theme_arrow := ReaderPopoverArrow{}
+                                    }
                                     reader_theme_menu := RoundedShadowView{
                                         visible: false
                                         width: 316 height: Fit
+                                        margin: Inset{top: 10}
                                         new_batch: true
                                         flow: Down spacing: 12 padding: 16
                                         draw_bg.color: theme.color_bg_container
@@ -10082,6 +10149,8 @@ pub struct App {
     #[rust]
     reader_toolbar_visible: bool,
     #[rust]
+    reader_arrow_caption_layout: Option<bool>,
+    #[rust]
     reader_theme_open: bool,
     #[rust]
     reader_customise_draft: Option<ReaderSettings>,
@@ -10414,6 +10483,45 @@ impl App {
             header.set_visible(cx, !in_caption);
             self.ui.widget(cx, ids!(page_reader)).redraw(cx);
         }
+        if self.reader_arrow_caption_layout != Some(in_caption) {
+            self.reader_arrow_caption_layout = Some(in_caption);
+            self.sync_reader_popup_arrow_alignment(cx, in_caption);
+        }
+    }
+
+    fn sync_reader_popup_arrow_alignment(&self, cx: &mut Cx, in_caption: bool) {
+        let left_offsets = if in_caption {
+            [112.0, 144.0, 176.0]
+        } else {
+            [50.0, 90.0, 130.0]
+        };
+        for (id, left) in [
+            id!(toc_arrow_row),
+            id!(reader_bookmarks_arrow_row),
+            id!(note_arrow_row),
+        ]
+        .into_iter()
+        .zip(left_offsets)
+        {
+            let padding = Inset {
+                left,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            };
+            let mut row = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, row, {padding: #(padding)});
+        }
+        let padding = Inset {
+            left: 0.0,
+            right: if in_caption { 70.0 } else { 90.0 },
+            top: 0.0,
+            bottom: 0.0,
+        };
+        let mut row = self.ui.widget(cx, ids!(reader_theme_arrow_row));
+        script_apply_eval!(cx, row, {padding: #(padding)});
+        self.ui.widget(cx, ids!(reader_panel_layer)).redraw(cx);
+        self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
     }
 
     fn set_reader_toolbar_visible(&mut self, cx: &mut Cx, visible: bool) {
@@ -11514,14 +11622,12 @@ impl App {
             palette.surface,
             palette.border,
         );
-        for id in [id!(reader_search_panel), id!(reader_ai_panel)] {
-            apply_reader_surface_palette(
-                cx,
-                self.ui.widget(cx, &[id]),
-                palette.surface,
-                palette.border,
-            );
-        }
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_ai_panel)),
+            palette.surface,
+            palette.border,
+        );
         for id in [
             id!(note_composer),
             id!(word_card),
@@ -11536,15 +11642,29 @@ impl App {
                 palette.border,
             );
         }
-        // 临时菜单不能与页面共用 surface；按钮再回到 surface，
-        // 形成“正文 → field 浮层 → surface 操作”的稳定层级。
+        // Reader popovers use the same fill as the current reading page;
+        // their border and shadow still separate them from the text below.
         for id in [
             id!(toc_panel),
             id!(reader_bookmarks_panel),
             id!(note_panel),
+            id!(reader_search_panel),
+            id!(reader_theme_menu),
+            id!(toc_arrow),
+            id!(reader_bookmarks_arrow),
+            id!(note_arrow),
+            id!(reader_theme_arrow),
+        ] {
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.surface,
+                palette.border,
+            );
+        }
+        for id in [
             id!(selection_popup),
             id!(library_action_menu),
-            id!(reader_theme_menu),
         ] {
             apply_reader_surface_palette(
                 cx,
@@ -12205,6 +12325,7 @@ impl App {
     fn restore_after_script_reload(&mut self, cx: &mut Cx) {
         self.active_font_applied = None;
         self.preview_font_applied = None;
+        self.reader_arrow_caption_layout = None;
         self.activate_page(cx, self.active_page);
         self.pending_customise_preview_after_draw = self.reader_customise_draft.is_some();
         self.responsive_layout_initialized = false;
@@ -12351,15 +12472,15 @@ impl App {
     }
 
     fn sync_reader_panel_layout(&mut self, cx: &mut Cx) {
-        let panel_open = self.reader_ai_open || self.search_open;
+        let panel_open = self.reader_ai_open;
         READER_INFO_POPUP_OPEN.store(
-            self.on_reader_page && (self.toc_open || self.bookmarks_open || self.note_open),
+            self.on_reader_page
+                && (self.toc_open || self.bookmarks_open || self.note_open || self.search_open),
             Ordering::Relaxed,
         );
         let surface_visible = !self.compact_layout || !panel_open;
         let reader_layout_changed = self.ui.widget(cx, ids!(reader_surface)).visible()
             != surface_visible
-            || self.ui.widget(cx, ids!(reader_search_panel)).visible() != self.search_open
             || self.ui.widget(cx, ids!(reader_ai_panel)).visible() != self.reader_ai_open;
         let toc_ready = requested_book_is_ready();
         if let Some(mut chapter_list) = self
@@ -12373,7 +12494,7 @@ impl App {
             .widget(cx, ids!(reader_surface))
             .set_visible(cx, surface_visible);
         self.ui
-            .widget(cx, ids!(toc_panel))
+            .widget(cx, ids!(toc_popup))
             .set_visible(cx, self.toc_open);
         self.ui
             .widget(cx, ids!(toc_list))
@@ -12385,16 +12506,16 @@ impl App {
             .label(cx, ids!(toc_loading))
             .set_text(cx, localized("目录加载中…", "Loading contents…"));
         self.ui
-            .widget(cx, ids!(note_panel))
+            .widget(cx, ids!(note_popup))
             .set_visible(cx, self.note_open);
         self.ui
-            .widget(cx, ids!(reader_bookmarks_panel))
+            .widget(cx, ids!(reader_bookmarks_popup))
             .set_visible(cx, self.bookmarks_open);
         self.ui
             .widget(cx, ids!(reader_bookmarks_hint))
             .set_visible(cx, READER_BOOKMARKS.read().unwrap().is_empty());
         self.ui
-            .widget(cx, ids!(reader_search_panel))
+            .widget(cx, ids!(reader_search_popup_slot))
             .set_visible(cx, self.search_open);
         self.ui
             .widget(cx, ids!(reader_highlights_title))
@@ -12423,9 +12544,9 @@ impl App {
             ]
         };
         for (widget, width) in [
-            self.ui.widget(cx, ids!(toc_panel)),
-            self.ui.widget(cx, ids!(reader_bookmarks_panel)),
-            self.ui.widget(cx, ids!(note_panel)),
+            self.ui.widget(cx, ids!(toc_popup)),
+            self.ui.widget(cx, ids!(reader_bookmarks_popup)),
+            self.ui.widget(cx, ids!(note_popup)),
             self.ui.widget(cx, ids!(reader_search_panel)),
             self.ui.widget(cx, ids!(reader_ai_panel)),
             self.ui.widget(cx, ids!(selection_popup)),
@@ -12438,20 +12559,21 @@ impl App {
             }
         }
         self.ui.widget(cx, ids!(reader_panel_layer)).redraw(cx);
-        // Floating contents, bookmarks and notes do not change the reader's
-        // available width, so opening them must not repaginate the book.
+        // Floating contents, bookmarks, notes and search leave the reader's
+        // available width alone, so opening them must not repaginate the book.
         if reader_layout_changed {
             self.invalidate_reader_pagination_layout(cx);
         }
     }
 
     fn close_reader_info_popup(&mut self, cx: &mut Cx) {
-        if !self.toc_open && !self.bookmarks_open && !self.note_open {
+        if !self.toc_open && !self.bookmarks_open && !self.note_open && !self.search_open {
             return;
         }
         self.toc_open = false;
         self.bookmarks_open = false;
         self.note_open = false;
+        self.search_open = false;
         self.pending_toc_first_draw = false;
         self.sync_reader_panel_layout(cx);
     }
@@ -17300,6 +17422,13 @@ impl MatchEvent for App {
                 self.note_open = false;
                 self.reader_ai_open = false;
                 self.bookmarks_open = false;
+                self.reader_theme_open = false;
+                self.ui
+                    .widget(cx, ids!(reader_theme_menu))
+                    .set_visible(cx, false);
+                self.ui
+                    .widget(cx, ids!(reader_theme_layer))
+                    .set_visible(cx, false);
             }
             self.sync_reader_panel_layout(cx);
             self.ui.redraw(cx);
@@ -17902,7 +18031,9 @@ impl AppMain for App {
                 .map(|touch| touch.abs),
             _ => None,
         };
-        if self.on_reader_page && (self.toc_open || self.bookmarks_open || self.note_open) {
+        if self.on_reader_page
+            && (self.toc_open || self.bookmarks_open || self.note_open || self.search_open)
+        {
             if matches!(event, Event::KeyDown(key) if key.key_code == KeyCode::Escape)
                 || event.back_pressed()
             {
@@ -17914,6 +18045,8 @@ impl AppMain for App {
                     id!(toc_panel)
                 } else if self.bookmarks_open {
                     id!(reader_bookmarks_panel)
+                } else if self.search_open {
+                    id!(reader_search_panel)
                 } else {
                     id!(note_panel)
                 };
@@ -17933,6 +18066,8 @@ impl AppMain for App {
                             id!(titlebar_toc_btn),
                             id!(titlebar_bookmarks_btn),
                             id!(titlebar_notes_btn),
+                            id!(reader_search_btn),
+                            id!(titlebar_search_btn),
                         ]
                         .into_iter()
                         .any(|id| {
@@ -18178,7 +18313,12 @@ impl AppMain for App {
                     id!(header)
                 };
                 let header = self.ui.widget(cx, &[toolbar_id]).area().clipped_rect(cx);
-                let visible = header.contains(event.abs) || self.reader_theme_open;
+                let visible = header.contains(event.abs)
+                    || self.reader_theme_open
+                    || self.toc_open
+                    || self.bookmarks_open
+                    || self.note_open
+                    || self.search_open;
                 if visible != self.reader_toolbar_visible {
                     self.set_reader_toolbar_visible(cx, visible);
                 }
