@@ -5006,12 +5006,19 @@ script_mod! {
             border_color: theme.color_bg_container
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.move_to(1.0, self.rect_size.y)
-                sdf.line_to(self.rect_size.x * 0.5, 1.0)
-                sdf.line_to(self.rect_size.x - 1.0, self.rect_size.y)
-                sdf.close_path()
-                sdf.fill_keep(self.color)
-                sdf.stroke(self.border_color, 1.25)
+                // An open, softly curved outline joins the panel without
+                // drawing a horizontal line across the pointer's base.
+                sdf.move_to(0.8, self.rect_size.y + 0.8)
+                sdf.line_to(5.4, 3.2)
+                sdf.line_to(6.5, 1.9)
+                sdf.line_to(7.15, 1.3)
+                sdf.line_to(7.75, 1.05)
+                sdf.line_to(8.25, 1.05)
+                sdf.line_to(8.85, 1.3)
+                sdf.line_to(9.5, 1.9)
+                sdf.line_to(10.6, 3.2)
+                sdf.line_to(self.rect_size.x - 0.8, self.rect_size.y + 0.8)
+                sdf.stroke(self.border_color, 1.2)
                 return sdf.result
             }
         }
