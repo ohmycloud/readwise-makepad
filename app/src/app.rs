@@ -7,7 +7,7 @@ use makepad_ai::{
 };
 use makepad_widgets::makepad_draw::text::geom::Point as LayoutPoint;
 use makepad_widgets::makepad_draw::text::layouter::LaidoutText;
-use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState};
+use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState, WindowDragQueryResponse};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -5138,6 +5138,77 @@ script_mod! {
                 window.inner_size: vec2(1080, 720)
                 caption_bar +: {
                     new_batch: true
+                    caption_label +: {
+                        flow: Overlay
+                        label +: {visible: false}
+                        reader_titlebar := View{
+                            visible: false
+                            width: Fill height: Fill
+                            flow: Right
+                            align: Align{y: 0.5}
+                            padding: Inset{left: 92 right: 18 top: 0 bottom: 4}
+                            reader_titlebar_left := View{
+                                width: 160 height: Fit
+                                flow: Right spacing: 4
+                                reader_titlebar_left_buttons := View{
+                                    visible: false
+                                    width: Fit height: Fit
+                                    flow: Right spacing: 4
+                                    titlebar_back_btn := ButtonFlatterIcon{
+                                        width: 28 height: 28 icon_walk: Walk{width: 14 height: 14}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/reader_back.svg")}
+                                    }
+                                    titlebar_toc_btn := ButtonFlatterIcon{
+                                        width: 28 height: 28 icon_walk: Walk{width: 14 height: 14}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/reader_contents.svg")}
+                                    }
+                                    titlebar_bookmarks_btn := ButtonFlatterIcon{
+                                        width: 28 height: 28 icon_walk: Walk{width: 14 height: 14}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmarks.svg")}
+                                    }
+                                    titlebar_notes_btn := ButtonFlatterIcon{
+                                        width: 28 height: 28 icon_walk: Walk{width: 14 height: 14}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/reader_notes.svg")}
+                                    }
+                                }
+                            }
+                            reader_titlebar_title_slot := View{
+                                width: Fill height: Fit
+                                align: Center
+                                titlebar_reader_title := Label{
+                                    text: "阅读 · 示例章节"
+                                    draw_text.text_style.font_size: 14
+                                }
+                            }
+                            reader_titlebar_right := View{
+                                width: 234 height: Fit
+                                flow: Right spacing: 4
+                                align: Align{x: 1.0 y: 0.5}
+                                reader_titlebar_right_buttons := View{
+                                    visible: false
+                                    width: Fit height: Fit
+                                    flow: Right spacing: 4
+                                    titlebar_appearance_btn := ButtonFlatter{
+                                        width: 28 height: 28 text: "aA"
+                                        draw_text.text_style.font_size: 11
+                                    }
+                                    titlebar_search_btn := ButtonFlatterIcon{
+                                        width: 28 height: 28 icon_walk: Walk{width: 14 height: 14}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/reader_search.svg")}
+                                    }
+                                    titlebar_bookmark_btn := ButtonFlatterIcon{
+                                        width: 28 height: 28 icon_walk: Walk{width: 14 height: 14}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmark.svg")}
+                                    }
+                                    titlebar_bookmark_filled_btn := ButtonFlatterIcon{
+                                        visible: false
+                                        width: 28 height: 28 icon_walk: Walk{width: 14 height: 14}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmark_filled.svg")}
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 body +: {
                     flow: Overlay
@@ -10325,7 +10396,24 @@ impl App {
             .set_visible(cx, !self.compact_layout && !self.on_reader_page);
         self.sync_mobile_chrome(cx);
         self.set_reader_toolbar_visible(cx, self.on_reader_page && self.compact_layout);
+        self.sync_reader_toolbar_placement(cx);
         self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
+    }
+
+    fn sync_reader_toolbar_placement(&mut self, cx: &mut Cx) {
+        let in_caption = self.on_reader_page
+            && !self.compact_layout
+            && self.ui.widget(cx, ids!(main_window.caption_bar)).visible();
+        let titlebar = self.ui.widget(cx, ids!(reader_titlebar));
+        if titlebar.visible() != in_caption {
+            titlebar.set_visible(cx, in_caption);
+            self.ui.widget(cx, ids!(main_window.caption_bar)).redraw(cx);
+        }
+        let header = self.ui.widget(cx, ids!(header));
+        if header.visible() == in_caption {
+            header.set_visible(cx, !in_caption);
+            self.ui.widget(cx, ids!(page_reader)).redraw(cx);
+        }
     }
 
     fn set_reader_toolbar_visible(&mut self, cx: &mut Cx, visible: bool) {
@@ -10333,10 +10421,20 @@ impl App {
         for id in [
             id!(reader_toolbar_left_buttons),
             id!(reader_toolbar_right_buttons),
+            id!(reader_titlebar_left_buttons),
+            id!(reader_titlebar_right_buttons),
         ] {
             self.ui.widget(cx, &[id]).set_visible(cx, visible);
         }
         self.ui.widget(cx, ids!(header)).redraw(cx);
+        self.ui.widget(cx, ids!(main_window.caption_bar)).redraw(cx);
+    }
+
+    fn set_reader_title_text(&self, cx: &mut Cx, text: &str) {
+        self.ui.label(cx, ids!(title)).set_text(cx, text);
+        self.ui
+            .label(cx, ids!(titlebar_reader_title))
+            .set_text(cx, text);
     }
 
     fn apply_navigation_palette(&self, cx: &mut Cx, page: AppPage) {
@@ -10356,12 +10454,6 @@ impl App {
             self.ui.widget(cx, ids!(main_window.caption_bar)),
             palette.surface,
             palette.surface,
-        );
-        apply_reader_label_palette(
-            cx,
-            self.ui
-                .widget(cx, ids!(main_window.caption_bar.caption_label.label)),
-            palette.text,
         );
         apply_reader_label_palette(cx, self.ui.widget(cx, ids!(app_title)), palette.text);
         apply_reader_label_palette(cx, self.ui.widget(cx, ids!(db_status)), palette.muted);
@@ -10628,7 +10720,7 @@ impl App {
             .portal_list(cx, ids!(list))
             .set_first_id_and_scroll(0, 0.0);
         self.replace_notes(cx, Vec::new());
-        self.ui.label(cx, ids!(title)).set_text(
+        self.set_reader_title_text(
             cx,
             &if app_language() == AppLanguage::English {
                 format!("Loading “{}”…", book.title)
@@ -11470,6 +11562,7 @@ impl App {
 
         for id in [
             id!(title),
+            id!(titlebar_reader_title),
             id!(status),
             id!(toc_title),
             id!(note_panel_title),
@@ -11599,6 +11692,14 @@ impl App {
             id!(reader_search_btn),
             id!(reader_bookmark_btn),
             id!(reader_bookmark_filled_btn),
+            id!(titlebar_back_btn),
+            id!(titlebar_toc_btn),
+            id!(titlebar_bookmarks_btn),
+            id!(titlebar_notes_btn),
+            id!(titlebar_appearance_btn),
+            id!(titlebar_search_btn),
+            id!(titlebar_bookmark_btn),
+            id!(titlebar_bookmark_filled_btn),
         ] {
             apply_reader_button_palette_with_focus(
                 cx,
@@ -11615,6 +11716,13 @@ impl App {
             id!(reader_search_btn),
             id!(reader_bookmark_btn),
             id!(reader_bookmark_filled_btn),
+            id!(titlebar_back_btn),
+            id!(titlebar_toc_btn),
+            id!(titlebar_bookmarks_btn),
+            id!(titlebar_notes_btn),
+            id!(titlebar_search_btn),
+            id!(titlebar_bookmark_btn),
+            id!(titlebar_bookmark_filled_btn),
             id!(reader_customise_btn),
         ] {
             apply_reader_icon_palette(cx, self.ui.widget(cx, &[id]), palette.text);
@@ -12113,6 +12221,17 @@ impl App {
             .widget(cx, ids!(reader_theme_menu))
             .set_visible(cx, self.on_reader_page && self.reader_theme_open);
         self.sync_reader_panel_layout(cx);
+        if self.on_reader_page {
+            let title = CURRENT_BOOK
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|book| book.title.clone());
+            if let Some(title) = title {
+                self.set_reader_title_text(cx, &format!("《{title}》"));
+                self.refresh_bookmark_button(cx);
+            }
+        }
 
         self.refresh_shelf_projection(cx);
 
@@ -12384,6 +12503,7 @@ impl App {
         self.ui.widget(cx, ids!(title)).set_visible(cx, true);
         self.ui.widget(cx, ids!(status)).set_visible(cx, !compact);
         self.set_reader_toolbar_visible(cx, self.on_reader_page && compact);
+        self.sync_reader_toolbar_placement(cx);
 
         let safe_top = safe_area_insets.top;
         let mobile_nav_padding = Inset {
@@ -13540,6 +13660,12 @@ impl App {
         self.ui
             .widget(cx, ids!(reader_bookmark_filled_btn))
             .set_visible(cx, marked);
+        self.ui
+            .widget(cx, ids!(titlebar_bookmark_btn))
+            .set_visible(cx, !marked);
+        self.ui
+            .widget(cx, ids!(titlebar_bookmark_filled_btn))
+            .set_visible(cx, marked);
     }
 
     fn toggle_reader_bookmark(&mut self, cx: &mut Cx) {
@@ -13663,9 +13789,7 @@ impl App {
         self.reader_chapter_block_counts[idx] = chapter_blocks;
         self.reader_page_span = 0;
         self.pending_reader_pagination_layout = true;
-        self.ui
-            .label(cx, ids!(title))
-            .set_text(cx, &format!("《{}》", title));
+        self.set_reader_title_text(cx, &format!("《{}》", title));
         self.ui
             .label(cx, ids!(chapter_pos))
             .set_text(cx, &format!("{}/{}", idx + 1, total));
@@ -15556,7 +15680,7 @@ impl MatchEvent for App {
                         if *request_id != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) {
                             continue;
                         }
-                        self.ui.label(cx, ids!(title)).set_text(
+                        self.set_reader_title_text(
                             cx,
                             &if app_language() == AppLanguage::English {
                                 format!("Failed to open: {error}")
@@ -16308,7 +16432,9 @@ impl MatchEvent for App {
                 self.pending_ui_projection_after_draw = true;
             }
         }
-        if self.ui.button(cx, ids!(reader_back_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(reader_back_btn)).clicked(actions)
+            || self.ui.button(cx, ids!(titlebar_back_btn)).clicked(actions)
+        {
             self.stop_reading_timer(cx, false);
             self.activate_page(cx, AppPage::Library);
             self.refresh_shelf_projection(cx);
@@ -16317,6 +16443,10 @@ impl MatchEvent for App {
             .ui
             .button(cx, ids!(reader_appearance_btn))
             .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(titlebar_appearance_btn))
+                .clicked(actions)
         {
             self.reader_theme_open = !self.reader_theme_open;
             if self.reader_theme_open {
@@ -16338,6 +16468,14 @@ impl MatchEvent for App {
             || self
                 .ui
                 .button(cx, ids!(reader_bookmark_filled_btn))
+                .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(titlebar_bookmark_btn))
+                .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(titlebar_bookmark_filled_btn))
                 .clicked(actions)
         {
             self.toggle_reader_bookmark(cx);
@@ -17080,7 +17218,9 @@ impl MatchEvent for App {
                 spawn_mark_known(lemma, book_id);
             }
         }
-        if self.ui.button(cx, ids!(toc_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(toc_btn)).clicked(actions)
+            || self.ui.button(cx, ids!(titlebar_toc_btn)).clicked(actions)
+        {
             self.toc_open = !self.toc_open;
             self.pending_toc_first_draw = self.toc_open;
             if self.toc_open {
@@ -17096,7 +17236,12 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(toc_close_btn)).clicked(actions) {
             self.close_reader_info_popup(cx);
         }
-        if self.ui.button(cx, ids!(notes_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(notes_btn)).clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(titlebar_notes_btn))
+                .clicked(actions)
+        {
             self.note_open = !self.note_open;
             if self.note_open {
                 self.refresh_reader_highlights(cx);
@@ -17119,6 +17264,10 @@ impl MatchEvent for App {
             .ui
             .button(cx, ids!(reader_bookmarks_btn))
             .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(titlebar_bookmarks_btn))
+                .clicked(actions)
         {
             self.bookmarks_open = !self.bookmarks_open;
             if self.bookmarks_open {
@@ -17139,7 +17288,12 @@ impl MatchEvent for App {
             self.bookmarks_open = false;
             self.sync_reader_panel_layout(cx);
         }
-        if self.ui.button(cx, ids!(reader_search_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(reader_search_btn)).clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(titlebar_search_btn))
+                .clicked(actions)
+        {
             self.search_open = !self.search_open;
             if self.search_open {
                 self.toc_open = false;
@@ -17765,17 +17919,29 @@ impl AppMain for App {
                 };
                 let panel = self.ui.widget(cx, &[panel_id]).area().clipped_rect(cx);
                 if !panel.contains(abs) {
-                    let header = self.ui.widget(cx, ids!(header)).area().clipped_rect(cx);
+                    let toolbar_id = if self.ui.widget(cx, ids!(reader_titlebar)).visible() {
+                        id!(reader_titlebar)
+                    } else {
+                        id!(header)
+                    };
+                    let header = self.ui.widget(cx, &[toolbar_id]).area().clipped_rect(cx);
                     let info_trigger = header.contains(abs)
-                        && [id!(toc_btn), id!(reader_bookmarks_btn), id!(notes_btn)]
-                            .into_iter()
-                            .any(|id| {
-                                self.ui
-                                    .widget(cx, &[id])
-                                    .area()
-                                    .clipped_rect(cx)
-                                    .contains(abs)
-                            });
+                        && [
+                            id!(toc_btn),
+                            id!(reader_bookmarks_btn),
+                            id!(notes_btn),
+                            id!(titlebar_toc_btn),
+                            id!(titlebar_bookmarks_btn),
+                            id!(titlebar_notes_btn),
+                        ]
+                        .into_iter()
+                        .any(|id| {
+                            self.ui
+                                .widget(cx, &[id])
+                                .area()
+                                .clipped_rect(cx)
+                                .contains(abs)
+                        });
                     if !info_trigger {
                         self.close_reader_info_popup(cx);
                         if !header.contains(abs) {
@@ -17792,12 +17958,16 @@ impl AppMain for App {
                     .widget(cx, ids!(reader_theme_menu))
                     .area()
                     .clipped_rect(cx);
-                let trigger = self
-                    .ui
-                    .widget(cx, ids!(reader_appearance_btn))
-                    .area()
-                    .clipped_rect(cx);
-                if !menu.contains(abs) && !trigger.contains(abs) {
+                let trigger_hit = [id!(reader_appearance_btn), id!(titlebar_appearance_btn)]
+                    .into_iter()
+                    .any(|id| {
+                        self.ui
+                            .widget(cx, &[id])
+                            .area()
+                            .clipped_rect(cx)
+                            .contains(abs)
+                    });
+                if !menu.contains(abs) && !trigger_hit {
                     self.reader_theme_open = false;
                     self.ui
                         .widget(cx, ids!(reader_theme_menu))
@@ -18002,7 +18172,12 @@ impl AppMain for App {
             Event::VirtualKeyboard(event) => self.handle_virtual_keyboard(cx, event),
             Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
             Event::MouseMove(event) if self.on_reader_page && !self.compact_layout => {
-                let header = self.ui.widget(cx, ids!(header)).area().clipped_rect(cx);
+                let toolbar_id = if self.ui.widget(cx, ids!(reader_titlebar)).visible() {
+                    id!(reader_titlebar)
+                } else {
+                    id!(header)
+                };
+                let header = self.ui.widget(cx, &[toolbar_id]).area().clipped_rect(cx);
                 let visible = header.contains(event.abs) || self.reader_theme_open;
                 if visible != self.reader_toolbar_visible {
                     self.set_reader_toolbar_visible(cx, visible);
@@ -18034,6 +18209,31 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if matches!(event, Event::Draw(_) | Event::WindowGeomChange(_)) {
+            self.sync_reader_toolbar_placement(cx);
+        }
+        if let Event::WindowDragQuery(query) = event {
+            // Makepad treats the whole caption bar as a window drag target.
+            // Give the reader controls their own pointer area after Window's
+            // default caption response has been recorded.
+            if self.on_reader_page
+                && self.ui.widget(cx, ids!(reader_titlebar)).visible()
+                && [
+                    id!(reader_titlebar_left_buttons),
+                    id!(reader_titlebar_right_buttons),
+                ]
+                .into_iter()
+                .any(|id| {
+                    self.ui
+                        .widget(cx, &[id])
+                        .area()
+                        .clipped_rect(cx)
+                        .contains(query.abs)
+                })
+            {
+                query.response.set(WindowDragQueryResponse::Client);
+            }
+        }
         if matches!(event, Event::Draw(_)) {
             self.finish_toc_first_draw(cx);
             if self.on_reader_page {
