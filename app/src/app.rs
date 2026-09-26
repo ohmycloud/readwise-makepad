@@ -64,6 +64,23 @@ const READER_SWIPE_MAX_DURATION: f64 = 0.9;
 const READER_SWIPE_AXIS_RATIO: f64 = 1.35;
 const READER_SWIPE_VERTICAL_CANCEL: f64 = 28.0;
 
+fn current_clipped_rect(cx: &Cx, area: Area) -> Rect {
+    if !area.is_valid(cx) {
+        return Rect::default();
+    }
+    // A ScriptReapply can clear a draw list before its widgets receive fresh
+    // Areas. Makepad's Area::is_valid checks the redraw ID, but not rect_id.
+    if let Area::Rect(rect) = area {
+        let Some(draw_list) = cx.draw_lists.checked_index(rect.draw_list_id) else {
+            return Rect::default();
+        };
+        if rect.rect_id >= draw_list.rect_areas.len() {
+            return Rect::default();
+        }
+    }
+    area.clipped_rect(cx)
+}
+
 fn uses_compact_layout_for_platform(size: DVec2, is_mobile: bool) -> bool {
     is_mobile
         && size.x > 0.0
@@ -17996,7 +18013,8 @@ impl AppMain for App {
         };
         let card_captures_pointer = if self.word_card_anchor.is_some() {
             if let Some(abs) = word_card_press {
-                let card_rect = self.ui.widget(cx, ids!(word_card)).area().clipped_rect(cx);
+                let card_rect =
+                    current_clipped_rect(cx, self.ui.widget(cx, ids!(word_card)).area());
                 if !card_rect.contains(abs) {
                     self.close_word_card(cx);
                     return;
@@ -18022,11 +18040,8 @@ impl AppMain for App {
                 _ => None,
             };
             if let Some(abs) = press {
-                let menu = self
-                    .ui
-                    .widget(cx, ids!(library_action_menu))
-                    .area()
-                    .clipped_rect(cx);
+                let menu =
+                    current_clipped_rect(cx, self.ui.widget(cx, ids!(library_action_menu)).area());
                 if !menu.contains(abs) {
                     self.close_library_action_menu(cx);
                     return;
@@ -18068,14 +18083,14 @@ impl AppMain for App {
                 } else {
                     id!(note_panel)
                 };
-                let panel = self.ui.widget(cx, &[panel_id]).area().clipped_rect(cx);
+                let panel = current_clipped_rect(cx, self.ui.widget(cx, &[panel_id]).area());
                 if !panel.contains(abs) {
                     let toolbar_id = if self.ui.widget(cx, ids!(reader_titlebar)).visible() {
                         id!(reader_titlebar)
                     } else {
                         id!(header)
                     };
-                    let header = self.ui.widget(cx, &[toolbar_id]).area().clipped_rect(cx);
+                    let header = current_clipped_rect(cx, self.ui.widget(cx, &[toolbar_id]).area());
                     let info_trigger = header.contains(abs)
                         && [
                             id!(toc_btn),
@@ -18089,11 +18104,7 @@ impl AppMain for App {
                         ]
                         .into_iter()
                         .any(|id| {
-                            self.ui
-                                .widget(cx, &[id])
-                                .area()
-                                .clipped_rect(cx)
-                                .contains(abs)
+                            current_clipped_rect(cx, self.ui.widget(cx, &[id]).area()).contains(abs)
                         });
                     if !info_trigger {
                         self.close_reader_info_popup(cx);
@@ -18106,19 +18117,12 @@ impl AppMain for App {
         }
         if self.reader_theme_open {
             if let Some(abs) = pointer_start {
-                let menu = self
-                    .ui
-                    .widget(cx, ids!(reader_theme_menu))
-                    .area()
-                    .clipped_rect(cx);
+                let menu =
+                    current_clipped_rect(cx, self.ui.widget(cx, ids!(reader_theme_menu)).area());
                 let trigger_hit = [id!(reader_appearance_btn), id!(titlebar_appearance_btn)]
                     .into_iter()
                     .any(|id| {
-                        self.ui
-                            .widget(cx, &[id])
-                            .area()
-                            .clipped_rect(cx)
-                            .contains(abs)
+                        current_clipped_rect(cx, self.ui.widget(cx, &[id]).area()).contains(abs)
                     });
                 if !menu.contains(abs) && !trigger_hit {
                     self.reader_theme_open = false;
@@ -18140,12 +18144,7 @@ impl AppMain for App {
             let popup_captures_pointer = selection_popup_captures_pointer(
                 selection_popup_open,
                 selection_exists,
-                || {
-                    self.ui
-                        .widget(cx, ids!(selection_popup))
-                        .area()
-                        .clipped_rect(cx)
-                },
+                || current_clipped_rect(cx, self.ui.widget(cx, ids!(selection_popup)).area()),
                 abs,
             );
             SELECTION_POPUP_POINTER.store(
@@ -18325,13 +18324,21 @@ impl AppMain for App {
             Event::VirtualKeyboard(event) => self.handle_virtual_keyboard(cx, event),
             Event::KeyDown(ke) => self.handle_reader_key(cx, ke),
             Event::MouseMove(event) if self.on_reader_page && !self.compact_layout => {
-                let toolbar_id = if self.ui.widget(cx, ids!(reader_titlebar)).visible() {
-                    id!(reader_titlebar)
+                let (toolbar_id, toolbar_height) =
+                    if self.ui.widget(cx, ids!(reader_titlebar)).visible() {
+                        (id!(reader_titlebar), 36.0)
+                    } else {
+                        (id!(header), 54.0)
+                    };
+                let header = current_clipped_rect(cx, self.ui.widget(cx, &[toolbar_id]).area());
+                // The caption view can retain a stale Area after a theme
+                // reapply. Its top strip is still the toolbar hover target.
+                let over_header = if header.size.y > 0.0 {
+                    header.contains(event.abs)
                 } else {
-                    id!(header)
+                    event.abs.y >= 0.0 && event.abs.y <= toolbar_height
                 };
-                let header = self.ui.widget(cx, &[toolbar_id]).area().clipped_rect(cx);
-                let visible = header.contains(event.abs)
+                let visible = over_header
                     || self.reader_theme_open
                     || self.toc_open
                     || self.bookmarks_open
@@ -18378,14 +18385,11 @@ impl AppMain for App {
             if self.on_reader_page
                 && self.ui.widget(cx, ids!(reader_titlebar)).visible()
                 && [id!(reader_titlebar_left), id!(reader_titlebar_right)]
-                .into_iter()
-                .any(|id| {
-                    self.ui
-                        .widget(cx, &[id])
-                        .area()
-                        .clipped_rect(cx)
-                        .contains(query.abs)
-                })
+                    .into_iter()
+                    .any(|id| {
+                        current_clipped_rect(cx, self.ui.widget(cx, &[id]).area())
+                            .contains(query.abs)
+                    })
             {
                 query.response.set(WindowDragQueryResponse::Client);
             }
