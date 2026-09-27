@@ -258,6 +258,7 @@ impl Widget for RubyWord {
                 w: 1.0,
             });
         }
+        let word_source = tf.text_len();
         tf.areas_tracker.push_tracker();
         if let Some((r, g, b, a)) = appearance.word_background {
             draw_word_with_background(
@@ -336,6 +337,21 @@ impl Widget for RubyWord {
                     .unwrap_or(self.draw_gloss.text_style.font_size as f64 * 1.4);
                 let x = rect.pos.x + (rect.size.x - gloss_w) * 0.5;
                 let y = rect.pos.y - gloss_box_h - self.gloss_gap as f64;
+                // The gloss and its word form one indivisible visual row.
+                // A page cut through this span would split the annotation
+                // from the word even if the ordinary TextFlow rows fit.
+                crate::reader_hit::capture_overlay(
+                    cx,
+                    first,
+                    Rect {
+                        pos: dvec2(x.min(rect.pos.x), y),
+                        size: dvec2(
+                            (x + gloss_w).max(rect.pos.x + rect.size.x) - x.min(rect.pos.x),
+                            rect.pos.y + rect.size.y - y,
+                        ),
+                    },
+                    word_source,
+                );
                 if let Some((r, g, b, a)) = appearance.background {
                     self.draw_fill.color = Vec4f {
                         x: r,

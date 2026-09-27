@@ -579,9 +579,11 @@ fn highlight_range_in_block(
 mod table_block_tests {
     use super::{
         choose_reader_hit_index, is_table_block, normalize_rich_selection_rects,
-        ordered_selection_range, reader_drag_moves_forward, reader_geometry_capture_policy,
-        reader_geometry_width_is_stable, reader_markup_available_width, selection_range_in_block,
-        supports_unified_reader_hit_test, visual_selection_row_bounds,
+        ordered_selection_range, reader_block_visual_height, reader_drag_moves_forward,
+        reader_fallback_source_index, reader_geometry_capture_policy,
+        reader_geometry_width_is_stable, reader_markup_available_width, reader_pagination_rows,
+        reader_painted_page_cuts, selection_range_in_block, supports_unified_reader_hit_test,
+        visual_selection_row_bounds,
     };
     use makepad_widgets::{dvec2, Rect};
 
@@ -736,6 +738,177 @@ mod table_block_tests {
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[0].pos.y + rects[0].size.y, rects[1].pos.y);
         assert!(rects[0].pos.y + rects[0].size.y <= 37.0);
+    }
+
+    #[test]
+    fn page_cuts_use_raw_row_gaps_instead_of_selection_strip_boundaries() {
+        let rects = [
+            Rect {
+                pos: dvec2(20.0, 20.0),
+                size: dvec2(80.0, 20.0),
+            },
+            Rect {
+                pos: dvec2(10.0, 34.0),
+                size: dvec2(90.0, 20.0),
+            },
+            Rect {
+                pos: dvec2(10.0, 68.0),
+                size: dvec2(90.0, 20.0),
+            },
+        ];
+        // The first two visual rows overlap, so a cut at the selection
+        // strip's midpoint would remove part of a letter on either page.
+        let cuts = reader_pagination_rows(&rects);
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0].0, 54.0);
+        assert_eq!(cuts[0].1, dvec2(10.5, 78.0));
+    }
+
+    #[test]
+    fn padded_selection_rows_still_produce_a_complete_line_page_cut() {
+        use crate::reader_columns::{compose_page, BlockMetrics, LineBoundary, PageAnchor};
+
+        let rects = [
+            Rect {
+                pos: dvec2(10.0, 10.0),
+                size: dvec2(90.0, 20.0),
+            },
+            Rect {
+                pos: dvec2(10.0, 26.0),
+                size: dvec2(90.0, 20.0),
+            },
+        ];
+        let cuts = reader_pagination_rows(&rects);
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0].0, 28.0);
+        let metrics = [Some(BlockMetrics {
+            height: 50.0,
+            boundaries: vec![LineBoundary {
+                y: cuts[0].0,
+                source: 10,
+            }],
+            keep_together: false,
+        })];
+        let first = compose_page(&metrics, PageAnchor::default(), 30.0).unwrap();
+        assert_eq!(first.next.y, 28.0);
+        let second = compose_page(&metrics, first.next, 30.0).unwrap();
+        assert_eq!(second.fragments[0].from, 28.0);
+        assert_eq!(second.fragments[0].to, 50.0);
+    }
+
+    #[test]
+    fn missing_text_map_keeps_monotone_line_sources() {
+        assert_eq!(reader_fallback_source_index(0, 100, 80), 0);
+        assert_eq!(reader_fallback_source_index(50, 100, 80), 40);
+        assert_eq!(reader_fallback_source_index(100, 100, 80), 80);
+    }
+
+    #[test]
+    fn painted_page_cuts_follow_shifted_glyph_rows() {
+        let rows = [
+            (
+                Rect {
+                    pos: dvec2(10.0, 20.0),
+                    size: dvec2(40.0, 12.0),
+                },
+                0,
+            ),
+            (
+                Rect {
+                    pos: dvec2(50.0, 20.0),
+                    size: dvec2(40.0, 12.0),
+                },
+                4,
+            ),
+            (
+                Rect {
+                    pos: dvec2(10.0, 46.0),
+                    size: dvec2(80.0, 12.0),
+                },
+                10,
+            ),
+        ];
+        assert_eq!(reader_painted_page_cuts(&rows), vec![(34.0, 10)]);
+    }
+
+    #[test]
+    fn last_row_moves_whole_when_ink_reaches_the_page_edge() {
+        use crate::reader_columns::{compose_page, BlockMetrics, LineBoundary, PageAnchor};
+
+        // Measured from the two last painted lines of 夏帆 191/192. The
+        // layout row box had suggested 156.3, which bisected the last ink.
+        let rows = [
+            (
+                Rect {
+                    pos: dvec2(4.3, 127.1767),
+                    size: dvec2(478.6, 13.7067),
+                },
+                541,
+            ),
+            (
+                Rect {
+                    pos: dvec2(3.09, 151.1533),
+                    size: dvec2(391.76, 13.4667),
+                },
+                649,
+            ),
+        ];
+        let cut = reader_painted_page_cuts(&rows)[0].0;
+        assert!(cut > 140.8834 && cut < 151.1533);
+        let metrics = [Some(BlockMetrics {
+            height: 181.7,
+            boundaries: vec![LineBoundary {
+                y: cut,
+                source: 649,
+            }],
+            keep_together: false,
+        })];
+        let first = compose_page(&metrics, PageAnchor::default(), 166.65).unwrap();
+        assert_eq!(first.next.y, cut);
+    }
+
+    #[test]
+    fn page_cut_never_crosses_a_later_run_on_an_earlier_visual_row() {
+        // TextFlow draws a wrapping run before the next inline run. The
+        // latter can extend below an apparent gap between the first run's
+        // rows, even though it is still part of the upper visual row.
+        let rows = [
+            (
+                Rect {
+                    pos: dvec2(10.0, 20.0),
+                    size: dvec2(40.0, 12.0),
+                },
+                0,
+            ),
+            (
+                Rect {
+                    pos: dvec2(10.0, 46.0),
+                    size: dvec2(80.0, 12.0),
+                },
+                10,
+            ),
+            (
+                Rect {
+                    pos: dvec2(50.0, 20.0),
+                    size: dvec2(40.0, 30.0),
+                },
+                4,
+            ),
+            (
+                Rect {
+                    pos: dvec2(10.0, 72.0),
+                    size: dvec2(80.0, 12.0),
+                },
+                20,
+            ),
+        ];
+        assert_eq!(reader_painted_page_cuts(&rows), vec![(60.0, 20)]);
+    }
+
+    #[test]
+    fn paragraph_height_includes_the_last_painted_row() {
+        assert_eq!(reader_block_visual_height(124.7, 127.9), 128.9);
+        assert_eq!(reader_block_visual_height(124.7, 120.0), 124.7);
     }
 
     #[test]
@@ -7375,13 +7548,9 @@ struct ReaderSelectionLine {
     max_height: f64,
 }
 
-/// Merge TextFlow's per-run selection rectangles into visual lines.
-///
-/// Different rich-text runs can report slightly different vertical origins
-/// (most visibly RubyWord). Source-order plus horizontal continuation tells us
-/// that they are on the same visual line. The line is then bottom-aligned and
-/// painted as one continuous strip, also filling spaces between adjacent runs.
-fn normalize_rich_selection_rects(rects: &[Rect]) -> Vec<Rect> {
+/// Group TextFlow's per-run rectangles without changing their vertical bounds.
+/// Raised ruby and other rich runs can extend above the ordinary text on a row.
+fn rich_selection_lines(rects: &[Rect]) -> Vec<ReaderSelectionLine> {
     let mut lines: Vec<ReaderSelectionLine> = Vec::new();
     for rect in rects
         .iter()
@@ -7413,6 +7582,15 @@ fn normalize_rich_selection_rects(rects: &[Rect]) -> Vec<Rect> {
         });
     }
 
+    lines
+}
+
+/// Merge TextFlow's per-run selection rectangles into visual lines.
+///
+/// The painted selection is bottom-aligned and fills spaces between runs and
+/// rows. These adjusted rectangles are unsuitable as page clipping boundaries.
+fn normalize_rich_selection_rects(rects: &[Rect]) -> Vec<Rect> {
+    let mut lines = rich_selection_lines(rects);
     // A ruby/italic fragment may be vertically raised, while neighboring prose
     // gives the real baseline. Bottom-align every fragment merged into that line.
     for line in &mut lines {
@@ -7444,6 +7622,109 @@ fn normalize_rich_selection_rects(rects: &[Rect]) -> Vec<Rect> {
         });
     }
     out
+}
+
+/// Return cuts between the actual TextFlow row boxes. TextFlow adds 2px above
+/// and below every selection rectangle; retaining that highlight padding can
+/// make adjacent rows appear to overlap and leave pagination with no cuts.
+fn reader_pagination_rows(rects: &[Rect]) -> Vec<(f64, DVec2)> {
+    const SELECTION_PADDING: f64 = 2.0;
+    let lines = reader_visual_row_bands(
+        rects.iter().copied().map(|rect| (rect, 0)),
+        SELECTION_PADDING,
+    );
+    lines
+        .windows(2)
+        .filter_map(|pair| {
+            let upper = pair[0].0;
+            let lower = pair[1].0;
+            let gap = lower.top - upper.bottom;
+            (gap >= 0.0).then(|| {
+                (
+                    // Leave most of the gap with the following row so its
+                    // raised ruby label stays on the same page as its word.
+                    upper.bottom + gap.min(4.0) * 0.5,
+                    dvec2(
+                        lower.left + (lower.right - lower.left).min(1.0) * 0.5,
+                        lower.top + (lower.bottom - lower.top) * 0.5,
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+/// TextFlow emits runs in document order. A run can paint several rows before
+/// the next run returns to an earlier visual row, so pagination must union
+/// their vertical ink bands before choosing any cut.
+fn reader_visual_row_bands(
+    rows: impl Iterator<Item = (Rect, usize)>,
+    padding: f64,
+) -> Vec<(ReaderSelectionLine, usize)> {
+    let mut rows: Vec<_> = rows
+        .filter_map(|(rect, source)| {
+            let top = rect.pos.y + padding;
+            let bottom = rect.pos.y + rect.size.y - padding;
+            (rect.size.x > 0.0 && bottom > top).then_some((rect, source, top, bottom))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.0.pos.x.total_cmp(&b.0.pos.x)));
+    let mut lines: Vec<(ReaderSelectionLine, usize)> = Vec::new();
+    for (rect, source, top, bottom) in rows {
+        let right = rect.pos.x + rect.size.x;
+        if let Some((line, first_source)) = lines.last_mut() {
+            if top < line.bottom - 0.5 {
+                line.left = line.left.min(rect.pos.x);
+                line.right = line.right.max(right);
+                line.top = line.top.min(top);
+                line.bottom = line.bottom.max(bottom);
+                line.max_height = line.max_height.max(bottom - top);
+                *first_source = (*first_source).min(source);
+                continue;
+            }
+        }
+        lines.push((
+            ReaderSelectionLine {
+                left: rect.pos.x,
+                right,
+                top,
+                bottom,
+                max_height: bottom - top,
+            },
+            source,
+        ));
+    }
+    lines
+}
+
+fn reader_painted_page_cuts(rows: &[(Rect, usize)]) -> Vec<(f64, usize)> {
+    let lines = reader_visual_row_bands(rows.iter().copied(), 0.0);
+    lines
+        .windows(2)
+        .filter_map(|pair| {
+            let (upper, _) = pair[0];
+            let (lower, source) = pair[1];
+            let gap = lower.top - upper.bottom;
+            // Ruby is painted above the word's row box; keep that space on the
+            // next page rather than cutting halfway through the line gap.
+            (gap >= 0.0).then_some((upper.bottom + gap.min(4.0) * 0.5, source))
+        })
+        .collect()
+}
+
+fn reader_block_visual_height(layout_height: f64, painted_bottom: f64) -> f64 {
+    if painted_bottom > layout_height {
+        painted_bottom + 1.0
+    } else {
+        layout_height
+    }
+}
+
+fn reader_fallback_source_index(native: usize, native_len: usize, source_len: usize) -> usize {
+    if native_len == 0 {
+        return 0;
+    }
+    ((native.min(native_len) as f64 / native_len as f64) * source_len as f64) as usize
 }
 
 fn rects_relative_to(rects: &[Rect], origin: DVec2) -> Vec<Rect> {
@@ -8865,7 +9146,7 @@ impl ChapterList {
                 inner.text_flow.draw_selection.begin_many_instances(cx);
             };
         }
-        crate::reader_hit::begin_capture();
+        crate::reader_hit::begin_capture(measure);
         crate::reader_inline_code::begin_capture(native_probe);
         let page_height = if self.pager.active {
             self.pager.layout.height
@@ -8880,7 +9161,19 @@ impl ChapterList {
         }
         let item_rect = item.area().rect(cx);
         let item_margin = item.walk(cx).margin;
-        let runs = crate::reader_hit::end_capture(cx, item_rect.pos);
+        let (runs, overlays) = crate::reader_hit::end_capture(cx, item_rect.pos);
+        let mut painted_bottom = 0.0_f64;
+        let painted_cuts = if measure && !runs.is_empty() {
+            let mut painted_rows = crate::reader_hit::painted_rows(&runs);
+            painted_rows.extend(overlays);
+            painted_bottom = painted_rows
+                .iter()
+                .map(|(rect, _)| rect.pos.y + rect.size.y)
+                .fold(0.0_f64, f64::max);
+            reader_painted_page_cuts(&painted_rows)
+        } else {
+            Vec::new()
+        };
         let mut mapping_stable = true;
         if code_text.is_none() {
             let html = item.widget(cx, ids!(para_html));
@@ -8942,9 +9235,16 @@ impl ChapterList {
                 let mut raw = captured_draw_color_rects(cx, &inner.text_flow.draw_selection);
                 crate::reader_inline_code::correct_rects(cx, &mut raw);
                 inner.text_flow.draw_selection.end_many_instances(cx);
+                if measure {
+                    painted_bottom = painted_bottom.max(
+                        raw.iter()
+                            .map(|rect| rect.pos.y + rect.size.y - item_rect.pos.y - 2.0)
+                            .fold(0.0_f64, f64::max),
+                    );
+                }
                 let normalized = normalize_rich_selection_rects(&raw);
                 if measure {
-                    page_lines = normalized.clone();
+                    page_lines = reader_pagination_rows(&raw);
                 }
                 let (draw_current_now, cache_for_reuse) = reader_geometry_capture_policy(
                     probe_range,
@@ -9039,13 +9339,28 @@ impl ChapterList {
             };
         }
         if !is_table && code_text.is_none() {
-            for row in page_lines.iter().skip(1) {
-                let point = row.pos + dvec2(0.5, row.size.y * 0.5);
-                if let Some(native) = item.selection_point_to_char_index(cx, point) {
-                    if let Some(map) = self.text_map(item_id, para) {
+            let native_len = item.selection_text_len();
+            if !painted_cuts.is_empty() {
+                for (cut_y, native) in painted_cuts {
+                    let source = self.text_map(item_id, para).map_or_else(
+                        || reader_fallback_source_index(native, native_len, source_len),
+                        |map| map.source_index(native),
+                    );
+                    boundaries.push(crate::reader_columns::LineBoundary {
+                        y: (cut_y + item_margin.top).max(0.0),
+                        source,
+                    });
+                }
+            } else {
+                for (cut_y, point) in page_lines {
+                    if let Some(native) = item.selection_point_to_char_index(cx, point) {
+                        let source = self.text_map(item_id, para).map_or_else(
+                            || reader_fallback_source_index(native, native_len, source_len),
+                            |map| map.source_index(native),
+                        );
                         boundaries.push(crate::reader_columns::LineBoundary {
-                            y: (row.pos.y - item_rect.pos.y + item_margin.top).max(0.0),
-                            source: map.source_index(native),
+                            y: (cut_y - item_rect.pos.y + item_margin.top).max(0.0),
+                            source,
                         });
                     }
                 }
@@ -9057,7 +9372,9 @@ impl ChapterList {
         boundaries.sort_by(|a, b| a.y.total_cmp(&b.y));
         boundaries.dedup_by(|a, b| (a.y - b.y).abs() < 0.5);
         crate::reader_columns::BlockMetrics {
-            height: item_rect.size.y + item_margin.top + item_margin.bottom,
+            height: reader_block_visual_height(item_rect.size.y, painted_bottom)
+                + item_margin.top
+                + item_margin.bottom,
             boundaries,
             keep_together: is_table || code_text.is_some() || para.contains("<img"),
         }
@@ -11313,11 +11630,14 @@ impl App {
         font_choice.set_selected_item(cx, font.index());
         self.ui
             .drop_down(cx, ids!(reader_customise_columns_choice))
-            .set_selected_item(cx, match columns {
-                ReaderColumns::One => 0,
-                ReaderColumns::Two => 1,
-                ReaderColumns::Auto => 2,
-            });
+            .set_selected_item(
+                cx,
+                match columns {
+                    ReaderColumns::One => 0,
+                    ReaderColumns::Two => 1,
+                    ReaderColumns::Auto => 2,
+                },
+            );
         for (id, selected) in [
             (
                 id!(reader_customise_gloss_color_green),
@@ -11718,10 +12038,7 @@ impl App {
                 palette.border,
             );
         }
-        for id in [
-            id!(selection_popup),
-            id!(library_action_menu),
-        ] {
+        for id in [id!(selection_popup), id!(library_action_menu)] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),

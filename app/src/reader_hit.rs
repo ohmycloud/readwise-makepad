@@ -3,7 +3,10 @@
 //! another run on that visual row must not be hidden behind that empty box.
 use makepad_widgets::makepad_draw::text::layouter::LaidoutText;
 use makepad_widgets::*;
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 #[derive(Clone)]
 pub struct HitRun {
@@ -14,19 +17,27 @@ pub struct HitRun {
     // Inline code may be explicitly moved to a new line by TextFlow. Each
     // painted row then has its own origin instead of the pre-draw run origin.
     row: Option<usize>,
+    /// Resolved TextFlow row areas after Makepad's per-row alignment.
+    drawn_rows: Vec<(usize, Rect)>,
 }
 
 struct PendingRun {
     run: HitRun,
     painted_row: Option<(Area, Inset)>,
+    row_areas: Vec<(Area, DVec2)>,
+    ink_rows: Vec<Option<Rect>>,
 }
 
 thread_local! {
     static RUNS: RefCell<Option<Vec<PendingRun>>> = const { RefCell::new(None) };
+    static OVERLAYS: RefCell<Option<Vec<(Area, DVec2, Rect, usize)>>> = const { RefCell::new(None) };
+    static CAPTURE_INK: Cell<bool> = const { Cell::new(false) };
 }
 
-pub fn begin_capture() {
+pub fn begin_capture(measure: bool) {
     RUNS.with(|runs| *runs.borrow_mut() = Some(Vec::new()));
+    OVERLAYS.with(|overlays| *overlays.borrow_mut() = Some(Vec::new()));
+    CAPTURE_INK.with(|capture| capture.set(measure));
 }
 
 pub fn is_capturing() -> bool {
@@ -35,13 +46,51 @@ pub fn is_capturing() -> bool {
 
 pub fn cancel_capture() {
     RUNS.with(|runs| *runs.borrow_mut() = None);
+    OVERLAYS.with(|overlays| *overlays.borrow_mut() = None);
+    CAPTURE_INK.with(|capture| capture.set(false));
 }
 
-pub fn end_capture(cx: &Cx, origin: DVec2) -> Vec<HitRun> {
-    RUNS.with(|runs| runs.borrow_mut().take().unwrap_or_default())
+pub fn capture_overlay(cx: &Cx, anchor: Area, rect: Rect, source: usize) {
+    OVERLAYS.with(|overlays| {
+        if let Some(overlays) = overlays.borrow_mut().as_mut() {
+            overlays.push((anchor, anchor.rect(cx).pos, rect, source));
+        }
+    });
+}
+
+pub fn end_capture(cx: &Cx, origin: DVec2) -> (Vec<HitRun>, Vec<(Rect, usize)>) {
+    CAPTURE_INK.with(|capture| capture.set(false));
+    let runs = RUNS
+        .with(|runs| runs.borrow_mut().take().unwrap_or_default())
         .into_iter()
         .filter_map(|pending| {
             let mut run = pending.run;
+            if pending.ink_rows.len() == run.layout.rows.len() {
+                run.drawn_rows = pending
+                    .ink_rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, ink)| {
+                        let mut rect = (*ink)?;
+                        if let Some((area, original_pos)) = pending.row_areas.get(index) {
+                            rect.pos += area.rect(cx).pos - *original_pos;
+                        }
+                        rect.pos -= origin;
+                        Some((index, rect))
+                    })
+                    .collect();
+            } else if pending.row_areas.len() == run.layout.rows.len() {
+                run.drawn_rows = pending
+                    .row_areas
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (area, _))| {
+                        let mut rect = area.rect(cx);
+                        rect.pos -= origin;
+                        (index, rect)
+                    })
+                    .collect();
+            }
             if let Some((area, padding)) = pending.painted_row {
                 // Resolve after parent row alignment, just like inline-code
                 // highlight geometry. No Area survives in the hit cache.
@@ -52,9 +101,66 @@ pub fn end_capture(cx: &Cx, origin: DVec2) -> Vec<HitRun> {
                         first.origin_in_lpxs.x as f64 * run.scale,
                         (row.origin_in_lpxs.y - row.ascender_in_lpxs) as f64 * run.scale,
                     );
+                let mut rect = area.rect(cx);
+                rect.pos += padding.left_top() - origin;
+                rect.size -= padding.size();
+                run.drawn_rows.push((run.row?, rect));
             }
             run.origin -= origin;
             Some(run)
+        })
+        .collect();
+    let overlays = OVERLAYS
+        .with(|overlays| overlays.borrow_mut().take().unwrap_or_default())
+        .into_iter()
+        .map(|(anchor, original_pos, mut rect, source)| {
+            rect.pos += anchor.rect(cx).pos - original_pos - origin;
+            (rect, source)
+        })
+        .collect();
+    (runs, overlays)
+}
+
+/// Visible glyph bounds after row alignment. TextFlow's tracked row area is a
+/// line box: some fonts paint their glyphs well above that box, so its gaps
+/// are not necessarily safe page cuts.
+pub fn painted_rows(runs: &[HitRun]) -> Vec<(Rect, usize)> {
+    runs.iter()
+        .flat_map(|run| {
+            if !run.drawn_rows.is_empty() {
+                return run
+                    .drawn_rows
+                    .iter()
+                    .filter_map(|(index, rect)| {
+                        let row = run.layout.rows.get(*index)?;
+                        (!row.glyphs.is_empty())
+                            .then_some((*rect, run.start + row.text.start_in_parent()))
+                    })
+                    .collect::<Vec<_>>();
+            }
+            run.layout
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| {
+                    if run.row.is_some_and(|painted_row| painted_row != index) {
+                        return None;
+                    }
+                    let first = row.glyphs.first()?;
+                    let left = run.origin.x + first.origin_in_lpxs.x as f64 * run.scale;
+                    let right = run.origin.x + row.width_in_lpxs as f64 * run.scale;
+                    let baseline = run.origin.y + row.origin_in_lpxs.y as f64 * run.scale;
+                    let top = baseline - row.ascender_in_lpxs as f64 * run.scale;
+                    let bottom = baseline - row.descender_in_lpxs as f64 * run.scale;
+                    Some((
+                        Rect {
+                            pos: dvec2(left, top),
+                            size: dvec2((right - left).max(0.0), (bottom - top).max(0.0)),
+                        },
+                        run.start + row.text.start_in_parent(),
+                    ))
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -81,8 +187,11 @@ pub fn capture_code_rows(
                         scale: scale as f64,
                         start,
                         row: Some(row),
+                        drawn_rows: Vec::new(),
                     },
                     painted_row: Some((area, padding)),
+                    row_areas: Vec::new(),
+                    ink_rows: Vec::new(),
                 });
             }
         }
@@ -98,7 +207,17 @@ pub fn draw_text(tf: &mut TextFlow, cx: &mut Cx2d, text: &str) {
     let row_height = cx.turtle().next_row_offset() as f32;
     let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
     let start = tf.text_len();
+    let area_start = tf.areas_tracker.areas.len();
+    let capture_ink = capture && CAPTURE_INK.with(Cell::get);
+    if capture_ink {
+        tf.draw_text.captured_ink_rows = Some(Vec::new());
+    }
     tf.draw_text(cx, text);
+    let ink_rows = if capture_ink {
+        tf.draw_text.captured_ink_rows.take().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if !capture || tf.text_len() == start {
         return;
     }
@@ -120,6 +239,10 @@ pub fn draw_text(tf: &mut TextFlow, cx: &mut Cx2d, text: &str) {
         .and_then(|row| row.glyphs.first())
         .map(|glyph| glyph.font_size_in_lpxs * dt.temp_y_shift)
         .unwrap_or(0.0);
+    let row_areas = tf.areas_tracker.areas[area_start..]
+        .iter()
+        .map(|area| (*area, area.rect(cx).pos))
+        .collect();
     RUNS.with(|runs| {
         if let Some(runs) = runs.borrow_mut().as_mut() {
             runs.push(PendingRun {
@@ -129,8 +252,11 @@ pub fn draw_text(tf: &mut TextFlow, cx: &mut Cx2d, text: &str) {
                     scale: dt.font_scale as f64,
                     start,
                     row: None,
+                    drawn_rows: Vec::new(),
                 },
                 painted_row: None,
+                row_areas,
+                ink_rows,
             });
         }
     });

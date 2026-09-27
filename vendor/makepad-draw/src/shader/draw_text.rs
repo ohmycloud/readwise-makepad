@@ -1264,6 +1264,9 @@ pub enum TextOverflow {
 pub struct DrawText {
     #[rust]
     pub many_instances: Option<ManyInstances>,
+    /// Actual glyph quads, grouped by visual row, when a caller requests them.
+    #[rust]
+    pub captured_ink_rows: Option<Vec<Option<Rect>>>,
     #[rust]
     pending_slug_flush_generation: u64,
     #[rust]
@@ -2875,13 +2878,41 @@ impl DrawText {
         row: &LaidoutRow,
         out_instances: &mut Vec<f32>,
     ) {
+        let mut ink: Option<Rect> = None;
         for glyph in &row.glyphs {
+            let prior_len = out_instances.len();
             self.draw_glyph(
                 cx,
                 origin_in_lpxs + Size::from(glyph.origin_in_lpxs) * self.font_scale,
                 glyph,
                 out_instances,
             );
+            if self.captured_ink_rows.is_some() && out_instances.len() > prior_len {
+                let left = self.rect_pos.x as f64;
+                let top = self.rect_pos.y as f64;
+                let right = left + self.rect_size.x as f64;
+                let bottom = top + self.rect_size.y as f64;
+                ink = Some(match ink {
+                    Some(previous) => {
+                        let x = previous.pos.x.min(left);
+                        let y = previous.pos.y.min(top);
+                        Rect {
+                            pos: dvec2(x, y),
+                            size: dvec2(
+                                (previous.pos.x + previous.size.x).max(right) - x,
+                                (previous.pos.y + previous.size.y).max(bottom) - y,
+                            ),
+                        }
+                    }
+                    None => Rect {
+                        pos: dvec2(left, top),
+                        size: dvec2(right - left, bottom - top),
+                    },
+                });
+            }
+        }
+        if let Some(rows) = self.captured_ink_rows.as_mut() {
+            rows.push(ink);
         }
         self.draw_debug_row_guides(cx, origin_in_lpxs, row);
     }
