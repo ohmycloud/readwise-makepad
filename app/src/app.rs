@@ -6905,14 +6905,18 @@ script_mod! {
                                             flow: Right spacing: 12
                                             reader_preview_text := Html{
                                                 width: Fill height: Fit
+                                                // First-row ruby paints above Html's measured text box.
+                                                clip_y: false
                                                 selectable: false
                                                 ruby := mod.widgets.RubyWord{preview: true}
                                             }
                                             reader_preview_second_column := View{
                                                 visible: false
                                                 width: Fill height: Fit
+                                                clip_y: false
                                                 reader_preview_text_second := Html{
                                                     width: Fill height: Fit
+                                                    clip_y: false
                                                     selectable: false
                                                     ruby := mod.widgets.RubyWord{preview: true}
                                                 }
