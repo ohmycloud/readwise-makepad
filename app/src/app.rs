@@ -1,4 +1,5 @@
 use crate::chapter_image::ChapterImageAction;
+use crate::reader_book_pages::BookPages;
 use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
@@ -13,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 type AiSettings = readwise_core::ai::AiSettings;
@@ -149,48 +150,6 @@ fn shelf_cover_needs_load(
 }
 
 const LIST_COVER_WIDTH_TO_HEIGHT: f64 = 44.0 / 56.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ReaderPageSummary {
-    current: usize,
-    total: usize,
-    pages_left_in_chapter: usize,
-}
-
-/// EPUB 是可重排内容，没有出版物固有的 PDF 页码。这里以当前视口一次稳定翻过的
-/// 段落数作为页宽，为每章建立同一套虚拟页；页码与翻页目标因此始终一致。
-#[cfg(test)]
-fn reader_page_summary(
-    chapter_block_counts: &[usize],
-    chapter: usize,
-    first_block: usize,
-    blocks_per_page: usize,
-) -> Option<ReaderPageSummary> {
-    if chapter_block_counts.is_empty()
-        || chapter >= chapter_block_counts.len()
-        || chapter_block_counts.contains(&0)
-    {
-        return None;
-    }
-    let span = blocks_per_page.max(1);
-    let chapter_pages = |blocks: usize| blocks.div_ceil(span).max(1);
-    let pages_before = chapter_block_counts[..chapter]
-        .iter()
-        .copied()
-        .map(chapter_pages)
-        .sum::<usize>();
-    let pages_in_chapter = chapter_pages(chapter_block_counts[chapter]);
-    let page_in_chapter = (first_block / span).min(pages_in_chapter.saturating_sub(1));
-    Some(ReaderPageSummary {
-        current: pages_before + page_in_chapter + 1,
-        total: chapter_block_counts
-            .iter()
-            .copied()
-            .map(chapter_pages)
-            .sum(),
-        pages_left_in_chapter: pages_in_chapter.saturating_sub(page_in_chapter + 1),
-    })
-}
 
 fn reader_last_page_start(block_count: usize, blocks_per_page: usize) -> usize {
     let last = block_count.saturating_sub(1);
@@ -2067,33 +2026,6 @@ mod reader_pagination_tests {
     }
 
     #[test]
-    fn pagination_maps_chapters_to_one_global_page_sequence() {
-        let counts = [10, 5, 13];
-        assert_eq!(
-            reader_page_summary(&counts, 1, 3, 4),
-            Some(ReaderPageSummary {
-                current: 4,
-                total: 9,
-                pages_left_in_chapter: 1,
-            })
-        );
-        assert_eq!(
-            reader_page_summary(&counts, 2, 12, 4),
-            Some(ReaderPageSummary {
-                current: 9,
-                total: 9,
-                pages_left_in_chapter: 0,
-            })
-        );
-    }
-
-    #[test]
-    fn pagination_waits_until_every_chapter_count_is_known() {
-        assert_eq!(reader_page_summary(&[10, 0, 8], 0, 0, 4), None);
-        assert_eq!(reader_page_summary(&[], 0, 0, 4), None);
-    }
-
-    #[test]
     fn previous_chapter_opens_on_its_last_page_boundary() {
         assert_eq!(reader_last_page_start(13, 4), 12);
         assert_eq!(reader_last_page_start(12, 4), 8);
@@ -2117,6 +2049,20 @@ struct ReaderSearchHit {
     excerpt: String,
 }
 static OPEN_BOOK_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+static READER_BOOK_PAGINATION_REVISION: AtomicU64 = AtomicU64::new(0);
+
+fn reader_book_content_key() -> Option<(String, u64, usize)> {
+    let book = CURRENT_BOOK.read().unwrap();
+    let book = book.as_ref()?;
+    let key = reader_source_hash(&format!(
+        "{}:{}:{}:{}",
+        book.id,
+        OPEN_BOOK_REQUEST_ID.load(Ordering::Relaxed),
+        READER_BOOK_PAGINATION_REVISION.load(Ordering::Relaxed),
+        *GLOSS_ENABLED.read().unwrap()
+    ));
+    Some((book.id.clone(), key, book.chapters.len()))
+}
 
 /// 当前打开的书对应的书架项（"标为已认识"后重开重注音用）。
 static CURRENT_ITEM: LazyLock<RwLock<Option<ShelfItem>>> = LazyLock::new(|| RwLock::new(None));
@@ -2649,6 +2595,7 @@ impl OpenBook {
 
     fn mark_word_known(&mut self, lemma: &str) {
         self.known_words.insert(lemma.to_string());
+        READER_BOOK_PAGINATION_REVISION.fetch_add(1, Ordering::Relaxed);
         for chunks in self.glossed_chapter_chunks.iter_mut().flatten() {
             for chunk in chunks {
                 if chunk.contains("<ruby") {
@@ -2660,6 +2607,7 @@ impl OpenBook {
 
     fn unmark_word_known(&mut self, lemma: &str) {
         if self.known_words.remove(lemma) {
+            READER_BOOK_PAGINATION_REVISION.fetch_add(1, Ordering::Relaxed);
             // A failed save must rebuild cached annotations from the original
             // chapter HTML; the in-place removal above cannot be reversed.
             self.glossed_chapter_chunks.fill(None);
@@ -3410,23 +3358,31 @@ fn spawn_bookmark_change(
 enum ReaderPaginationAction {
     Ready {
         book_id: String,
-        chapter_block_counts: Vec<usize>,
+        content: Arc<crate::reader_book_pages::BookContent>,
     },
 }
 
-/// 全书分块统计移到后台，避免为了总页数阻塞打开首章。每次只克隆一个章节，
-/// 不额外复制整本 EPUB；切书后旧任务会通过 book_id 自行退出。
-fn spawn_build_reader_pagination(book_id: String) {
+/// Prepare the same chapter HTML used by the reader off the rendering thread.
+/// Glyph layout is then measured incrementally with the display renderer.
+fn spawn_build_reader_pagination(book_id: String, content_key: u64) {
     std::thread::spawn(move || {
-        let chapter_count = {
+        let (chapter_count, glosses, known_words) = {
             let guard = CURRENT_BOOK.read().unwrap();
             let Some(book) = guard.as_ref().filter(|book| book.id == book_id) else {
                 return;
             };
-            book.chapters.len()
+            (
+                book.chapters.len(),
+                book.glosses.clone(),
+                book.known_words.clone(),
+            )
         };
-        let mut chapter_block_counts = Vec::with_capacity(chapter_count);
+        let gloss_enabled = *GLOSS_ENABLED.read().unwrap();
+        let mut chapters = Vec::with_capacity(chapter_count);
         for chapter in 0..chapter_count {
+            if reader_book_content_key().is_none_or(|(_, key, _)| key != content_key) {
+                return;
+            }
             let html = {
                 let guard = CURRENT_BOOK.read().unwrap();
                 let Some(book) = guard.as_ref().filter(|book| book.id == book_id) else {
@@ -3437,15 +3393,28 @@ fn spawn_build_reader_pagination(book_id: String) {
                 };
                 html.clone()
             };
-            chapter_block_counts.push(
-                readwise_core::books::epub_meta::split_blocks(&html)
-                    .len()
-                    .max(1),
-            );
+            let html = if gloss_enabled && !glosses.is_empty() {
+                use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
+                annotate_html(&flatten_lists(&html), &glosses, &known_words)
+            } else {
+                html
+            };
+            let mut paragraphs = readwise_core::books::epub_meta::split_blocks(&html);
+            if paragraphs.is_empty() {
+                paragraphs.push(String::new());
+            }
+            let codes = paragraphs
+                .iter()
+                .map(|html| readwise_core::books::epub_meta::code_block_text(html))
+                .collect();
+            chapters.push(crate::reader_book_pages::ChapterContent { paragraphs, codes });
         }
         Cx::post_action(ReaderPaginationAction::Ready {
             book_id,
-            chapter_block_counts,
+            content: Arc::new(crate::reader_book_pages::BookContent {
+                key: content_key,
+                chapters,
+            }),
         });
     });
 }
@@ -7195,21 +7164,14 @@ struct ReaderPageIndicator {
     total: usize,
     #[rust]
     hovered: bool,
-    #[rust]
-    approximate: bool,
 }
 
 impl ReaderPageIndicator {
     fn refresh_text(&self, cx: &mut Cx) {
-        let text = if self.total == 0 {
-            "—".to_string()
-        } else if self.hovered {
-            format!(
-                "{}{} of {}",
-                if self.approximate { "≈ " } else { "" },
-                self.current,
-                self.total
-            )
+        let text = if self.current == 0 {
+            "…".to_string()
+        } else if self.hovered && self.total > 0 {
+            format!("{} of {}", self.current, self.total)
         } else {
             self.current.to_string()
         };
@@ -7217,7 +7179,11 @@ impl ReaderPageIndicator {
     }
 
     fn set_pages(&mut self, cx: &mut Cx, current: usize, total: usize) {
-        self.current = current.min(total).max(usize::from(total > 0));
+        self.current = if total > 0 {
+            current.min(total)
+        } else {
+            current
+        };
         self.total = total;
         self.refresh_text(cx);
     }
@@ -7391,6 +7357,8 @@ struct ChapterList {
     #[rust]
     pager: ReaderPagedState,
     #[rust]
+    book_pages: BookPages,
+    #[rust]
     turn_mode: ReaderTurnMode,
 }
 
@@ -7412,6 +7380,7 @@ struct ReaderPagedState {
     requested_last_page: bool,
     extend_selection_after_draw: bool,
     spread_ready: bool,
+    visible_pages: usize,
     needs_page_alignment: bool,
     // Coalesce a burst into one further turn, rather than dropping the input
     // or replaying a long wheel-event backlog after the reader stops scrolling.
@@ -7941,9 +7910,8 @@ impl ChapterList {
             ReaderSettings::margin_pixels(*READER_MARGIN.read().unwrap()) as f64,
         );
         let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
-        let signature = reader_source_hash(&format!(
-            "{}:{:.1}:{:.1}:{}:{:?}:{:?}:{}:{}:{}:{}:{}:{}:{}",
-            content_version,
+        let layout_signature = reader_source_hash(&format!(
+            "{:?}:{:?}:{}:{:?}:{:?}:{}:{}:{}:{}:{}:{}:{}:{}",
             layout.width,
             layout.height,
             layout.count,
@@ -7955,7 +7923,16 @@ impl ChapterList {
             *READER_BOLD_TEXT.read().unwrap(),
             *READER_CHARACTER_SPACING.read().unwrap(),
             *READER_WORD_SPACING.read().unwrap(),
-            *READER_JUSTIFY_TEXT.read().unwrap()
+            *READER_JUSTIFY_TEXT.read().unwrap(),
+            cx.current_dpi_factor()
+        ));
+        let chapter = CURRENT_CHAPTER.load(Ordering::Relaxed);
+        if let Some((_, key, chapters)) = reader_book_content_key() {
+            self.book_pages.configure(key, layout_signature, chapters);
+        }
+        let signature = reader_source_hash(&format!(
+            "{}:{chapter}:{content_version}:{layout_signature}",
+            self.book_pages.content_key
         ));
         let list_ref = self.view.portal_list(cx, ids!(list));
         let mut anchor = PageAnchor {
@@ -7977,8 +7954,10 @@ impl ChapterList {
             } else {
                 self.pager.pending_source = None;
             }
-            self.pager.metrics = vec![None; paragraphs.len()];
-            self.pager.page_index = Default::default();
+            (self.pager.metrics, self.pager.page_index) = self
+                .book_pages
+                .restore(chapter, paragraphs.len())
+                .unwrap_or_else(|| (vec![None; paragraphs.len()], Default::default()));
             self.pager.turn_history.clear();
             self.pager.signature = signature;
             self.pager.content_version = content_version;
@@ -8094,9 +8073,14 @@ impl ChapterList {
                     }
                 }
             }
-            if let Some(block) =
-                upcoming.or_else(|| self.pager.metrics.iter().position(Option::is_none))
-            {
+            let preceding = self.book_pages.next_work(chapter, true);
+            let block = upcoming.or_else(|| {
+                preceding
+                    .is_none()
+                    .then(|| self.pager.metrics.iter().position(Option::is_none))
+                    .flatten()
+            });
+            if let Some(block) = block {
                 cx.begin_turtle(
                     Walk {
                         abs_pos: Some(viewport.pos),
@@ -8118,12 +8102,52 @@ impl ChapterList {
                 cx.end_turtle();
                 self.pager.metrics[block] = Some(metric);
                 measured += 1;
+            } else if let Some((other_chapter, block, content)) =
+                preceding.or_else(|| self.book_pages.next_work(chapter, false))
+            {
+                // Measure other chapters with the display renderer and isolate
+                // their source/selection caches from the visible chapter.
+                let geometry = std::mem::take(&mut self.range_geometry_cache);
+                let widths = std::mem::take(&mut self.item_layout_widths);
+                let runs = std::mem::take(&mut self.hit_runs);
+                let maps = std::mem::take(&mut self.text_maps);
+                cx.begin_turtle(
+                    Walk {
+                        abs_pos: Some(viewport.pos),
+                        width: Size::Fixed(layout.width),
+                        height: Size::Fixed(0.0),
+                        ..Walk::default()
+                    },
+                    Layout::flow_down(),
+                );
+                let para = &content.chapters[other_chapter];
+                let metric = self.draw_reader_paragraph(
+                    cx,
+                    &mut pool,
+                    block,
+                    measured,
+                    &para.paragraphs[block],
+                    para.codes[block].as_deref(),
+                    true,
+                );
+                cx.end_turtle();
+                self.range_geometry_cache = geometry;
+                self.item_layout_widths = widths;
+                self.hit_runs = runs;
+                self.text_maps = maps;
+                self.book_pages
+                    .record_block(other_chapter, block, metric, layout.height);
+                measured += 1;
             } else {
                 break;
             }
         }
         self.pager.anchor = anchor;
         self.pager.spread_ready = !pages.is_empty();
+        self.pager.visible_pages = pages
+            .iter()
+            .filter(|page| !page.fragments.is_empty())
+            .count();
         self.hit_runs.clear();
         for (column, page) in pages.iter().enumerate() {
             for (slot, fragment) in page.fragments.iter().enumerate() {
@@ -8179,6 +8203,8 @@ impl ChapterList {
         self.pager
             .page_index
             .advance(&self.pager.metrics, layout.height);
+        self.book_pages
+            .record_current(chapter, &self.pager.metrics, &self.pager.page_index);
         if self.pager.page_index.complete && self.pager.requested_last_page {
             let last = self.pager.page_index.starts.len().saturating_sub(1);
             let target = self
@@ -8205,7 +8231,7 @@ impl ChapterList {
                 self.pager.needs_page_alignment = false;
             }
         }
-        if !self.pager.page_index.complete {
+        if !self.pager.page_index.complete || self.book_pages.next_work(chapter, false).is_some() {
             self.pager.measure_frame = cx.new_next_frame();
         }
         self.text_maps
@@ -10504,7 +10530,7 @@ pub struct App {
     #[rust]
     chapter_idx: usize,
     #[rust]
-    reader_chapter_block_counts: Vec<usize>,
+    reader_pagination_content_key: u64,
     #[rust]
     reader_page_span: usize,
     #[rust]
@@ -14247,7 +14273,6 @@ impl App {
                 chunks,
             )
         };
-        let chapter_blocks = chunks.len().max(1);
         let restored_block = if block == usize::MAX {
             reader_last_page_start(chunks.len(), self.reader_page_span)
         } else {
@@ -14276,10 +14301,6 @@ impl App {
             reader.pager.turn_history.clear();
         }
         replace_paragraphs(chunks);
-        if self.reader_chapter_block_counts.len() != total {
-            self.reader_chapter_block_counts = vec![0; total];
-        }
-        self.reader_chapter_block_counts[idx] = chapter_blocks;
         self.reader_page_span = 0;
         self.pending_reader_pagination_layout = true;
         self.set_reader_title_text(cx, &format!("《{}》", title));
@@ -14342,58 +14363,28 @@ impl App {
             return;
         }
         let widget = self.ui.widget(cx, ids!(chapter_list));
-        let (columns, paged) = widget
+        let (visible_pages, summary) = widget
             .borrow::<ChapterList>()
             .map(|reader| {
                 let pager = &reader.pager;
-                let page = pager
-                    .page_index
-                    .starts
-                    .partition_point(|a| {
-                        a.block < pager.anchor.block
-                            || (a.block == pager.anchor.block && a.y <= pager.anchor.y + 0.5)
-                    })
-                    .saturating_sub(1);
                 (
-                    pager.layout.count.max(1),
-                    (pager.active && pager.page_index.complete).then_some((
-                        page,
-                        pager.page_index.starts.len().max(1),
-                        pager.metrics.len().max(1),
-                    )),
+                    pager.visible_pages,
+                    (pager.active && pager.spread_ready)
+                        .then(|| {
+                            reader.book_pages.summary(
+                                self.chapter_idx,
+                                &pager.page_index,
+                                pager.anchor,
+                                pager.layout.count.max(1),
+                            )
+                        })
+                        .flatten(),
                 )
             })
-            .unwrap_or((1, None));
-        let summary = paged.map(|(page, total, blocks)| {
-            // Only the current chapter has been typeset at this width. Keep
-            // the book-wide indicator explicitly approximate until all
-            // chapters can share a measured page index.
-            let estimate = |count: usize| {
-                ((count.max(1) as f64 * total as f64 / blocks as f64).ceil() as usize).max(1)
-            };
-            let before = self
-                .reader_chapter_block_counts
-                .iter()
-                .take(self.chapter_idx)
-                .copied()
-                .map(estimate)
-                .sum::<usize>();
-            let after = self
-                .reader_chapter_block_counts
-                .iter()
-                .skip(self.chapter_idx + 1)
-                .copied()
-                .map(estimate)
-                .sum::<usize>();
-            ReaderPageSummary {
-                current: before + page + 1,
-                total: before + total + after,
-                pages_left_in_chapter: total.saturating_sub(page + columns),
-            }
-        });
+            .unwrap_or((0, None));
         self.ui
             .view(cx, ids!(reader_page_second))
-            .set_visible(cx, columns == 2);
+            .set_visible(cx, visible_pages == 2);
         for (offset, id) in [
             id!(reader_page_indicator),
             id!(reader_page_indicator_second),
@@ -14406,31 +14397,25 @@ impl App {
                 .widget(cx, &[id])
                 .borrow_mut::<ReaderPageIndicator>()
             {
-                indicator.approximate = self.reader_chapter_block_counts.len() > 1;
                 match summary {
-                    Some(summary)
-                        if offset == 0
-                            || paged.is_some_and(|(page, total, _)| page + offset < total) =>
-                    {
-                        indicator.set_pages(cx, summary.current + offset, summary.total)
-                    }
+                    Some(summary) if offset == 0 || offset < visible_pages => indicator.set_pages(
+                        cx,
+                        summary.current + offset,
+                        summary.total.unwrap_or(0),
+                    ),
                     _ => indicator.set_pages(cx, 0, 0),
                 }
             }
         }
-        let pages_left = match summary {
-            Some(summary) if app_language() == AppLanguage::English => {
+        let pages_left = match summary.and_then(|summary| summary.pages_left_in_chapter) {
+            Some(left) if app_language() == AppLanguage::English => {
                 format!(
                     "{} {} left in chapter",
-                    summary.pages_left_in_chapter,
-                    if summary.pages_left_in_chapter == 1 {
-                        "page"
-                    } else {
-                        "pages"
-                    }
+                    left,
+                    if left == 1 { "page" } else { "pages" }
                 )
             }
-            Some(summary) => format!("本章还剩 {} 页", summary.pages_left_in_chapter),
+            Some(left) => format!("本章还剩 {left} 页"),
             None if app_language() == AppLanguage::English => "Calculating pages…".to_string(),
             None => "正在计算页码…".to_string(),
         };
@@ -14447,6 +14432,12 @@ impl App {
     /// 必须在一次完整 Draw 后读取 PortalList 的真实可见项目数；提前读取会得到旧布局，
     /// 导致字号或横竖屏变化后页码与翻页步长不一致。
     fn resolve_reader_pagination_layout_after_draw(&mut self, cx: &mut Cx) {
+        if let Some((book_id, key, _)) = reader_book_content_key() {
+            if self.reader_pagination_content_key != key {
+                self.reader_pagination_content_key = key;
+                spawn_build_reader_pagination(book_id, key);
+            }
+        }
         let paged_signature = self
             .ui
             .widget(cx, ids!(chapter_list))
@@ -14455,13 +14446,15 @@ impl App {
             .map(|reader| {
                 let pager = &reader.pager;
                 reader_source_hash(&format!(
-                    "{}:{:?}:{:?}:{}:{}:{:?}",
+                    "{}:{:?}:{:?}:{}:{}:{}:{}:{}",
                     pager.signature,
                     pager.layout,
                     pager.anchor,
                     pager.page_index.starts.len(),
                     pager.page_index.complete,
-                    self.reader_chapter_block_counts
+                    reader.book_pages.revision,
+                    pager.visible_pages,
+                    pager.spread_ready
                 ))
             });
         if let Some(signature) = paged_signature {
@@ -14832,7 +14825,6 @@ impl App {
                 .and_then(|b| build_chapter_chunks(b, self.chapter_idx))
         };
         if let Some(chunks) = chunks {
-            let chapter_blocks = chunks.len().max(1);
             let resume = location.filter(|location| {
                 chunks.get(location.block).is_some_and(|text| {
                     source_text.as_deref()
@@ -14848,9 +14840,6 @@ impl App {
                 reader.page_turn.cancel();
                 reader.pager.requested_source = resume
                     .and_then(|location| location.source.map(|source| (location.block, source)));
-            }
-            if let Some(count) = self.reader_chapter_block_counts.get_mut(self.chapter_idx) {
-                *count = chapter_blocks;
             }
         }
         self.invalidate_reader_pagination_layout(cx);
@@ -16129,7 +16118,6 @@ impl MatchEvent for App {
                             initial_gloss_ms
                         );
                         *READER_BOOKMARKS.write().unwrap() = bookmarks.clone();
-                        self.reader_chapter_block_counts.clear();
                         self.reader_page_span = 0;
                         // The reader can receive a TOC click while the first
                         // book is still loading. Project the panel again now
@@ -16158,14 +16146,10 @@ impl MatchEvent for App {
                                 ),
                             );
                         }
-                        if let Some(book_id) = CURRENT_BOOK
-                            .read()
-                            .unwrap()
-                            .as_ref()
-                            .map(|book| book.id.clone())
-                        {
+                        if let Some((book_id, key, _)) = reader_book_content_key() {
                             spawn_load_notes(book_id.clone());
-                            spawn_build_reader_pagination(book_id);
+                            self.reader_pagination_content_key = key;
+                            spawn_build_reader_pagination(book_id, key);
                         }
                         self.start_reading_timer();
                     }
@@ -16243,23 +16227,21 @@ impl MatchEvent for App {
             }
             if let Some(pagination) = action.downcast_ref::<ReaderPaginationAction>() {
                 match pagination {
-                    ReaderPaginationAction::Ready {
-                        book_id,
-                        chapter_block_counts,
-                    } => {
+                    ReaderPaginationAction::Ready { book_id, content } => {
                         let is_current = CURRENT_BOOK
                             .read()
                             .unwrap()
                             .as_ref()
                             .is_some_and(|book| book.id == *book_id);
-                        if is_current {
-                            self.reader_chapter_block_counts = chapter_block_counts.clone();
-                            if let Some(count) =
-                                self.reader_chapter_block_counts.get_mut(self.chapter_idx)
-                            {
-                                *count = PARAGRAPHS.read().unwrap().len().max(1);
+                        if is_current
+                            && reader_book_content_key()
+                                .is_some_and(|(_, key, _)| key == content.key)
+                        {
+                            let widget = self.ui.widget(cx, ids!(chapter_list));
+                            if let Some(mut reader) = widget.borrow_mut::<ChapterList>() {
+                                reader.book_pages.set_content(content.clone());
                             }
-                            self.update_reader_page_footer(cx);
+                            widget.redraw(cx);
                         }
                     }
                 }

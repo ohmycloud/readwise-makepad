@@ -10,6 +10,7 @@ mod i18n;
 mod mark_span;
 #[cfg(target_os = "ios")]
 mod mobile_import;
+mod reader_book_pages;
 mod reader_columns;
 mod reader_fonts;
 mod reader_hit;

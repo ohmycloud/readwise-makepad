@@ -220,7 +220,7 @@ pub fn compose_page(
 
 /// A chapter index advances from its measured frontier. Unmeasured pages are
 /// never counted, and a redraw does not recompose all the preceding pages.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PageIndex {
     pub starts: Vec<PageAnchor>,
     pub complete: bool,
@@ -228,6 +228,14 @@ pub struct PageIndex {
 }
 
 impl PageIndex {
+    pub fn page_number(&self, anchor: PageAnchor) -> Option<usize> {
+        let start = self.containing(anchor)?;
+        if !self.complete && start == self.next {
+            return Some(self.starts.len());
+        }
+        self.starts.iter().position(|page| *page == start)
+    }
+
     pub fn advance(&mut self, metrics: &[Option<BlockMetrics>], height: f64) {
         if self.complete {
             return;
