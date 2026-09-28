@@ -67,10 +67,18 @@ impl ColumnLayout {
             }
             _ => 1,
         };
-        // A single column should use the available page; the narrower measure
-        // remains useful when two independent columns share the viewport.
-        let max_width = font * if count == 1 { 76.0 } else { 60.0 };
-        let column_width = ((usable - (count - 1) as f64 * gap) / count as f64).min(max_width);
+        // Use 56px per side at the default setting for a desktop single column.
+        // Narrow windows retain compact margins; font size never caps the width.
+        let column_width = if count == 1 {
+            let single_edge = if width < 600.0 {
+                edge
+            } else {
+                (margin * 2.0).clamp(12.0, 80.0)
+            };
+            (width - single_edge * 2.0).max(1.0)
+        } else {
+            ((usable - gap) / 2.0).min(font * 60.0)
+        };
         Self {
             count,
             width: column_width,
@@ -437,11 +445,13 @@ mod tests {
         );
     }
     #[test]
-    fn single_column_is_centered_and_bounded() {
-        let layout = ColumnLayout::resolve(ReaderColumns::One, 1400.0, 700.0, 12.0, 2);
-        assert_eq!(layout.count, 1);
-        assert_eq!(layout.width, 912.0);
-        assert_eq!(layout.left, 244.0);
+    fn single_column_keeps_configured_margins_at_small_and_large_fonts() {
+        for font in [11.0, 20.0] {
+            let layout = ColumnLayout::resolve(ReaderColumns::One, 1400.0, 700.0, font, 2);
+            assert_eq!(layout.count, 1);
+            assert_eq!(layout.width, 1288.0);
+            assert_eq!(layout.left, 56.0);
+        }
     }
     #[test]
     fn long_paragraph_continues_at_exact_same_boundary() {
