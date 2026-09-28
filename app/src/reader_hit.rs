@@ -323,8 +323,8 @@ pub fn hit_index(runs: &[HitRun], point: DVec2) -> Option<usize> {
 /// preceded by a callout image. Images retain their own drawing/click handling;
 /// code must already use the adapter that records its actually painted rows.
 /// Structured tables and code blocks keep their native hit testing. Link text
-/// stays inside HtmlLink so it remains clickable; surrounding prose can still
-/// use exact painted-run hit testing.
+/// stays inside ReaderLink, which records its paint while retaining its own
+/// click handling. Superscript and subscript keep their Html baseline shifts.
 pub fn tracked_html(source: &str) -> Option<String> {
     let mut result = String::with_capacity(source.len() * 2);
     let mut offset = 0;
@@ -365,6 +365,8 @@ pub fn tracked_html(source: &str) -> Option<String> {
                     | "strong"
                     | "i"
                     | "em"
+                    | "sup"
+                    | "sub"
                     | "br"
                     | "ruby"
                     | "mark"
@@ -607,6 +609,25 @@ mod tests {
                 (Some("note.xhtml".into()), Some("note title".into()))
             ]
         );
+    }
+
+    #[test]
+    fn superscript_footnote_preserves_link_and_prose_capture() {
+        let source = concat!(
+            "<p>度而言，值得庆幸的是：那时美国绝大部分人居住在乡下，也就是今天经济",
+            "学家所称的“货币经济”<sup>\n",
+            "<a id=\"ch75\" href=\"text00012.html#ch75-back\">[75]</a>\n",
+            "</sup> 之外，感受不到经济崩溃带来的苦痛。</p>"
+        );
+        let tracked = tracked_html(source).expect("footnotes must keep painted-row measurement");
+        assert!(tracked.contains("<sup>"));
+        assert!(tracked.contains("<a id=\"ch75\" href=\"text00012.html#ch75-back\">[75]</a>"));
+        assert!(tracked.contains("<reader_run> 之外，感受不到"));
+        assert_eq!(
+            readwise_core::vocab::annotate::rendered_text(source),
+            readwise_core::vocab::annotate::rendered_text(&tracked),
+        );
+        assert!(tracked_html("<p>H<sub>2</sub>O</p>").is_some());
     }
 
     #[test]

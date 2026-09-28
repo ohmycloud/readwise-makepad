@@ -139,7 +139,7 @@ impl Widget for ReaderLink {
             self.hovered,
             self.pressed,
         ));
-        tf.draw_text(cx, self.text.as_ref());
+        crate::reader_hit::draw_text(tf, cx, self.text.as_ref());
         tf.font_colors.pop();
         let (start, end) = tf.areas_tracker.pop_tracker();
 
