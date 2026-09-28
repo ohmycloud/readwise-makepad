@@ -383,6 +383,10 @@ fn replace_paragraphs(chunks: Vec<String>) {
 
 fn silence_current_paragraph_glosses(lemma: &str) -> bool {
     let mut paragraphs = PARAGRAPHS.write().unwrap();
+    silence_paragraph_glosses(&mut paragraphs, lemma)
+}
+
+fn silence_paragraph_glosses(paragraphs: &mut [String], lemma: &str) -> bool {
     let mut changed = false;
     for paragraph in paragraphs.iter_mut().filter(|text| text.contains("<ruby")) {
         let silent = readwise_core::vocab::annotate::silence_ruby_for_lemma(paragraph, lemma);
@@ -2064,7 +2068,17 @@ fn reader_book_content_key() -> Option<(String, u64, usize)> {
     Some((book.id.clone(), key, book.chapters.len()))
 }
 
-/// 当前打开的书对应的书架项（"标为已认识"后重开重注音用）。
+/// Visible layout changes only when the displayed content or typography does.
+/// A known-word save rebuilds book-wide page counts, but silencing an existing
+/// ruby does not invalidate the active page's geometry or reading anchor.
+fn reader_page_layout_signature(chapter: usize, content_version: u64, layout_key: u64) -> u64 {
+    reader_source_hash(&format!(
+        "{}:{chapter}:{content_version}:{layout_key}",
+        OPEN_BOOK_REQUEST_ID.load(Ordering::Relaxed)
+    ))
+}
+
+/// 当前打开的书对应的书架项。
 static CURRENT_ITEM: LazyLock<RwLock<Option<ShelfItem>>> = LazyLock::new(|| RwLock::new(None));
 
 fn requested_book_is_ready() -> bool {
@@ -2594,14 +2608,15 @@ impl OpenBook {
     }
 
     fn mark_word_known(&mut self, lemma: &str) {
-        self.known_words.insert(lemma.to_string());
+        if !self.known_words.insert(lemma.to_string()) {
+            return;
+        }
         READER_BOOK_PAGINATION_REVISION.fetch_add(1, Ordering::Relaxed);
         for chunks in self.glossed_chapter_chunks.iter_mut().flatten() {
-            for chunk in chunks {
-                if chunk.contains("<ruby") {
-                    *chunk = readwise_core::vocab::annotate::remove_ruby_for_lemma(chunk, lemma);
-                }
-            }
+            // Keep visited chapters' ruby slots and line spacing stable, just
+            // like the visible projection. Pagination preparation must reuse
+            // these chunks rather than measuring a differently shaped chapter.
+            silence_paragraph_glosses(chunks, lemma);
         }
     }
 
@@ -2795,21 +2810,63 @@ mod lazy_gloss_tests {
     }
 
     #[test]
-    fn newly_known_words_are_removed_from_cached_chapter_chunks() {
+    fn newly_known_words_are_silenced_without_changing_cached_ruby_slots() {
         let mut book = book();
-        assert!(book
-            .chapter_chunks(0, true)
-            .unwrap()
-            .join("")
-            .contains("<ruby>solitude"));
+        let before = book.chapter_chunks(0, true).unwrap();
 
         book.mark_word_known("solitude");
 
-        assert!(!book
-            .chapter_chunks(0, true)
-            .unwrap()
-            .join("")
-            .contains("<ruby>solitude"));
+        let after = book.chapter_chunks(0, true).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(
+            readwise_core::vocab::annotate::rendered_text(&before.join("")),
+            readwise_core::vocab::annotate::rendered_text(&after.join(""))
+        );
+        assert!(after.join("").contains("<ruby>solitude\u{e000}</ruby>"));
+        assert!(!after.join("").contains("孤独"));
+        assert_eq!(
+            pagination_chapter_chunks(
+                &book.chapters[0],
+                book.glossed_chapter_chunks[0].clone(),
+                true,
+                &book.glosses,
+                &book.known_words,
+            ),
+            after
+        );
+        // The annotation switch must still project the untouched source HTML.
+        assert_eq!(
+            pagination_chapter_chunks(
+                &book.chapters[0],
+                book.glossed_chapter_chunks[0].clone(),
+                false,
+                &book.glosses,
+                &book.known_words,
+            ),
+            vec![book.chapters[0].clone()]
+        );
+    }
+
+    #[test]
+    fn known_word_recount_does_not_change_visible_layout_signature() {
+        let mut book = book();
+        let mut paragraphs = book.chapter_chunks(0, true).unwrap();
+        let signature = reader_page_layout_signature(0, 7, 10);
+        let revision = READER_BOOK_PAGINATION_REVISION.load(Ordering::Relaxed);
+
+        book.mark_word_known("solitude");
+        assert!(silence_paragraph_glosses(&mut paragraphs, "solitude"));
+        assert_ne!(
+            READER_BOOK_PAGINATION_REVISION.load(Ordering::Relaxed),
+            revision
+        );
+        assert_eq!(reader_page_layout_signature(0, 7, 10), signature);
+        assert_eq!(paragraphs, book.chapter_chunks(0, true).unwrap());
+
+        // Actual text, chapter, or typography changes must still remeasure.
+        assert_ne!(reader_page_layout_signature(0, 8, 10), signature);
+        assert_ne!(reader_page_layout_signature(1, 7, 10), signature);
+        assert_ne!(reader_page_layout_signature(0, 7, 11), signature);
     }
 
     #[test]
@@ -2825,7 +2882,7 @@ mod lazy_gloss_tests {
             .chapter_chunks(0, true)
             .unwrap()
             .join("")
-            .contains("<ruby>solitude"));
+            .contains("孤独"));
 
         book.unmark_word_known("solitude");
         assert!(book
@@ -3362,6 +3419,25 @@ enum ReaderPaginationAction {
     },
 }
 
+fn pagination_chapter_chunks(
+    html: &str,
+    cached: Option<Vec<String>>,
+    gloss_enabled: bool,
+    glosses: &HashMap<String, String>,
+    known_words: &HashSet<String>,
+) -> Vec<String> {
+    if let Some(cached) = cached.filter(|_| gloss_enabled) {
+        return cached;
+    }
+    let html = if gloss_enabled && !glosses.is_empty() {
+        use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
+        annotate_html(&flatten_lists(html), glosses, known_words)
+    } else {
+        html.to_string()
+    };
+    readwise_core::books::epub_meta::split_blocks(&html)
+}
+
 /// Prepare the same chapter HTML used by the reader off the rendering thread.
 /// Glyph layout is then measured incrementally with the display renderer.
 fn spawn_build_reader_pagination(book_id: String, content_key: u64) {
@@ -3383,7 +3459,7 @@ fn spawn_build_reader_pagination(book_id: String, content_key: u64) {
             if reader_book_content_key().is_none_or(|(_, key, _)| key != content_key) {
                 return;
             }
-            let html = {
+            let (html, cached) = {
                 let guard = CURRENT_BOOK.read().unwrap();
                 let Some(book) = guard.as_ref().filter(|book| book.id == book_id) else {
                     return;
@@ -3391,15 +3467,10 @@ fn spawn_build_reader_pagination(book_id: String, content_key: u64) {
                 let Some(html) = book.chapters.get(chapter) else {
                     return;
                 };
-                html.clone()
+                (html.clone(), book.glossed_chapter_chunks[chapter].clone())
             };
-            let html = if gloss_enabled && !glosses.is_empty() {
-                use readwise_core::vocab::annotate::{annotate_html, flatten_lists};
-                annotate_html(&flatten_lists(&html), &glosses, &known_words)
-            } else {
-                html
-            };
-            let mut paragraphs = readwise_core::books::epub_meta::split_blocks(&html);
+            let mut paragraphs =
+                pagination_chapter_chunks(&html, cached, gloss_enabled, &glosses, &known_words);
             if paragraphs.is_empty() {
                 paragraphs.push(String::new());
             }
@@ -7930,10 +8001,7 @@ impl ChapterList {
         if let Some((_, key, chapters)) = reader_book_content_key() {
             self.book_pages.configure(key, layout_signature, chapters);
         }
-        let signature = reader_source_hash(&format!(
-            "{}:{chapter}:{content_version}:{layout_signature}",
-            self.book_pages.content_key
-        ));
+        let signature = reader_page_layout_signature(chapter, content_version, layout_signature);
         let list_ref = self.view.portal_list(cx, ids!(list));
         let mut anchor = PageAnchor {
             block: list_ref.first_id(),
@@ -15903,7 +15971,7 @@ impl MatchEvent for App {
                             .map(|book| book.mark_word_known(lemma))
                             .is_some();
                         if changed {
-                            self.refresh_current_chapter(cx);
+                            self.hide_current_word_gloss(cx, lemma);
                         }
                     }
                     CardAction::MarkKnownFailed {

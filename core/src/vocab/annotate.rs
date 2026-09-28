@@ -196,8 +196,8 @@ pub fn remove_ruby_for_lemma(html: &str, lemma: &str) -> String {
 }
 
 /// Clear only a known word's gloss in the current reader projection. Keeping
-/// the ruby widget and its word text preserves the measured page layout until
-/// normal navigation rebuilds the chapter without that annotation.
+/// the ruby widget and its word text preserves the measured page layout.
+/// Visited chapter caches retain this projection for the current book session.
 pub fn silence_ruby_for_lemma(html: &str, lemma: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut i = 0;
