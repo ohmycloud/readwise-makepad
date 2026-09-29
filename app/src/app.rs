@@ -1,6 +1,7 @@
 use crate::chapter_image::ChapterImageAction;
 use crate::reader_book_pages::BookPages;
 use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
+use crate::reader_touch::ToolbarTap;
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
 use makepad_ai::{
@@ -102,6 +103,19 @@ fn screen_orientation_changed(old_size: DVec2, new_size: DVec2) -> bool {
 
 fn should_show_mobile_nav(compact_layout: bool, virtual_keyboard_open: bool) -> bool {
     compact_layout && !virtual_keyboard_open
+}
+
+fn reader_body_top_inset(compact: bool, in_caption: bool) -> f64 {
+    if compact || in_caption {
+        0.0
+    } else {
+        54.0
+    }
+}
+
+fn mobile_reader_button_size(width: f64, insets: SafeAreaInsets) -> f64 {
+    // Seven actions, five intra-group gaps, and 8px of padding at each edge.
+    ((width - insets.left - insets.right - 26.0) / 7.0).clamp(24.0, 44.0)
 }
 
 fn library_surface_visibility(visible_count: usize) -> (bool, bool) {
@@ -1597,6 +1611,33 @@ mod responsive_layout_tests {
             false
         ));
         assert!(!uses_compact_layout_for_platform(dvec2(0.0, 0.0), true));
+    }
+
+    #[test]
+    fn mobile_toolbar_actions_fit_phone_widths_and_cutout_insets() {
+        for (width, insets) in [
+            (320.0, SafeAreaInsets::default()),
+            (360.0, SafeAreaInsets::default()),
+            (390.0, SafeAreaInsets::default()),
+            (
+                844.0,
+                SafeAreaInsets {
+                    left: 44.0,
+                    right: 44.0,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let button = mobile_reader_button_size(width, insets);
+            assert!(button >= 40.0);
+            assert!(button <= 44.0);
+            assert!(7.0 * button + 26.0 + insets.left + insets.right <= width + 0.001);
+        }
+        // The mobile bar is an overlay, so showing it never reduces the body.
+        assert_eq!(reader_body_top_inset(true, false), 0.0);
+        assert_eq!(reader_body_top_inset(true, true), 0.0);
+        assert_eq!(reader_body_top_inset(false, true), 0.0);
+        assert_eq!(reader_body_top_inset(false, false), 54.0);
     }
 
     #[test]
@@ -5682,75 +5723,8 @@ script_mod! {
 
                         page_reader := SolidView{
                             width: Fill height: Fill
-                            flow: Down
+                            flow: Overlay
                             draw_bg.color: #xf7f4ea
-                            header := SolidView{
-                                width: Fill height: 54
-                                padding: Inset{left: 18 right: 18 top: 6 bottom: 6}
-                                flow: Right
-                                align: Align{ y: 0.5 }
-                                draw_bg.color: #xf0ecdf
-                                reader_toolbar_left := View{
-                                    width: 180 height: Fit
-                                    flow: Right spacing: 4
-                                    reader_toolbar_left_buttons := View{
-                                        visible: false
-                                        width: Fit height: Fit
-                                        flow: Right spacing: 4
-                                        reader_back_btn := ButtonFlatterIcon{
-                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
-                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_back.svg")}
-                                        }
-                                        toc_btn := ButtonFlatterIcon{
-                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
-                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_contents.svg")}
-                                        }
-                                        reader_bookmarks_btn := ButtonFlatterIcon{
-                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
-                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmarks.svg")}
-                                        }
-                                        notes_btn := ButtonFlatterIcon{
-                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
-                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_notes.svg")}
-                                        }
-                                    }
-                                }
-                                reader_title_slot := View{
-                                    width: Fill height: Fit
-                                    align: Center
-                                    title := Label{
-                                        text: "阅读 · 示例章节"
-                                        draw_text.text_style.font_size: 14
-                                    }
-                                }
-                                reader_toolbar_right := View{
-                                    width: 180 height: Fit
-                                    flow: Right spacing: 4
-                                    align: Align{x: 1.0 y: 0.5}
-                                    reader_toolbar_right_buttons := View{
-                                        visible: false
-                                        width: Fit height: Fit
-                                        flow: Right spacing: 4
-                                        reader_appearance_btn := ButtonFlatter{
-                                            width: 36 height: 36 text: "aA"
-                                            draw_text.text_style.font_size: 13
-                                        }
-                                        reader_search_btn := ButtonFlatterIcon{
-                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
-                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_search.svg")}
-                                        }
-                                        reader_bookmark_btn := ButtonFlatterIcon{
-                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
-                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmark.svg")}
-                                        }
-                                        reader_bookmark_filled_btn := ButtonFlatterIcon{
-                                            visible: false
-                                            width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
-                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmark_filled.svg")}
-                                        }
-                                    }
-                                }
-                            }
                             reader_body := SolidView{
                                 width: Fill height: Fill
                                 flow: Overlay
@@ -6197,6 +6171,90 @@ script_mod! {
                                             text: "Customise"
                                             icon_walk: Walk{width: 15 height: 15}
                                             draw_icon +: {svg: crate_resource("self:resources/icons/reader_settings.svg")}
+                                        }
+                                    }
+                                }
+                            }
+                            header := SolidView{
+                                width: Fill height: 54
+                                padding: Inset{left: 18 right: 18 top: 6 bottom: 6}
+                                flow: Down
+                                align: Align{ y: 0.5 }
+                                draw_bg.color: #xf0ecdf
+                                mobile_reader_title := Label{
+                                    visible: false
+                                    width: Fill height: 32
+                                    padding: 0
+                                    flow: Right{wrap: true}
+                                    align: Align{y: 0.5}
+                                    max_lines: 1
+                                    text_overflow: Ellipsis
+                                    text: "阅读 · 示例章节"
+                                    draw_text +: {
+                                        text_style.font_size: 14
+                                    }
+                                }
+                                reader_toolbar_row := View{
+                                    width: Fill height: Fill
+                                    flow: Right align: Align{y: 0.5}
+                                    reader_toolbar_left := View{
+                                        width: 180 height: Fit
+                                        flow: Right spacing: 4
+                                        reader_toolbar_left_buttons := View{
+                                            visible: false
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 4
+                                            reader_back_btn := ButtonFlatterIcon{
+                                                width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                                draw_icon +: {svg: crate_resource("self:resources/icons/reader_back.svg")}
+                                            }
+                                            toc_btn := ButtonFlatterIcon{
+                                                width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                                draw_icon +: {svg: crate_resource("self:resources/icons/reader_contents.svg")}
+                                            }
+                                            reader_bookmarks_btn := ButtonFlatterIcon{
+                                                width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                                draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmarks.svg")}
+                                            }
+                                            notes_btn := ButtonFlatterIcon{
+                                                width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                                draw_icon +: {svg: crate_resource("self:resources/icons/reader_notes.svg")}
+                                            }
+                                        }
+                                    }
+                                    reader_title_slot := View{
+                                        width: Fill height: Fit
+                                        align: Center
+                                        title := Label{
+                                            text: "阅读 · 示例章节"
+                                            draw_text.text_style.font_size: 14
+                                        }
+                                    }
+                                    reader_toolbar_right := View{
+                                        width: 180 height: Fit
+                                        flow: Right spacing: 4
+                                        align: Align{x: 1.0 y: 0.5}
+                                        reader_toolbar_right_buttons := View{
+                                            visible: false
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 4
+                                            reader_appearance_btn := ButtonFlatter{
+                                                width: 36 height: 36 text: "aA"
+                                                draw_text.text_style.font_size: 13
+                                            }
+                                            reader_search_btn := ButtonFlatterIcon{
+                                                width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                                draw_icon +: {svg: crate_resource("self:resources/icons/reader_search.svg")}
+                                            }
+                                            reader_bookmark_btn := ButtonFlatterIcon{
+                                                width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                                draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmark.svg")}
+                                            }
+                                            reader_bookmark_filled_btn := ButtonFlatterIcon{
+                                                visible: false
+                                                width: 36 height: 36 icon_walk: Walk{width: 16 height: 16}
+                                                draw_icon +: {svg: crate_resource("self:resources/icons/reader_bookmark_filled.svg")}
+                                            }
                                         }
                                     }
                                 }
@@ -7410,6 +7468,8 @@ struct ChapterList {
     #[rust]
     touch_selection: Option<crate::reader_touch::TouchSelection>,
     #[rust]
+    toolbar_tap: ToolbarTap,
+    #[rust]
     compact_layout: bool,
     /// TextFlow 本帧真实选区矩形，按正文块/范围/排版签名缓存为 item 相对坐标。
     /// 当前选区与保存后的永久高亮共用它，禁止再用另一套纯文本重排几何。
@@ -7480,6 +7540,9 @@ impl ReaderPagedState {
 
 #[derive(Debug)]
 struct ReaderPageTurn(bool);
+
+#[derive(Debug)]
+struct ReaderToolbarTap;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct ReaderRangeGeometryKey {
@@ -7823,6 +7886,57 @@ fn reader_markup_available_width(
 }
 
 impl ChapterList {
+    fn track_toolbar_tap(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if !self.compact_layout {
+            self.toolbar_tap.cancel();
+            return false;
+        }
+        if let Event::TouchUpdate(event) = event {
+            if event.touches.len() != 1 {
+                self.toolbar_tap.cancel();
+                return false;
+            }
+            let touch = &event.touches[0];
+            match touch.state {
+                TouchState::Start => {
+                    if self.reader_rect(cx).contains(touch.abs)
+                        && !SEL_RANGE.read().unwrap().is_some_and(|(a, b)| a != b)
+                    {
+                        self.toolbar_tap.begin(touch.uid, touch.abs, event.time);
+                    } else {
+                        self.toolbar_tap.cancel();
+                    }
+                }
+                TouchState::Move => self.toolbar_tap.move_to(touch.uid, touch.abs),
+                TouchState::Stop => {
+                    let tapped = self.toolbar_tap.end(touch.uid, touch.abs, event.time);
+                    return tapped && self.reader_rect(cx).contains(touch.abs);
+                }
+                TouchState::Stable => {}
+            }
+        }
+        // External pointers on phones use the same tap/drag policy.
+        match event {
+            Event::MouseDown(event) if event.button == MouseButton::PRIMARY => {
+                if self.reader_rect(cx).contains(event.abs)
+                    && !SEL_RANGE.read().unwrap().is_some_and(|(a, b)| a != b)
+                {
+                    self.toolbar_tap.begin(0, event.abs, event.time);
+                } else {
+                    self.toolbar_tap.cancel();
+                }
+            }
+            Event::MouseMove(event) => self.toolbar_tap.move_to(0, event.abs),
+            Event::MouseUp(event) if event.button == MouseButton::PRIMARY => {
+                let tapped = self.toolbar_tap.end(0, event.abs, event.time);
+                return tapped && self.reader_rect(cx).contains(event.abs);
+            }
+            Event::LongPress(_) | Event::SelectionHandleDrag(_) => self.toolbar_tap.cancel(),
+            _ => {}
+        }
+        false
+    }
+
     fn source_anchor(&self, block: usize, scroll: f64) -> Option<(usize, usize)> {
         self.pager
             .requested_source
@@ -9556,10 +9670,12 @@ impl Widget for ChapterList {
                     | Event::KeyUp(_)
             )
         {
+            self.toolbar_tap.cancel();
             return;
         }
         self.page_turn.handle_event(cx, event, self.view.area());
         if matches!(event, Event::WindowGeomChange(_)) {
+            self.toolbar_tap.cancel();
             self.page_turn.cancel();
             self.pager.pending_turn = None;
         }
@@ -9578,6 +9694,7 @@ impl Widget for ChapterList {
                     | Event::LongPress(_)
             )
         {
+            self.toolbar_tap.cancel();
             return;
         }
         let reader_info_open = READER_INFO_POPUP_OPEN.load(Ordering::Relaxed);
@@ -9592,6 +9709,7 @@ impl Widget for ChapterList {
             ))
             || (reader_info_open && matches!(event, Event::Scroll(_)))
         {
+            self.toolbar_tap.cancel();
             return;
         }
         if !self.pager.active && !self.selecting {
@@ -9642,11 +9760,13 @@ impl Widget for ChapterList {
             }
         }
         if matches!(event, Event::LongPress(_)) {
+            self.toolbar_tap.cancel();
             self.track_selection(cx, event);
             self.handle_child_event(cx, event, scope, self.touch_selection.is_some());
             return;
         }
         if self.touch_selection.is_some() && matches!(event, Event::TouchUpdate(_)) {
+            self.toolbar_tap.cancel();
             let released = matches!(event, Event::TouchUpdate(event) if event.touches.iter().any(|touch| {
                 self.touch_selection.as_ref().is_some_and(|selection| selection.uid == touch.uid)
                     && touch.state == TouchState::Stop
@@ -9659,6 +9779,7 @@ impl Widget for ChapterList {
             }
             return;
         }
+        let toolbar_tap = self.track_toolbar_tap(cx, event);
         if let Event::TouchUpdate(e) = event {
             let rect = self.reader_rect(cx);
             if e.touches
@@ -9673,7 +9794,26 @@ impl Widget for ChapterList {
                 cx.hide_clipboard_actions();
             }
         }
-        self.handle_child_event(cx, event, scope, false);
+        if toolbar_tap {
+            let actions = cx.capture_actions(|cx| self.handle_child_event(cx, event, scope, false));
+            let inline_activated = actions.iter().any(|action| {
+                matches!(action.cast(), RubyWordAction::Clicked { .. })
+                    || matches!(
+                        action.cast(),
+                        makepad_widgets::html::HtmlLinkAction::Clicked { .. }
+                    )
+                    || matches!(
+                        action.cast(),
+                        crate::chapter_image::ChapterImageAction::Open(_)
+                    )
+            });
+            cx.extend_actions(actions);
+            if !inline_activated {
+                Cx::post_action(ReaderToolbarTap);
+            }
+        } else {
+            self.handle_child_event(cx, event, scope, false);
+        }
         self.track_selection(cx, event);
     }
 }
@@ -10654,6 +10794,8 @@ pub struct App {
     compact_layout: bool,
     #[rust]
     responsive_layout_initialized: bool,
+    #[rust]
+    responsive_window_size: DVec2,
     /// A responsive transition can recreate hidden widget subtrees during the
     /// next Draw. Project state only after that draw has instantiated them.
     #[rust]
@@ -10895,6 +11037,7 @@ impl App {
     }
 
     fn activate_page(&mut self, cx: &mut Cx, page: AppPage) {
+        let retain_toolbar = self.on_reader_page && page == AppPage::Reader;
         if self.on_reader_page && page != AppPage::Reader {
             // Reader overlays retain their own local visibility even after the
             // whole reader page is hidden. Clear them before another page gets
@@ -10935,7 +11078,7 @@ impl App {
             .widget(cx, ids!(sidebar))
             .set_visible(cx, !self.compact_layout && !self.on_reader_page);
         self.sync_mobile_chrome(cx);
-        self.set_reader_toolbar_visible(cx, self.on_reader_page && self.compact_layout);
+        self.set_reader_toolbar_visible(cx, retain_toolbar && self.reader_toolbar_visible);
         self.sync_reader_toolbar_placement(cx);
         self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
     }
@@ -10950,9 +11093,19 @@ impl App {
             self.ui.widget(cx, ids!(main_window.caption_bar)).redraw(cx);
         }
         let header = self.ui.widget(cx, ids!(header));
-        if header.visible() == in_caption {
-            header.set_visible(cx, !in_caption);
+        let header_visible = !in_caption
+            && (!self.compact_layout || (self.on_reader_page && self.reader_toolbar_visible));
+        if header.visible() != header_visible {
+            header.set_visible(cx, header_visible);
             self.ui.widget(cx, ids!(page_reader)).redraw(cx);
+        }
+        let body_top = reader_body_top_inset(self.compact_layout, in_caption);
+        let body = self.ui.widget(cx, ids!(reader_body));
+        if let Some(mut inner) = body.borrow_mut::<View>() {
+            if inner.walk.margin.top != body_top {
+                inner.walk.margin.top = body_top;
+                inner.redraw(cx);
+            }
         }
         if self.reader_arrow_caption_layout != Some(in_caption) {
             self.reader_arrow_caption_layout = Some(in_caption);
@@ -10961,7 +11114,13 @@ impl App {
     }
 
     fn sync_reader_popup_arrow_alignment(&self, cx: &mut Cx, in_caption: bool) {
-        let left_offsets = if in_caption {
+        let button_size =
+            mobile_reader_button_size(self.responsive_window_size.x, self.safe_area_insets);
+        let left_offsets = if self.compact_layout {
+            [1.0, 2.0, 3.0].map(|index| {
+                self.safe_area_insets.left + index * (button_size + 2.0) + button_size / 2.0 - 18.0
+            })
+        } else if in_caption {
             [112.0, 144.0, 176.0]
         } else {
             [50.0, 90.0, 130.0]
@@ -10985,7 +11144,13 @@ impl App {
         }
         let padding = Inset {
             left: 0.0,
-            right: if in_caption { 70.0 } else { 90.0 },
+            right: if self.compact_layout {
+                self.safe_area_insets.right + 2.5 * button_size - 14.0
+            } else if in_caption {
+                70.0
+            } else {
+                90.0
+            },
             top: 0.0,
             bottom: 0.0,
         };
@@ -11007,10 +11172,117 @@ impl App {
         }
         self.ui.widget(cx, ids!(header)).redraw(cx);
         self.ui.widget(cx, ids!(main_window.caption_bar)).redraw(cx);
+        self.sync_reader_toolbar_placement(cx);
+        self.sync_reader_popup_top_inset(cx);
+    }
+
+    fn sync_reader_popup_top_inset(&self, cx: &mut Cx) {
+        let top = if self.compact_layout && self.reader_toolbar_visible {
+            88.0
+        } else {
+            0.0
+        };
+        for id in [id!(reader_panel_layer), id!(reader_theme_layer)] {
+            let widget = self.ui.widget(cx, &[id]);
+            if let Some(mut view) = widget.borrow_mut::<View>() {
+                if view.layout.padding.top != top {
+                    view.layout.padding.top = top;
+                    view.redraw(cx);
+                }
+            };
+        }
+    }
+
+    fn configure_reader_toolbar_layout(&mut self, cx: &mut Cx, size: DVec2) {
+        let compact = self.compact_layout;
+        let button_size = if compact {
+            mobile_reader_button_size(size.x, self.safe_area_insets)
+        } else {
+            36.0
+        };
+        let header_height = if compact { 88.0 } else { 54.0 };
+        let padding = Inset {
+            left: if compact {
+                self.safe_area_insets.left + 8.0
+            } else {
+                18.0
+            },
+            right: if compact {
+                self.safe_area_insets.right + 8.0
+            } else {
+                18.0
+            },
+            top: 6.0,
+            bottom: 6.0,
+        };
+        let mut header = self.ui.widget(cx, ids!(header));
+        script_apply_eval!(cx, header, {height: #(header_height) padding: #(padding)});
+        self.ui
+            .widget(cx, ids!(mobile_reader_title))
+            .set_visible(cx, compact);
+        let mut title = self.ui.widget(cx, ids!(mobile_reader_title));
+        let title_width = (size.x - padding.left - padding.right).max(1.0);
+        script_apply_eval!(cx, title, {width: #(title_width)});
+        self.ui
+            .widget(cx, ids!(reader_title_slot))
+            .set_visible(cx, !compact);
+        let mut left = self.ui.widget(cx, ids!(reader_toolbar_left));
+        let mut right = self.ui.widget(cx, ids!(reader_toolbar_right));
+        let left_width = if compact {
+            Size::fit()
+        } else {
+            Size::Fixed(180.0)
+        };
+        let right_width = if compact {
+            Size::fill()
+        } else {
+            Size::Fixed(180.0)
+        };
+        script_apply_eval!(cx, left, {width: #(left_width)});
+        script_apply_eval!(cx, right, {width: #(right_width)});
+        for id in [
+            id!(reader_toolbar_left_buttons),
+            id!(reader_toolbar_right_buttons),
+        ] {
+            let spacing = if compact { 2.0 } else { 4.0 };
+            let mut group = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, group, {spacing: #(spacing)});
+        }
+        for id in [
+            id!(reader_back_btn),
+            id!(toc_btn),
+            id!(reader_bookmarks_btn),
+            id!(notes_btn),
+            id!(reader_appearance_btn),
+            id!(reader_search_btn),
+            id!(reader_bookmark_btn),
+            id!(reader_bookmark_filled_btn),
+        ] {
+            let mut button = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, button, {
+                width: #(button_size) height: #(button_size) margin: 0
+            });
+        }
+        let mut menu = self.ui.widget(cx, ids!(reader_theme_menu));
+        let menu_width = if compact {
+            (size.x - self.safe_area_insets.left - self.safe_area_insets.right - 24.0)
+                .clamp(180.0, 316.0)
+        } else {
+            316.0
+        };
+        script_apply_eval!(cx, menu, {width: #(menu_width)});
+        let mut arrow = self.ui.widget(cx, ids!(reader_theme_arrow_row));
+        script_apply_eval!(cx, arrow, {width: #(menu_width)});
+        self.reader_arrow_caption_layout = None;
+        self.sync_reader_toolbar_placement(cx);
+        self.sync_reader_popup_top_inset(cx);
     }
 
     fn set_reader_title_text(&self, cx: &mut Cx, text: &str) {
         self.ui.label(cx, ids!(title)).set_text(cx, text);
+        self.ui
+            .label(cx, ids!(mobile_reader_title))
+            .set_text(cx, text);
         self.ui
             .label(cx, ids!(titlebar_reader_title))
             .set_text(cx, text);
@@ -12153,6 +12425,7 @@ impl App {
 
         for id in [
             id!(title),
+            id!(mobile_reader_title),
             id!(titlebar_reader_title),
             id!(status),
             id!(toc_title),
@@ -13072,12 +13345,14 @@ impl App {
         }
         let compact = uses_compact_layout(size);
         let layout_changed = !self.responsive_layout_initialized || compact != self.compact_layout;
+        let size_changed = self.responsive_window_size != size;
         let safe_area_changed = safe_area_insets != self.safe_area_insets;
-        if !layout_changed && !safe_area_changed {
+        if !layout_changed && !safe_area_changed && !size_changed {
             return false;
         }
 
         self.responsive_layout_initialized = true;
+        self.responsive_window_size = size;
         self.compact_layout = compact;
         self.safe_area_insets = safe_area_insets;
         self.ui
@@ -13089,7 +13364,8 @@ impl App {
             .set_visible(cx, compact && safe_area_insets.top > 0.0);
         self.ui.widget(cx, ids!(title)).set_visible(cx, true);
         self.ui.widget(cx, ids!(status)).set_visible(cx, !compact);
-        self.set_reader_toolbar_visible(cx, self.on_reader_page && compact);
+        self.configure_reader_toolbar_layout(cx, size);
+        self.set_reader_toolbar_visible(cx, self.on_reader_page && self.reader_toolbar_visible);
         self.sync_reader_toolbar_placement(cx);
 
         let safe_top = safe_area_insets.top;
@@ -14584,6 +14860,9 @@ impl App {
         if READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
             return;
         }
+        if self.compact_layout {
+            self.set_reader_toolbar_visible(cx, false);
+        }
         let chapter_widget = self.ui.widget(cx, ids!(chapter_list));
         let selecting = chapter_widget
             .borrow::<ChapterList>()
@@ -15366,11 +15645,29 @@ impl MatchEvent for App {
             && CURRENT_BOOK.read().unwrap().is_some()
             && chapter_list.scrolled(actions)
         {
+            if self.compact_layout && self.reader_toolbar_visible {
+                self.set_reader_toolbar_visible(cx, false);
+            }
             self.close_word_card(cx);
             self.update_progress_label(cx);
             self.debounce_reader_progress_save(cx);
         }
         for action in actions {
+            if action.downcast_ref::<ReaderToolbarTap>().is_some() {
+                if self.on_reader_page
+                    && self.compact_layout
+                    && !self.reader_theme_open
+                    && !self.toc_open
+                    && !self.bookmarks_open
+                    && !self.note_open
+                    && !self.search_open
+                    && self.card.is_none()
+                    && !READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
+                {
+                    self.set_reader_toolbar_visible(cx, !self.reader_toolbar_visible);
+                }
+                continue;
+            }
             if let Some(turn) = action.downcast_ref::<ReaderPageTurn>() {
                 if self.on_reader_page && !READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
                     self.page_scroll(cx, turn.0);
@@ -18519,7 +18816,13 @@ impl AppMain for App {
                 abs,
             );
             SELECTION_POPUP_POINTER.store(
-                popup_captures_pointer || card_captures_pointer,
+                popup_captures_pointer
+                    || card_captures_pointer
+                    || (self.on_reader_page
+                        && self.compact_layout
+                        && self.reader_toolbar_visible
+                        && current_clipped_rect(cx, self.ui.widget(cx, ids!(header)).area())
+                            .contains(abs)),
                 Ordering::Relaxed,
             );
         }
