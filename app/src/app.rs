@@ -118,6 +118,40 @@ fn mobile_reader_button_size(width: f64, insets: SafeAreaInsets) -> f64 {
     ((width - insets.left - insets.right - 26.0) / 7.0).clamp(24.0, 44.0)
 }
 
+fn reader_customise_rect(size: DVec2, insets: SafeAreaInsets) -> Rect {
+    let available = dvec2(
+        (size.x - insets.left - insets.right).max(1.0),
+        (size.y - insets.top - insets.bottom).max(1.0),
+    );
+    let card = dvec2(
+        (available.x - 24.0).clamp(1.0, 560.0),
+        (available.y - 24.0).clamp(1.0, 620.0),
+    );
+    Rect {
+        pos: dvec2(insets.left, insets.top) + (available - card) * 0.5,
+        size: card,
+    }
+}
+
+fn reader_customise_font_choices() -> [(LiveId, ReaderFont); 14] {
+    [
+        (id!(customise_font_0), ReaderFont::Canela),
+        (id!(customise_font_1), ReaderFont::Original),
+        (id!(customise_font_2), ReaderFont::Athelas),
+        (id!(customise_font_3), ReaderFont::AvenirNext),
+        (id!(customise_font_4), ReaderFont::Charter),
+        (id!(customise_font_5), ReaderFont::Georgia),
+        (id!(customise_font_6), ReaderFont::Iowan),
+        (id!(customise_font_7), ReaderFont::Palatino),
+        (id!(customise_font_8), ReaderFont::ProximaNova),
+        (id!(customise_font_9), ReaderFont::Publico),
+        (id!(customise_font_10), ReaderFont::SanFrancisco),
+        (id!(customise_font_11), ReaderFont::NewYork),
+        (id!(customise_font_12), ReaderFont::Seravek),
+        (id!(customise_font_13), ReaderFont::TimesNewRoman),
+    ]
+}
+
 fn library_surface_visibility(visible_count: usize) -> (bool, bool) {
     // Keep the data-owning PortalList mounted even when it is empty. If it is
     // hidden, a responsive rebuild can leave it uninstantiated and later
@@ -1638,6 +1672,39 @@ mod responsive_layout_tests {
         assert_eq!(reader_body_top_inset(true, true), 0.0);
         assert_eq!(reader_body_top_inset(false, true), 0.0);
         assert_eq!(reader_body_top_inset(false, false), 54.0);
+    }
+
+    #[test]
+    fn customise_dialog_fits_the_safe_area_in_both_phone_orientations() {
+        for (size, insets) in [
+            (dvec2(320.0, 568.0), SafeAreaInsets::default()),
+            (
+                dvec2(390.0, 844.0),
+                SafeAreaInsets {
+                    top: 47.0,
+                    bottom: 34.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                dvec2(844.0, 390.0),
+                SafeAreaInsets {
+                    left: 44.0,
+                    right: 44.0,
+                    bottom: 21.0,
+                    ..Default::default()
+                },
+            ),
+            (dvec2(1080.0, 720.0), SafeAreaInsets::default()),
+        ] {
+            let rect = reader_customise_rect(size, insets);
+            assert!(rect.pos.x >= insets.left + 12.0);
+            assert!(rect.pos.y >= insets.top + 12.0);
+            assert!(rect.pos.x + rect.size.x <= size.x - insets.right - 12.0);
+            assert!(rect.pos.y + rect.size.y <= size.y - insets.bottom - 12.0);
+            assert!(rect.size.x >= 296.0);
+            assert!(rect.size.y >= 300.0);
+        }
     }
 
     #[test]
@@ -6961,6 +7028,7 @@ script_mod! {
                         }
                     }
                     reader_customise_modal := Modal{
+                        align: TopLeft
                         content +: {
                             width: 560 height: 620
                             reader_customise_card := RoundedView{
@@ -6978,49 +7046,7 @@ script_mod! {
                                         text: "Customise"
                                         draw_text.text_style.font_size: 17
                                     }
-                                    reader_customise_close := ButtonFlatter{text: "X"}
-                                }
-                                reader_preview := RoundedView{
-                                    width: Fill height: 180
-                                    new_batch: true
-                                    flow: Down spacing: 6 padding: 16
-                                    draw_bg.color: #f7f4ea
-                                    draw_bg.border_radius: 10.0
-                                    reader_preview_heading := Label{
-                                        width: Fill height: Fit
-                                        text: "Ruby 注音验证"
-                                        draw_text.text_style.font_size: 15
-                                    }
-                                    reader_preview_scroll := ScrollYView{
-                                        width: Fill height: Fill
-                                        scroll_bars +: {scroll_bar_y +: {draw_bg +: {
-                                            color: #0000 color_hover: #0000 color_drag: #0000
-                                            border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
-                                            border_size: 0.0
-                                        }}}
-                                        reader_preview_columns := View{
-                                            width: Fill height: Fit
-                                            flow: Right spacing: 12
-                                            reader_preview_text := Html{
-                                                width: Fill height: Fit
-                                                // First-row ruby paints above Html's measured text box.
-                                                clip_y: false
-                                                selectable: false
-                                                ruby := mod.widgets.RubyWord{preview: true}
-                                            }
-                                            reader_preview_second_column := View{
-                                                visible: false
-                                                width: Fill height: Fit
-                                                clip_y: false
-                                                reader_preview_text_second := Html{
-                                                    width: Fill height: Fit
-                                                    clip_y: false
-                                                    selectable: false
-                                                    ruby := mod.widgets.RubyWord{preview: true}
-                                                }
-                                            }
-                                        }
-                                    }
+                                    reader_customise_close := ButtonFlatter{width: 40 height: 40 margin: 0 text: "X"}
                                 }
                                 reader_customise_scroll := ScrollYView{
                                     width: Fill height: Fill
@@ -7030,6 +7056,48 @@ script_mod! {
                                         border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
                                         border_size: 0.0
                                     }}}
+                                    reader_preview := RoundedView{
+                                        width: Fill height: 180
+                                        new_batch: true
+                                        flow: Down spacing: 6 padding: 16
+                                        draw_bg.color: #f7f4ea
+                                        draw_bg.border_radius: 10.0
+                                        reader_preview_heading := Label{
+                                            width: Fill height: Fit
+                                            text: "Ruby 注音验证"
+                                            draw_text.text_style.font_size: 15
+                                        }
+                                        reader_preview_scroll := ScrollYView{
+                                            width: Fill height: Fill
+                                            scroll_bars +: {scroll_bar_y +: {draw_bg +: {
+                                                color: #0000 color_hover: #0000 color_drag: #0000
+                                                border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
+                                                border_size: 0.0
+                                            }}}
+                                            reader_preview_columns := View{
+                                                width: Fill height: Fit
+                                                flow: Right spacing: 12
+                                                reader_preview_text := Html{
+                                                    width: Fill height: Fit
+                                                    // First-row ruby paints above Html's measured text box.
+                                                    clip_y: false
+                                                    selectable: false
+                                                    ruby := mod.widgets.RubyWord{preview: true}
+                                                }
+                                                reader_preview_second_column := View{
+                                                    visible: false
+                                                    width: Fill height: Fit
+                                                    clip_y: false
+                                                    reader_preview_text_second := Html{
+                                                        width: Fill height: Fit
+                                                        clip_y: false
+                                                        selectable: false
+                                                        ruby := mod.widgets.RubyWord{preview: true}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     reader_customise_text_title := Label{
                                         text: "Text"
                                         draw_text.text_style.font_size: 13
@@ -7039,21 +7107,53 @@ script_mod! {
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_font_label := Label{width: Fill text: "Font"}
-                                        reader_customise_font_choice := DropDown{
-                                            width: 180 height: 32
-                                            align: Align{x: 0.0 y: 0.5}
-                                            padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
-                                            labels: ["Original"]
+                                        reader_customise_font_button := ButtonFlatter{
+                                            visible: false
+                                            width: Fill height: 40 margin: 0
+                                            text: "Original"
                                         }
+                                        reader_customise_font_slot := View{
+                                            width: 180 height: Fit
+                                            reader_customise_font_choice := DropDown{
+                                                width: Fill height: 32
+                                                align: Align{x: 0.0 y: 0.5}
+                                                padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
+                                                labels: ["Original"]
+                                            }
+                                        }
+                                    }
+                                    reader_customise_font_options := View{
+                                        visible: false
+                                        width: Fill height: Fit
+                                        flow: Flow.Right{wrap: true} spacing: 6
+                                        customise_font_0 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_1 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_2 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_3 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_4 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_5 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_6 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_7 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_8 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_9 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_10 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_11 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_12 := ButtonFlatter{height: 36 margin: 0 text: ""}
+                                        customise_font_13 := ButtonFlatter{height: 36 margin: 0 text: ""}
                                     }
                                     reader_customise_size_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_size_label := Label{width: Fill text: "Text Size"}
-                                        reader_customise_size_down := ButtonFlat{text: "A-"}
-                                        reader_customise_size_value := Label{text: "12"}
-                                        reader_customise_size_up := ButtonFlat{text: "A+"}
+                                        reader_customise_size_controls := View{
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            reader_customise_size_down := ButtonFlat{text: "A-"}
+                                            reader_customise_size_value := Label{text: "12"}
+                                            reader_customise_size_up := ButtonFlat{text: "A+"}
+                                        }
                                     }
                                     reader_customise_bold := CheckBox{text: "Bold Text"}
                                     reader_customise_gloss_title := Label{
@@ -7065,41 +7165,62 @@ script_mod! {
                                         width: Fill height: Fit flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_gloss_size_label := Label{width: Fill text: "Annotation Size"}
-                                        reader_customise_gloss_size_down := ButtonFlat{text: "-"}
-                                        reader_customise_gloss_size_value := Label{text: "7.5"}
-                                        reader_customise_gloss_size_up := ButtonFlat{text: "+"}
+                                        reader_customise_gloss_size_controls := View{
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            reader_customise_gloss_size_down := ButtonFlat{text: "-"}
+                                            reader_customise_gloss_size_value := Label{text: "7.5"}
+                                            reader_customise_gloss_size_up := ButtonFlat{text: "+"}
+                                        }
                                     }
                                     reader_customise_gloss_color_row := View{
                                         width: Fill height: Fit flow: Right spacing: 5
                                         reader_customise_gloss_color_label := Label{width: Fill text: "Annotation Color"}
-                                        reader_customise_gloss_color_green := ButtonFlat{text: "Green"}
-                                        reader_customise_gloss_color_blue := ButtonFlat{text: "Blue"}
-                                        reader_customise_gloss_color_orange := ButtonFlat{text: "Orange"}
-                                        reader_customise_gloss_color_gray := ButtonFlat{text: "Gray"}
+                                        reader_customise_gloss_color_options := View{
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 5
+                                            reader_customise_gloss_color_green := ButtonFlat{text: "Green"}
+                                            reader_customise_gloss_color_blue := ButtonFlat{text: "Blue"}
+                                            reader_customise_gloss_color_orange := ButtonFlat{text: "Orange"}
+                                            reader_customise_gloss_color_gray := ButtonFlat{text: "Gray"}
+                                        }
                                     }
                                     reader_customise_gloss_bg_row := View{
                                         width: Fill height: Fit flow: Right spacing: 5
                                         reader_customise_gloss_bg_label := Label{width: Fill text: "Annotation Background"}
-                                        reader_customise_gloss_bg_none := ButtonFlat{text: "None"}
-                                        reader_customise_gloss_bg_gray := ButtonFlat{text: "Gray"}
-                                        reader_customise_gloss_bg_green := ButtonFlat{text: "Green"}
-                                        reader_customise_gloss_bg_blue := ButtonFlat{text: "Blue"}
+                                        reader_customise_gloss_bg_options := View{
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 5
+                                            reader_customise_gloss_bg_none := ButtonFlat{text: "None"}
+                                            reader_customise_gloss_bg_gray := ButtonFlat{text: "Gray"}
+                                            reader_customise_gloss_bg_green := ButtonFlat{text: "Green"}
+                                            reader_customise_gloss_bg_blue := ButtonFlat{text: "Blue"}
+                                        }
                                     }
                                     reader_customise_word_color_row := View{
                                         width: Fill height: Fit flow: Right spacing: 5
                                         reader_customise_word_color_label := Label{width: Fill text: "Word Color"}
-                                        reader_customise_word_color_default := ButtonFlat{text: "Default"}
-                                        reader_customise_word_color_green := ButtonFlat{text: "Green"}
-                                        reader_customise_word_color_blue := ButtonFlat{text: "Blue"}
-                                        reader_customise_word_color_orange := ButtonFlat{text: "Orange"}
+                                        reader_customise_word_color_options := View{
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 5
+                                            reader_customise_word_color_default := ButtonFlat{text: "Default"}
+                                            reader_customise_word_color_green := ButtonFlat{text: "Green"}
+                                            reader_customise_word_color_blue := ButtonFlat{text: "Blue"}
+                                            reader_customise_word_color_orange := ButtonFlat{text: "Orange"}
+                                        }
                                     }
                                     reader_customise_word_bg_row := View{
                                         width: Fill height: Fit flow: Right spacing: 5
                                         reader_customise_word_bg_label := Label{width: Fill text: "Word Background"}
-                                        reader_customise_word_bg_none := ButtonFlat{text: "None"}
-                                        reader_customise_word_bg_gray := ButtonFlat{text: "Gray"}
-                                        reader_customise_word_bg_green := ButtonFlat{text: "Green"}
-                                        reader_customise_word_bg_blue := ButtonFlat{text: "Blue"}
+                                        reader_customise_word_bg_options := View{
+                                            width: Fit height: Fit
+                                            flow: Right spacing: 5
+                                            reader_customise_word_bg_none := ButtonFlat{text: "None"}
+                                            reader_customise_word_bg_gray := ButtonFlat{text: "Gray"}
+                                            reader_customise_word_bg_green := ButtonFlat{text: "Green"}
+                                            reader_customise_word_bg_blue := ButtonFlat{text: "Blue"}
+                                        }
                                     }
                                     reader_customise_layout_title := Label{
                                         text: "Accessibility & Layout"
@@ -7110,32 +7231,52 @@ script_mod! {
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_line_label := Label{width: 164 text: "LINE SPACING"}
-                                        reader_customise_line_slider := ReaderLayoutSlider{min: 0.8 max: 2.5}
-                                        reader_customise_line_value := Label{width: 58 text: "1.55×"}
+                                        reader_customise_line_controls := View{
+                                            width: Fill height: Fit
+                                            flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            reader_customise_line_slider := ReaderLayoutSlider{min: 0.8 max: 2.5}
+                                            reader_customise_line_value := Label{width: 58 text: "1.55×"}
+                                        }
                                     }
                                     reader_customise_character_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_character_label := Label{width: 164 text: "CHARACTER SPACING"}
-                                        reader_customise_character_slider := ReaderLayoutSlider{min: -10. max: 10.}
-                                        reader_customise_character_value := Label{width: 58 text: "0%"}
+                                        reader_customise_character_controls := View{
+                                            width: Fill height: Fit
+                                            flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            reader_customise_character_slider := ReaderLayoutSlider{min: -10. max: 10.}
+                                            reader_customise_character_value := Label{width: 58 text: "0%"}
+                                        }
                                     }
                                     reader_customise_word_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_word_label := Label{width: 164 text: "WORD SPACING"}
-                                        reader_customise_word_slider := ReaderLayoutSlider{min: -20. max: 20.}
-                                        reader_customise_word_value := Label{width: 58 text: "0%"}
+                                        reader_customise_word_controls := View{
+                                            width: Fill height: Fit
+                                            flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            reader_customise_word_slider := ReaderLayoutSlider{min: -20. max: 20.}
+                                            reader_customise_word_value := Label{width: 58 text: "0%"}
+                                        }
                                     }
                                     reader_customise_margin_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_margin_label := Label{width: 164 text: "MARGINS"}
-                                        reader_customise_margin_slider := ReaderLayoutSlider{min: -10. max: 10.}
-                                        reader_customise_margin_value := Label{width: 58 text: "0%"}
+                                        reader_customise_margin_controls := View{
+                                            width: Fill height: Fit
+                                            flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            reader_customise_margin_slider := ReaderLayoutSlider{min: -10. max: 10.}
+                                            reader_customise_margin_value := Label{width: 58 text: "0%"}
+                                        }
                                     }
                                     reader_customise_columns_row := View{
                                         width: Fill height: Fit
@@ -7164,10 +7305,10 @@ script_mod! {
                                     flow: Right spacing: 10
                                     align: Align{x: 1.0 y: 0.5}
                                     reader_customise_cancel := ButtonFlatter{
-                                        width: 100 height: 38 text: "Cancel"
+                                        width: 100 height: 44 margin: 0 text: "Cancel"
                                     }
                                     reader_customise_save := ButtonFlat{
-                                        width: 148 height: 38 text: "Save & Apply"
+                                        width: 148 height: 44 margin: 0 text: "Save & Apply"
                                     }
                                 }
                             }
@@ -10950,9 +11091,127 @@ impl App {
             reader.page_turn.cancel();
             reader.pager.pending_turn = None;
         }
+        self.ui
+            .widget(cx, ids!(reader_customise_font_options))
+            .set_visible(cx, false);
+        self.configure_reader_customise_layout(cx);
+        self.ui
+            .widget(cx, ids!(reader_customise_scroll))
+            .set_scroll_pos(cx, DVec2::default());
         self.ui.modal(cx, ids!(reader_customise_modal)).open(cx);
         self.load_reader_font(cx, self.reader_customise_draft.as_ref().unwrap().font, true);
         self.sync_reader_customise_controls(cx);
+    }
+
+    fn configure_reader_customise_layout(&self, cx: &mut Cx) {
+        if self.responsive_window_size.x <= 0.0 || self.responsive_window_size.y <= 0.0 {
+            return;
+        }
+        let rect = reader_customise_rect(self.responsive_window_size, self.safe_area_insets);
+        let stacked = rect.size.x < 500.0;
+        let mut content = self.ui.widget(cx, ids!(reader_customise_modal.content));
+        if let Some(mut view) = content.borrow_mut::<View>() {
+            view.walk.abs_pos = Some(rect.pos);
+        }
+        script_apply_eval!(cx, content, {width: #(rect.size.x) height: #(rect.size.y)});
+        let mut card = self.ui.widget(cx, ids!(reader_customise_card));
+        let padding = if stacked { 12.0 } else { 20.0 };
+        let spacing = if stacked { 12.0 } else { 16.0 };
+        script_apply_eval!(cx, card, {padding: #(padding) spacing: #(spacing)});
+        let mut preview = self.ui.widget(cx, ids!(reader_preview));
+        let preview_height = if stacked { 140.0 } else { 180.0 };
+        script_apply_eval!(cx, preview, {height: #(preview_height)});
+        for id in [
+            id!(reader_customise_font_row),
+            id!(reader_customise_size_row),
+            id!(reader_customise_gloss_size_row),
+            id!(reader_customise_gloss_color_row),
+            id!(reader_customise_gloss_bg_row),
+            id!(reader_customise_word_color_row),
+            id!(reader_customise_word_bg_row),
+            id!(reader_customise_line_row),
+            id!(reader_customise_character_row),
+            id!(reader_customise_word_row),
+            id!(reader_customise_margin_row),
+            id!(reader_customise_columns_row),
+        ] {
+            let row = self.ui.widget(cx, &[id]);
+            if let Some(mut view) = row.borrow_mut::<View>() {
+                view.layout.flow = if stacked { Flow::Down } else { Flow::right() };
+                view.layout.spacing = if stacked { 6.0 } else { 8.0 };
+            };
+        }
+        for id in [
+            id!(reader_customise_gloss_color_options),
+            id!(reader_customise_gloss_bg_options),
+            id!(reader_customise_word_color_options),
+            id!(reader_customise_word_bg_options),
+        ] {
+            let options = self.ui.widget(cx, &[id]);
+            if let Some(mut view) = options.borrow_mut::<View>() {
+                view.walk.width = if stacked { Size::fill() } else { Size::fit() };
+                view.layout.flow = if stacked {
+                    Flow::right_wrap()
+                } else {
+                    Flow::right()
+                };
+            };
+        }
+        for id in [
+            id!(reader_customise_line_label),
+            id!(reader_customise_character_label),
+            id!(reader_customise_word_label),
+            id!(reader_customise_margin_label),
+        ] {
+            let mut label = self.ui.widget(cx, &[id]);
+            let width = if stacked {
+                Size::fill()
+            } else {
+                Size::Fixed(164.0)
+            };
+            script_apply_eval!(cx, label, {width: #(width)});
+        }
+        for id in [
+            id!(reader_customise_font_slot),
+            id!(reader_customise_columns_choice),
+        ] {
+            let mut choice = self.ui.widget(cx, &[id]);
+            let width = if stacked {
+                Size::fill()
+            } else {
+                Size::Fixed(180.0)
+            };
+            script_apply_eval!(cx, choice, {width: #(width)});
+        }
+        // DropDown has an unbounded popup; use inline choices when
+        // the dialog cannot contain its fourteen font rows.
+        let inline_fonts = stacked || rect.size.y < 500.0;
+        self.ui
+            .widget(cx, ids!(reader_customise_font_slot))
+            .set_visible(cx, !inline_fonts);
+        let mut font_button = self.ui.widget(cx, ids!(reader_customise_font_button));
+        font_button.set_visible(cx, inline_fonts);
+        let width = if stacked {
+            Size::fill()
+        } else {
+            Size::Fixed(180.0)
+        };
+        script_apply_eval!(cx, font_button, {width: #(width)});
+        if !inline_fonts {
+            self.ui
+                .widget(cx, ids!(reader_customise_font_options))
+                .set_visible(cx, false);
+        }
+        let mut save = self.ui.widget(cx, ids!(reader_customise_save));
+        let width = if stacked {
+            Size::fill()
+        } else {
+            Size::Fixed(148.0)
+        };
+        script_apply_eval!(cx, save, {width: #(width)});
+        // Modal owns a separate overlay draw list; invalidate it after rotation.
+        let mut modal = self.ui.widget(cx, ids!(reader_customise_modal));
+        script_apply_eval!(cx, modal, {});
     }
 
     fn close_reader_customise(&mut self, cx: &mut Cx) {
@@ -11989,6 +12248,15 @@ impl App {
                 .widget(cx, &[id])
                 .set_visible(cx, settings.gloss_enabled);
         }
+        self.ui
+            .button(cx, ids!(reader_customise_font_button))
+            .set_text(cx, font.label());
+        for (id, option) in reader_customise_font_choices() {
+            let button = self.ui.widget(cx, &[id]);
+            button.set_text(cx, option.label());
+            apply_reader_button_palette(cx, button, palette);
+            self.paint_customise_choice(cx, id, font == option, palette);
+        }
         let font_choice = self.ui.drop_down(cx, ids!(reader_customise_font_choice));
         font_choice.set_labels(
             cx,
@@ -12087,15 +12355,19 @@ impl App {
             self.ui.widget(cx, ids!(reader_preview_heading)),
             palette.text,
         );
-        let two_columns = match columns {
-            ReaderColumns::One => false,
-            ReaderColumns::Two => true,
-            ReaderColumns::Auto => self
-                .ui
-                .widget(cx, ids!(chapter_list))
-                .borrow::<ChapterList>()
-                .is_some_and(|reader| reader.pager.layout.count > 1),
-        };
+        let two_columns = reader_customise_rect(self.responsive_window_size, self.safe_area_insets)
+            .size
+            .x
+            >= 500.0
+            && match columns {
+                ReaderColumns::One => false,
+                ReaderColumns::Two => true,
+                ReaderColumns::Auto => self
+                    .ui
+                    .widget(cx, ids!(chapter_list))
+                    .borrow::<ChapterList>()
+                    .is_some_and(|reader| reader.pager.layout.count > 1),
+            };
         self.ui
             .widget(cx, ids!(reader_preview_second_column))
             .set_visible(cx, two_columns);
@@ -12516,6 +12788,7 @@ impl App {
             id!(reader_customise_cancel),
             id!(reader_customise_save),
             id!(reader_customise_font_choice),
+            id!(reader_customise_font_button),
             id!(reader_customise_columns_choice),
             id!(reader_customise_size_down),
             id!(reader_customise_size_up),
@@ -13365,6 +13638,10 @@ impl App {
         self.ui.widget(cx, ids!(title)).set_visible(cx, true);
         self.ui.widget(cx, ids!(status)).set_visible(cx, !compact);
         self.configure_reader_toolbar_layout(cx, size);
+        self.configure_reader_customise_layout(cx);
+        if self.reader_customise_draft.is_some() {
+            self.sync_reader_customise_controls(cx);
+        }
         self.set_reader_toolbar_visible(cx, self.on_reader_page && self.reader_toolbar_visible);
         self.sync_reader_toolbar_placement(cx);
 
@@ -17367,6 +17644,27 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.save_reader_customise(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(reader_customise_font_button))
+            .clicked(actions)
+        {
+            let options = self.ui.widget(cx, ids!(reader_customise_font_options));
+            options.set_visible(cx, !options.visible());
+            self.ui.widget(cx, ids!(reader_customise_scroll)).redraw(cx);
+        }
+        for (id, font) in reader_customise_font_choices() {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.font = font;
+                    self.ui
+                        .widget(cx, ids!(reader_customise_font_options))
+                        .set_visible(cx, false);
+                    self.load_reader_font(cx, font, true);
+                    self.sync_reader_customise_controls(cx);
+                }
+            }
         }
         if let Some(index) = self
             .ui
