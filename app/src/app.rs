@@ -11281,6 +11281,11 @@ impl App {
         self.activate_page(cx, self.active_page);
         if self.on_reader_page {
             self.sync_reader_panel_layout(cx);
+            // Reload can reset label text even when cached page geometry is unchanged.
+            self.update_progress_label(cx);
+            self.update_reader_page_footer(cx);
+            // Reload resets draw Areas; repaint cached batches after projecting labels.
+            cx.redraw_all();
         }
         if let Some((vocab_count, known_count)) = *DB_READY_COUNTS.read().unwrap() {
             self.project_db_ready_status(cx, vocab_count, known_count);
@@ -13331,9 +13336,10 @@ impl App {
         cx.request_script_reapply();
     }
 
-    /// ScriptReapply 不销毁 widget 树；这里只恢复可能由脚本默认值重写的
-    /// 页面、响应式布局和投影视图，业务数据仍由 Rust 状态持有。
+    /// 安全区变化触发 LiveEdit，主题切换触发 ScriptReapply；两者都可能
+    /// 覆盖运行时布局。恢复安全区、当前页面和控件投影，业务状态仍由 Rust 持有。
     fn restore_after_script_reload(&mut self, cx: &mut Cx) {
+        self.pending_ui_projection_after_draw = true;
         self.active_font_applied = None;
         self.preview_font_applied = None;
         self.reader_arrow_caption_layout = None;
@@ -19225,7 +19231,7 @@ impl AppMain for App {
             }
         }
         match event {
-            Event::ScriptReapply => self.restore_after_script_reload(cx),
+            Event::LiveEdit | Event::ScriptReapply => self.restore_after_script_reload(cx),
             Event::Startup => {
                 let _ = APP_STARTED_AT.set(Instant::now());
                 #[cfg(target_os = "macos")]
