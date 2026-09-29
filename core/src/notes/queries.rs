@@ -92,6 +92,13 @@ pub async fn get_note(pool: &SqlitePool, id: &str) -> Result<Option<Note>, Strin
     row.as_ref().map(Note::from_row).transpose()
 }
 
+/// 所有书籍的笔记，按最近编辑排序；保留已移除书籍的笔记及书籍快照。
+pub async fn get_all_notes(pool: &SqlitePool) -> Result<Vec<Note>, String> {
+    let rows = sqlx::query("SELECT id, book_id, book_meta, title, content, created_at, updated_at FROM notes ORDER BY updated_at DESC, id")
+        .fetch_all(pool).await.map_err(|e| format!("读取全部笔记失败: {e}"))?;
+    rows.iter().map(Note::from_row).collect()
+}
+
 pub async fn get_notes_by_book(pool: &SqlitePool, book_id: &str) -> Result<Vec<Note>, String> {
     let rows = sqlx::query(
         "SELECT id, book_id, book_meta, title, content, created_at, updated_at

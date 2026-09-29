@@ -1,7 +1,78 @@
 //! Touch selection starts with a whole word; a normal swipe remains scrolling.
-use makepad_widgets::DVec2;
+use makepad_widgets::makepad_platform::event::finger::TAP_COUNT_DISTANCE;
+use makepad_widgets::makepad_platform::event::TouchState;
+use makepad_widgets::{DVec2, Event, MouseButton, Rect};
 
 type Position = (usize, usize);
+
+/// A scrolling list must remember movement even if the pointer returns to its origin.
+#[derive(Default)]
+pub struct ListTap {
+    origin: Option<(u64, DVec2)>,
+}
+
+impl ListTap {
+    pub fn cancel(&mut self) {
+        self.origin = None;
+    }
+
+    fn move_to(&mut self, uid: u64, abs: DVec2) {
+        if self.origin.is_some_and(|(origin_uid, origin)| {
+            uid != origin_uid || (abs - origin).length() >= TAP_COUNT_DISTANCE
+        }) {
+            self.cancel();
+        }
+    }
+
+    fn release(&mut self, uid: u64, abs: DVec2, rect: Rect) -> bool {
+        self.move_to(uid, abs);
+        self.origin.take().is_some() && rect.contains(abs)
+    }
+
+    /// Gate child click actions while still forwarding every release to clear capture.
+    pub fn allows_click(&mut self, event: &Event, rect: Rect) -> bool {
+        match event {
+            Event::TouchUpdate(event) => {
+                if event.touches.len() != 1 {
+                    self.cancel();
+                    return false;
+                }
+                let touch = &event.touches[0];
+                match touch.state {
+                    TouchState::Start => {
+                        self.origin = rect.contains(touch.abs).then_some((touch.uid, touch.abs));
+                    }
+                    TouchState::Move | TouchState::Stable => self.move_to(touch.uid, touch.abs),
+                    TouchState::Stop => return self.release(touch.uid, touch.abs, rect),
+                }
+                false
+            }
+            Event::MouseDown(event) => {
+                self.origin = (event.button == MouseButton::PRIMARY && rect.contains(event.abs))
+                    .then_some((0, event.abs));
+                false
+            }
+            Event::MouseMove(event) => {
+                self.move_to(0, event.abs);
+                false
+            }
+            Event::MouseUp(event) => {
+                let primary = event.button == MouseButton::PRIMARY;
+                self.release(0, event.abs, rect) && primary
+            }
+            Event::LongPress(_)
+            | Event::Scroll(_)
+            | Event::MouseLeave(_)
+            | Event::WindowLostFocus(_)
+            | Event::LiveEdit
+            | Event::ScriptReapply => {
+                self.cancel();
+                false
+            }
+            _ => true,
+        }
+    }
+}
 
 /// A toolbar tap must never be inferred from a swipe that returns to its origin.
 #[derive(Default)]
@@ -72,6 +143,113 @@ impl TouchSelection {
 mod tests {
     use super::*;
     use makepad_widgets::dvec2;
+
+    fn list_touch(uid: u64, state: TouchState, abs: DVec2) -> Event {
+        use makepad_widgets::makepad_platform::event::{TouchPoint, TouchUpdateEvent};
+        use makepad_widgets::WindowId;
+        Event::TouchUpdate(TouchUpdateEvent {
+            time: 1.0,
+            window_id: WindowId(0, 0),
+            modifiers: Default::default(),
+            touches: vec![TouchPoint {
+                state,
+                abs,
+                time: 1.0,
+                uid,
+                rotation_angle: 0.0,
+                force: 1.0,
+                radius: dvec2(1.0, 1.0),
+                handled: Default::default(),
+                sweep_lock: Default::default(),
+            }],
+        })
+    }
+
+    fn list_rect() -> Rect {
+        Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(300.0, 600.0),
+        }
+    }
+
+    #[test]
+    fn list_scroll_and_backtracking_never_activate_the_released_row() {
+        for end in [dvec2(100.0, 170.0), dvec2(100.0, 200.0)] {
+            let mut tap = ListTap::default();
+            tap.allows_click(
+                &list_touch(1, TouchState::Start, dvec2(100.0, 200.0)),
+                list_rect(),
+            );
+            tap.allows_click(
+                &list_touch(1, TouchState::Move, dvec2(100.0, 170.0)),
+                list_rect(),
+            );
+            assert!(!tap.allows_click(&list_touch(1, TouchState::Stop, end), list_rect()));
+        }
+    }
+
+    #[test]
+    fn list_tap_tolerates_jitter_and_recovers_after_cancelled_scroll() {
+        let mut tap = ListTap::default();
+        tap.allows_click(
+            &list_touch(1, TouchState::Start, dvec2(100.0, 200.0)),
+            list_rect(),
+        );
+        tap.allows_click(
+            &list_touch(1, TouchState::Move, dvec2(100.0, 195.0)),
+            list_rect(),
+        );
+        assert!(!tap.allows_click(
+            &list_touch(1, TouchState::Stop, dvec2(100.0, 200.0)),
+            list_rect()
+        ));
+        tap.allows_click(
+            &list_touch(2, TouchState::Start, dvec2(100.0, 200.0)),
+            list_rect(),
+        );
+        tap.allows_click(
+            &list_touch(2, TouchState::Move, dvec2(102.0, 201.0)),
+            list_rect(),
+        );
+        assert!(tap.allows_click(
+            &list_touch(2, TouchState::Stop, dvec2(103.0, 201.0)),
+            list_rect()
+        ));
+        assert!(!tap.allows_click(
+            &list_touch(2, TouchState::Stop, dvec2(103.0, 201.0)),
+            list_rect()
+        ));
+    }
+
+    #[test]
+    fn list_touch_that_stops_a_flick_does_not_activate_a_chapter() {
+        let mut tap = ListTap::default();
+        let start = list_touch(1, TouchState::Start, dvec2(100.0, 200.0));
+        let stop = list_touch(1, TouchState::Stop, dvec2(100.0, 200.0));
+        tap.allows_click(&start, list_rect());
+        // PortalList reports was_scrolling on the down event that stops a flick.
+        tap.cancel();
+        assert!(!tap.allows_click(&stop, list_rect()));
+        tap.allows_click(&start, list_rect());
+        assert!(tap.allows_click(&stop, list_rect()));
+    }
+
+    #[test]
+    fn list_multi_touch_and_layout_reload_cancel_pending_activation() {
+        let mut tap = ListTap::default();
+        let start = list_touch(1, TouchState::Start, dvec2(100.0, 200.0));
+        let stop = list_touch(1, TouchState::Stop, dvec2(100.0, 200.0));
+        tap.allows_click(&start, list_rect());
+        let mut multi = list_touch(2, TouchState::Start, dvec2(150.0, 200.0));
+        if let (Event::TouchUpdate(multi), Event::TouchUpdate(start)) = (&mut multi, &start) {
+            multi.touches.push(start.touches[0].clone());
+        }
+        assert!(!tap.allows_click(&multi, list_rect()));
+        assert!(!tap.allows_click(&stop, list_rect()));
+        tap.allows_click(&start, list_rect());
+        tap.allows_click(&Event::LiveEdit, list_rect());
+        assert!(!tap.allows_click(&stop, list_rect()));
+    }
 
     #[test]
     fn ordinary_tap_tolerates_jitter_but_does_not_accept_long_press() {

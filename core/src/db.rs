@@ -697,6 +697,10 @@ impl Db {
             .block_on(notes::update_note(&self.pool, id, content))
     }
 
+    pub fn get_all_notes(&self) -> Result<Vec<crate::notes::models::Note>, String> {
+        self.rt.block_on(crate::notes::get_all_notes(&self.pool))
+    }
+
     pub fn get_notes_by_book(&self, book_id: &str) -> Result<Vec<Note>, String> {
         self.rt
             .block_on(notes::get_notes_by_book(&self.pool, book_id))

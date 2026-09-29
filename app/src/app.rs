@@ -1,7 +1,7 @@
 use crate::chapter_image::ChapterImageAction;
 use crate::reader_book_pages::BookPages;
 use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
-use crate::reader_touch::ToolbarTap;
+use crate::reader_touch::{ListTap, ToolbarTap};
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
 use makepad_ai::{
@@ -48,6 +48,14 @@ mod reader_icon_tests {
             include_str!("../resources/icons/reader_bookmark.svg"),
             include_str!("../resources/icons/reader_bookmark_filled.svg"),
             include_str!("../resources/icons/reader_settings.svg"),
+            include_str!("../resources/icons/nav_reading.svg"),
+            include_str!("../resources/icons/nav_shelf.svg"),
+            include_str!("../resources/icons/nav_vocab.svg"),
+            include_str!("../resources/icons/nav_profile.svg"),
+            include_str!("../resources/icons/nav_time.svg"),
+            include_str!("../resources/icons/nav_completed.svg"),
+            include_str!("../resources/icons/nav_chat.svg"),
+            include_str!("../resources/icons/nav_skills.svg"),
         ];
         for svg in icons {
             let document = makepad_widgets::makepad_draw::svg::parse_svg(svg);
@@ -199,6 +207,15 @@ fn shelf_cover_needs_load(
 
 const LIST_COVER_WIDTH_TO_HEIGHT: f64 = 44.0 / 56.0;
 
+fn shelf_list_cover_size(info_height: f64, shelf_width: f64) -> DVec2 {
+    // Reserve the list's 48px padding, the card's 24px padding, two
+    // 14px gaps, a 40px menu and at least 80px for text. Cover growth
+    // must not narrow the text and recursively inflate the next measurement.
+    let max_width = (shelf_width - 48.0 - 24.0 - 28.0 - 40.0 - 80.0).clamp(32.0, 128.0);
+    let width = (info_height.max(0.0) * LIST_COVER_WIDTH_TO_HEIGHT).min(max_width);
+    dvec2(width, width / LIST_COVER_WIDTH_TO_HEIGHT)
+}
+
 fn reader_last_page_start(block_count: usize, blocks_per_page: usize) -> usize {
     let last = block_count.saturating_sub(1);
     let span = blocks_per_page.max(1);
@@ -278,6 +295,9 @@ enum AppPage {
     Vocab,
     Statistics,
     Settings,
+    ReadingHome,
+    Profile,
+    Notes,
 }
 
 impl AppPage {
@@ -290,6 +310,9 @@ impl AppPage {
             Self::Vocab => id!(page_vocab),
             Self::Statistics => id!(page_statistics),
             Self::Settings => id!(page_settings),
+            Self::ReadingHome => id!(page_reading_home),
+            Self::Profile => id!(page_profile),
+            Self::Notes => id!(page_notes),
         }
     }
 
@@ -301,6 +324,9 @@ impl AppPage {
             4 => Self::Vocab,
             5 => Self::Statistics,
             6 => Self::Settings,
+            7 => Self::ReadingHome,
+            8 => Self::Profile,
+            9 => Self::Notes,
             _ => Self::Library,
         }
     }
@@ -314,6 +340,9 @@ impl AppPage {
             Self::Vocab => 4,
             Self::Statistics => 5,
             Self::Settings => 6,
+            Self::ReadingHome => 7,
+            Self::Profile => 8,
+            Self::Notes => 9,
         }
     }
 }
@@ -1124,6 +1153,27 @@ enum VocabAction {
     Error(String),
 }
 
+static PROFILE_STATISTICS: LazyLock<RwLock<Option<StatisticsSnapshot>>> =
+    LazyLock::new(|| RwLock::new(None));
+static ALL_NOTES: LazyLock<RwLock<Vec<readwise_core::notes::models::Note>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+#[derive(Debug)]
+enum AllNotesAction {
+    Loaded(Vec<readwise_core::notes::models::Note>),
+    Error(String),
+}
+
+fn spawn_load_all_notes() {
+    std::thread::spawn(|| {
+        let Some(db) = DB.get() else { return };
+        match db.get_all_notes() {
+            Ok(notes) => Cx::post_action(AllNotesAction::Loaded(notes)),
+            Err(error) => Cx::post_action(AllNotesAction::Error(error)),
+        }
+    });
+}
+
 #[derive(Debug)]
 enum StatisticsAction {
     Loaded(StatisticsSnapshot),
@@ -1751,6 +1801,11 @@ mod responsive_layout_tests {
             restored_page_after_rebuild(AppPage::Vocab.persisted(), false),
             AppPage::Vocab
         );
+        for page in [AppPage::ReadingHome, AppPage::Profile, AppPage::Notes] {
+            assert_eq!(AppPage::from_persisted(page.persisted()), page);
+            assert_eq!(restored_page_after_rebuild(page.persisted(), false), page);
+        }
+        assert_eq!(AppPage::Settings.persisted(), 6);
         assert_eq!(
             restored_page_after_rebuild(usize::MAX, true),
             AppPage::Library
@@ -1977,6 +2032,8 @@ struct ShelfItem {
 }
 
 const WANT_TO_READ_FILTER: &str = "\0readwise:want-to-read";
+const READING_FILTER: &str = "\0readwise:reading";
+const COMPLETED_FILTER: &str = "\0readwise:completed";
 
 fn shelf_items_for_tag(items: &[ShelfItem], selected: Option<&str>) -> Vec<ShelfItem> {
     items
@@ -1985,6 +2042,12 @@ fn shelf_items_for_tag(items: &[ShelfItem], selected: Option<&str>) -> Vec<Shelf
             selected.is_none_or(|selected| {
                 if selected == WANT_TO_READ_FILTER {
                     return book.want_to_read;
+                }
+                if selected == READING_FILTER {
+                    return book.status == "reading";
+                }
+                if selected == COMPLETED_FILTER {
+                    return book.status == "completed";
                 }
                 book.tags
                     .iter()
@@ -2012,6 +2075,33 @@ mod shelf_filter_tests {
             cover_path: None,
             file_path: String::new(),
         }
+    }
+
+    #[test]
+    fn narrow_shelf_cover_measurements_reserve_text_space() {
+        for width in [280.0, 320.0, 390.0, 844.0] {
+            let cover = shelf_list_cover_size(1000.0, width);
+            let text_width = width - 48.0 - 24.0 - 28.0 - 40.0 - cover.x;
+            assert!(text_width >= 80.0);
+            assert!((cover.x / cover.y - LIST_COVER_WIDTH_TO_HEIGHT).abs() < 0.001);
+        }
+        assert_eq!(shelf_list_cover_size(56.0, 390.0), dvec2(44.0, 56.0));
+    }
+
+    #[test]
+    fn profile_book_filters_use_reading_status_and_keep_tags_separate() {
+        let mut reading = book("a", &["completed"]);
+        reading.status = "reading".into();
+        let mut finished = book("b", &["reading"]);
+        finished.status = "completed".into();
+        let items = vec![reading, finished, book("c", &[])];
+        assert_eq!(shelf_items_for_tag(&items, Some(READING_FILTER))[0].id, "a");
+        assert_eq!(
+            shelf_items_for_tag(&items, Some(COMPLETED_FILTER))[0].id,
+            "b"
+        );
+        assert_eq!(shelf_items_for_tag(&items, Some("reading"))[0].id, "b");
+        assert_eq!(shelf_items_for_tag(&items, None).len(), 3);
     }
 
     #[test]
@@ -2515,6 +2605,17 @@ fn apply_reader_button_palette(cx: &mut Cx, widget: WidgetRef, palette: ReaderSc
     apply_reader_button_palette_with_focus(cx, widget, palette, palette.hover);
 }
 
+// Flat navigation/entry rows should not inherit the input-field border and fill.
+fn apply_flat_entry_background(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
+    let clear = vec4(0.0, 0.0, 0.0, 0.0);
+    let hover = palette.hover;
+    let pressed = palette.pressed;
+    script_apply_eval!(cx, widget, {draw_bg +: {
+        color: #(clear) color_hover: #(hover) color_down: #(pressed) color_focus: #(clear)
+        border_color: #(clear) border_color_hover: #(clear) border_color_down: #(clear) border_color_focus: #(clear)
+    }});
+}
+
 fn apply_reader_icon_palette(cx: &mut Cx, mut widget: WidgetRef, color: Vec4f) {
     script_apply_eval!(cx, widget, { draw_icon +: { color: #(color) } });
 }
@@ -2662,6 +2763,9 @@ mod reader_scene_palette_tests {
             AppPage::Vocab,
             AppPage::Statistics,
             AppPage::Settings,
+            AppPage::ReadingHome,
+            AppPage::Profile,
+            AppPage::Notes,
         ] {
             assert_eq!(
                 navigation_palette_for_page(page, ReaderBackground::Sepia, ReaderTheme::Dark)
@@ -4692,7 +4796,7 @@ script_mod! {
         width: Fill height: 24
         margin: 0
         label_walk: Walk{width: 0 height: 0 margin: 0}
-        text_input: TextInput{visible: false width: 0 height: 0}
+        text_input: TextInput{width: 0 height: 0}
         draw_bg +: {
             label_size: 0.
             pixel: fn() {
@@ -4729,9 +4833,9 @@ script_mod! {
         draw_bg.color: theme.color_u_hidden
         draw_bg.border_radius: 8.0
         cover := View{
-            // The info block establishes the row height; BookShelf sizes the
-            // cover after the item's text has completed its first layout.
-            width: 0 height: 0
+            // Use a real initial size; a zero-sized overlay with Fill children
+            // can consume the row during cold-start measurement.
+            width: 72 height: 92
             flow: Overlay
             cover_ph := SolidView{
                 width: Fill height: Fill
@@ -4930,6 +5034,7 @@ script_mod! {
                 toc_item_btn := ButtonFlat{
                     width: Fill height: Fill
                     text: ""
+                    enable_long_press: true
                     draw_bg +: {
                         color: #0000
                         color_hover: #x66877c20
@@ -5031,6 +5136,48 @@ script_mod! {
             align: Align{x: 1.0 y: 0.5}
             note_save_btn := ButtonFlat{ text: "保存" }
             note_delete_btn := ButtonFlatter{ text: "删除" }
+        }
+    }
+
+    let MobileTab = ButtonFlatter{
+        width: Fill height: 58
+        margin: 0 padding: 0
+        flow: Down spacing: 4 align: Center
+        icon_walk: Walk{width: 22 height: 22}
+        label_walk: Walk{width: Fit height: Fit}
+        draw_text.text_style.font_size: 10
+    }
+    let ProfileMetric = ButtonFlat{
+        width: Fill height: 96
+        margin: 0 padding: 12
+        flow: Down spacing: 8 align: Center
+        enable_long_press: true
+        icon_walk: Walk{width: 22 height: 22}
+        draw_text.text_style.font_size: 11
+        label_walk: Walk{width: Fill height: Fit}
+        draw_bg.border_radius: 12.0
+    }
+    let ProfileEntry = ButtonFlatter{
+        width: Fill height: 54
+        margin: 0 padding: Inset{left: 14 right: 14 top: 10 bottom: 10}
+        spacing: 12 align: Align{x: 0.0 y: 0.5}
+        enable_long_press: true
+        icon_walk: Walk{width: 20 height: 20}
+        draw_text.text_style.font_size: 12
+    }
+    mod.widgets.AllNotesListBase = #(AllNotesList::register_widget(vm))
+    mod.widgets.AllNotesList = set_type_default() do mod.widgets.AllNotesListBase{
+        width: Fill height: Fill
+        list := PortalList{
+            width: Fill height: Fill spacing: 12 padding: 16
+            scroll_bar: ScrollBar{}
+            Note := RoundedView{
+                width: Fill height: Fit flow: Down spacing: 10 padding: 16
+                new_batch: true draw_bg.border_radius: 12.0
+                source := Label{width: Fill text: "" draw_text.text_style.font_size: 11}
+                quote := Label{width: Fill height: Fit text: "" draw_text.text_style.font_size: 12}
+                body := Label{width: Fill height: Fit text: "" draw_text.text_style.font_size: 12}
+            }
         }
     }
 
@@ -5640,6 +5787,17 @@ script_mod! {
                             width: Fill height: 0
                             draw_bg.color: theme.color_bg_app
                         }
+                        profile_back_bar := View{
+                            visible: false width: Fill height: 48
+                            flow: Right spacing: 8 padding: Inset{left: 12 right: 16 top: 4 bottom: 4}
+                            align: Align{y: 0.5}
+                            profile_back := ButtonFlatter{
+                                text: "我" height: 40 margin: 0 spacing: 6
+                                icon_walk: Walk{width: 16 height: 16}
+                                draw_icon +: {svg: crate_resource("self:resources/icons/reader_back.svg")}
+                            }
+                            profile_detail_title := Label{width: Fill text: "" draw_text.text_style.font_size: 13}
+                        }
                         pages := PageFlip{
                             width: Fill height: Fill
                             active_page: @page_library
@@ -5660,6 +5818,9 @@ script_mod! {
                                         text: "书库"
                                         draw_text.text_style.font_size: 18
                                     }
+                                    library_actions := View{
+                                        width: Fit height: Fit flow: Right spacing: 10
+                                        align: Align{y: 0.5}
                                     library_view_list := RadioButtonTabFlat{
                                         text: "列表"
                                         draw_bg.color: theme.color_bg_app
@@ -5677,6 +5838,7 @@ script_mod! {
                                         text: "导入 EPUB"
                                         draw_bg.color: theme.color_bg_app
                                         draw_bg.color_focus: theme.color_bg_app
+                                    }
                                     }
                                 }
                                 library_hint := Label{
@@ -6445,6 +6607,51 @@ script_mod! {
                             vocab_list := mod.widgets.VocabList{visible: false}
                         }
 
+                        page_reading_home := ScrollYView{
+                            width: Fill height: Fill flow: Down padding: 20 spacing: 20
+                            reading_home_title := Label{text: "阅读" draw_text.text_style.font_size: 24}
+                            reading_home_hint := Label{width: Fill text: "回到书中的世界" draw_text.text_style.font_size: 12}
+                            reading_continue_card := RoundedView{
+                                width: Fill height: Fit new_batch: true flow: Down spacing: 16 padding: 20
+                                draw_bg.color: theme.color_bg_container draw_bg.border_radius: 16.0
+                                reading_continue_title := Label{width: Fill height: Fit text: "从一本好书开始" draw_text.text_style.font_size: 20}
+                                reading_continue_hint := Label{width: Fill height: Fit text: "在书架选择一本书，开始阅读。" draw_text.text_style.font_size: 12}
+                                reading_continue := Button{width: Fill height: 48 text: "继续阅读" enable_long_press: true}
+                            }
+                            reading_browse := ProfileEntry{
+                                text: "去书架选书"
+                                draw_icon +: {svg: crate_resource("self:resources/icons/nav_shelf.svg")}
+                            }
+                        }
+                        page_profile := ScrollYView{
+                            width: Fill height: Fill flow: Down padding: 20 spacing: 16
+                            profile_title := Label{text: "我" draw_text.text_style.font_size: 24}
+                            profile_hint := Label{width: Fill text: "每一页，都在积累" draw_text.text_style.font_size: 12}
+                            profile_metrics_top := View{
+                                width: Fill height: Fit flow: Right spacing: 12
+                                profile_notes := ProfileMetric{text: "笔记" draw_icon +: {svg: crate_resource("self:resources/icons/reader_notes.svg")}}
+                                profile_reading := ProfileMetric{text: "在读" draw_icon +: {svg: crate_resource("self:resources/icons/nav_reading.svg")}}
+                            }
+                            profile_metrics_bottom := View{
+                                width: Fill height: Fit flow: Right spacing: 12
+                                profile_completed := ProfileMetric{text: "读完" draw_icon +: {svg: crate_resource("self:resources/icons/nav_completed.svg")}}
+                                profile_duration := ProfileMetric{text: "阅读时长" draw_icon +: {svg: crate_resource("self:resources/icons/nav_time.svg")}}
+                            }
+                            profile_status := Label{width: Fill height: Fit text: "" draw_text.text_style.font_size: 10}
+                            profile_tools := RoundedView{
+                                width: Fill height: Fit flow: Down padding: 4 new_batch: true
+                                draw_bg.color: theme.color_bg_container draw_bg.border_radius: 12.0
+                                profile_chat := ProfileEntry{text: "AI 对话" draw_icon +: {svg: crate_resource("self:resources/icons/nav_chat.svg")}}
+                                profile_skills := ProfileEntry{text: "AI 技能" draw_icon +: {svg: crate_resource("self:resources/icons/nav_skills.svg")}}
+                                profile_settings := ProfileEntry{text: "设置" draw_icon +: {svg: crate_resource("self:resources/icons/reader_settings.svg")}}
+                            }
+                        }
+                        page_notes := View{
+                            width: Fill height: Fill flow: Down
+                            all_notes_status := Label{width: Fill height: Fit padding: 16 text: "正在读取笔记…" draw_text.text_style.font_size: 12}
+                            all_notes_list := mod.widgets.AllNotesList{}
+                        }
+
                         page_statistics := ScrollYView{
                             width: Fill height: Fill
                             flow: Down padding: 24 spacing: 14
@@ -6631,7 +6838,7 @@ script_mod! {
                                 }
                                 skill_new := Button{text: "新建模板"}
                             }
-                            skills_body := View{
+                            skills_body := ScrollYView{
                                 width: Fill height: Fill
                                 flow: Right spacing: 14
                                 padding: Inset{left: 24 right: 24 bottom: 20}
@@ -6983,16 +7190,12 @@ script_mod! {
                             flow: Down
                             padding: Inset{left: 4 right: 4 top: 5 bottom: 5}
                             draw_bg.color: theme.color_bg_app
-                            mobile_nav_scroll := ScrollXView{
-                                width: Fill height: 44
-                                flow: Right spacing: 4
-                                mobile_nav_library := ButtonFlat{width: 58 text: "书库"}
-                                mobile_nav_reader := ButtonFlat{width: 58 text: "阅读"}
-                                mobile_nav_chat := ButtonFlat{width: 66 text: "AI 对话"}
-                                mobile_nav_vocab := ButtonFlat{width: 66 text: "生词本"}
-                                mobile_nav_statistics := ButtonFlat{width: 58 text: "统计"}
-                                mobile_nav_skills := ButtonFlat{width: 66 text: "AI 技能"}
-                                mobile_nav_settings := ButtonFlat{width: 58 text: "设置"}
+                            mobile_nav_tabs := View{
+                                width: Fill height: 58 flow: Right spacing: 0
+                                mobile_nav_reader := MobileTab{text: "阅读" draw_icon +: {svg: crate_resource("self:resources/icons/nav_reading.svg")}}
+                                mobile_nav_library := MobileTab{text: "书架" draw_icon +: {svg: crate_resource("self:resources/icons/nav_shelf.svg")}}
+                                mobile_nav_vocab := MobileTab{text: "词汇" draw_icon +: {svg: crate_resource("self:resources/icons/nav_vocab.svg")}}
+                                mobile_nav_profile := MobileTab{text: "我" draw_icon +: {svg: crate_resource("self:resources/icons/nav_profile.svg")}}
                             }
                         }
                     }
@@ -9969,6 +10172,8 @@ struct TocList {
     inactive_bg: Vec4f,
     #[live]
     text_color: Vec4f,
+    #[rust]
+    activation_tap: ListTap,
 }
 
 impl Widget for TocList {
@@ -10040,7 +10245,23 @@ impl Widget for TocList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
+        let list = self.view.portal_list(cx, ids!(list));
+        let rect = current_clipped_rect(cx, list.area());
+        let mut allow_click = self.activation_tap.allows_click(event, rect);
+        let mut actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
+        // A touch that stops an existing flick is not a chapter selection.
+        if list.scrolled(&actions) || list.was_scrolling() {
+            self.activation_tap.cancel();
+            allow_click = false;
+        }
+        if !allow_click {
+            actions.retain(|action| {
+                !action
+                    .as_widget_action()
+                    .is_some_and(|action| matches!(action.cast(), ButtonAction::Clicked(_)))
+            });
+        }
+        cx.extend_actions(actions);
     }
 }
 
@@ -10199,6 +10420,53 @@ impl Widget for NoteList {
         DrawStep::done()
     }
 
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
+struct AllNotesList {
+    #[deref]
+    view: View,
+}
+impl Widget for AllNotesList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let notes = ALL_NOTES.read().unwrap();
+        let palette = reader_scene_palette(
+            *READER_BACKGROUND.read().unwrap(),
+            *READER_THEME.read().unwrap(),
+        );
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, notes.len());
+                while let Some(index) = list.next_visible_item(cx) {
+                    let Some(note) = notes.get(index) else {
+                        continue;
+                    };
+                    let item = list.item(cx, index, id!(Note));
+                    let (quote, body) = split_note_content(&note.content);
+                    item.label(cx, ids!(source))
+                        .set_text(cx, note.book_title.as_deref().unwrap_or(tr("note")));
+                    item.label(cx, ids!(quote)).set_text(cx, quote);
+                    item.label(cx, ids!(body)).set_text(cx, body);
+                    item.widget(cx, ids!(body))
+                        .set_visible(cx, !body.is_empty());
+                    apply_reader_surface_palette(cx, item.clone(), palette.field, palette.border);
+                    for (id, color) in [
+                        (id!(source), palette.accent),
+                        (id!(quote), palette.text),
+                        (id!(body), palette.muted),
+                    ] {
+                        let label = item.widget(cx, &[id]);
+                        apply_reader_label_palette(cx, label, color);
+                    }
+                    item.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
     }
@@ -10731,9 +10999,9 @@ impl Widget for BookShelf {
                                 .or(self.list_cover_default_height)
                             {
                                 if let Some(mut cover) = item.view(cx, ids!(cover)).borrow_mut() {
-                                    cover.walk.width =
-                                        Size::Fixed(height * LIST_COVER_WIDTH_TO_HEIGHT);
-                                    cover.walk.height = Size::Fixed(height);
+                                    let size = shelf_list_cover_size(height, available_width);
+                                    cover.walk.width = Size::Fixed(size.x);
+                                    cover.walk.height = Size::Fixed(size.y);
                                 }
                             }
                         }
@@ -10761,7 +11029,8 @@ impl Widget for BookShelf {
                                 self.list_cover_default_height
                                     .map_or(info_height, |height| height.min(info_height)),
                             );
-                            let cover_width = info_height * LIST_COVER_WIDTH_TO_HEIGHT;
+                            let cover_size = shelf_list_cover_size(info_height, available_width);
+                            let cover_width = cover_size.x;
                             let cover_ref = item.view(cx, ids!(cover));
                             let mut cover_size_changed = false;
                             if let Some(mut cover) = cover_ref.borrow_mut() {
@@ -10774,10 +11043,10 @@ impl Widget for BookShelf {
                                     _ => -1.0,
                                 };
                                 if (old_width - cover_width).abs() > 0.5
-                                    || (old_height - info_height).abs() > 0.5
+                                    || (old_height - cover_size.y).abs() > 0.5
                                 {
                                     cover.walk.width = Size::Fixed(cover_width);
-                                    cover.walk.height = Size::Fixed(info_height);
+                                    cover.walk.height = Size::Fixed(cover_size.y);
                                     cover_size_changed = true;
                                 }
                             };
@@ -11345,6 +11614,83 @@ impl App {
         self.set_reader_toolbar_visible(cx, retain_toolbar && self.reader_toolbar_visible);
         self.sync_reader_toolbar_placement(cx);
         self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
+        self.sync_reading_home(cx);
+        if page == AppPage::Skills {
+            spawn_load_skills();
+        }
+        if page == AppPage::Notes {
+            self.sync_all_notes_status(cx);
+        }
+        if let Some(snapshot) = PROFILE_STATISTICS.read().unwrap().as_ref() {
+            self.apply_statistics(cx, snapshot);
+        }
+    }
+
+    fn sync_all_notes_status(&self, cx: &mut Cx) {
+        let count = ALL_NOTES.read().unwrap().len();
+        self.ui.label(cx, ids!(all_notes_status)).set_text(
+            cx,
+            &if count == 0 {
+                tr("no_notes_hint").to_string()
+            } else {
+                format!("{} · {}", localized("累计笔记", "Total notes"), count)
+            },
+        );
+    }
+
+    fn reading_home_book() -> Option<ShelfItem> {
+        let current_id = CURRENT_BOOK
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|book| book.id.clone());
+        let shelf = SHELF.read().unwrap();
+        shelf
+            .iter()
+            .find(|book| current_id.as_deref() == Some(book.id.as_str()))
+            .or_else(|| shelf.iter().find(|book| book.status == "reading"))
+            .cloned()
+    }
+
+    fn sync_reading_home(&self, cx: &mut Cx) {
+        let book = Self::reading_home_book();
+        self.ui.label(cx, ids!(reading_continue_title)).set_text(
+            cx,
+            book.as_ref()
+                .map(|b| b.title.as_str())
+                .unwrap_or(localized("从一本好书开始", "Start with a good book")),
+        );
+        self.ui.label(cx, ids!(reading_continue_hint)).set_text(
+            cx,
+            &book
+                .as_ref()
+                .map(|b| {
+                    format!(
+                        "{} · {}",
+                        b.author,
+                        if b.progress_total > 0 {
+                            format!("{} / {}", b.progress_current, b.progress_total)
+                        } else {
+                            localized("开始阅读", "Start reading").to_string()
+                        }
+                    )
+                })
+                .unwrap_or(
+                    localized(
+                        "在书架选择一本书，开始阅读。",
+                        "Choose a book from your bookshelf to start reading.",
+                    )
+                    .to_string(),
+                ),
+        );
+        self.ui.button(cx, ids!(reading_continue)).set_text(
+            cx,
+            if book.is_some() {
+                localized("继续阅读", "Continue reading")
+            } else {
+                tr("browse_books")
+            },
+        );
     }
 
     fn sync_reader_toolbar_placement(&mut self, cx: &mut Cx) {
@@ -11582,11 +11928,8 @@ impl App {
             id!(nav_settings),
             id!(mobile_nav_library),
             id!(mobile_nav_reader),
-            id!(mobile_nav_chat),
-            id!(mobile_nav_skills),
             id!(mobile_nav_vocab),
-            id!(mobile_nav_statistics),
-            id!(mobile_nav_settings),
+            id!(mobile_nav_profile),
         ] {
             // Navigation buttons keep keyboard focus after a mouse click. A
             // highlighted focus background makes the previously clicked button
@@ -11597,6 +11940,36 @@ impl App {
                 palette,
                 palette.field,
             );
+        }
+        for (id, selected) in [
+            (
+                id!(mobile_nav_reader),
+                matches!(page, AppPage::Reader | AppPage::ReadingHome),
+            ),
+            (id!(mobile_nav_library), page == AppPage::Library),
+            (id!(mobile_nav_vocab), page == AppPage::Vocab),
+            (
+                id!(mobile_nav_profile),
+                matches!(
+                    page,
+                    AppPage::Profile
+                        | AppPage::Chat
+                        | AppPage::Skills
+                        | AppPage::Statistics
+                        | AppPage::Settings
+                        | AppPage::Notes
+                ),
+            ),
+        ] {
+            let color = if selected {
+                palette.accent
+            } else {
+                palette.muted
+            };
+            let mut tab = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, tab, {draw_text +: {color: #(color) color_hover: #(color) color_focus: #(color) color_down: #(color)}});
+            apply_reader_icon_palette(cx, tab.clone(), color);
+            apply_flat_entry_background(cx, tab, palette);
         }
         self.ui.widget(cx, ids!(sidebar)).redraw(cx);
         self.ui.widget(cx, ids!(mobile_nav)).redraw(cx);
@@ -11638,6 +12011,8 @@ impl App {
         let tags = Self::available_shelf_tags();
         if self.library_tag_filter.as_ref().is_some_and(|selected| {
             selected != WANT_TO_READ_FILTER
+                && selected != READING_FILTER
+                && selected != COMPLETED_FILTER
                 && !tags.iter().any(|tag| tag.eq_ignore_ascii_case(selected))
         }) {
             self.library_tag_filter = None;
@@ -11652,6 +12027,8 @@ impl App {
         let mut labels = Vec::with_capacity(tags.len() + 2);
         labels.push(tr("all_tags").to_string());
         labels.push(tr("want_to_read").to_string());
+        labels.push(tr("reading_books").to_string());
+        labels.push(tr("completed_books").to_string());
         labels.extend(tags.iter().cloned());
         let selected_index = self
             .library_tag_filter
@@ -11659,10 +12036,14 @@ impl App {
             .and_then(|selected| {
                 if selected == WANT_TO_READ_FILTER {
                     Some(1)
+                } else if selected == READING_FILTER {
+                    Some(2)
+                } else if selected == COMPLETED_FILTER {
+                    Some(3)
                 } else {
                     tags.iter()
                         .position(|tag| tag.eq_ignore_ascii_case(selected))
-                        .map(|index| index + 2)
+                        .map(|index| index + 4)
                 }
             })
             .unwrap_or(0);
@@ -11728,7 +12109,9 @@ impl App {
         self.library_tag_filter = match index {
             0 => None,
             1 => Some(WANT_TO_READ_FILTER.to_string()),
-            index => Self::available_shelf_tags().get(index - 2).cloned(),
+            2 => Some(READING_FILTER.to_string()),
+            3 => Some(COMPLETED_FILTER.to_string()),
+            index => Self::available_shelf_tags().get(index - 4).cloned(),
         };
         self.refresh_shelf_projection(cx);
     }
@@ -12486,6 +12869,9 @@ impl App {
             id!(page_skills),
             id!(page_vocab),
             id!(page_statistics),
+            id!(page_profile),
+            id!(page_notes),
+            id!(page_reading_home),
             id!(page_settings),
         ] {
             apply_reader_surface_palette(
@@ -12501,6 +12887,8 @@ impl App {
         // remain after navigation or a background change.
         for id in [
             id!(vocab_review_panel),
+            id!(profile_tools),
+            id!(reading_continue_card),
             id!(stat_today_card),
             id!(stat_total_card),
             id!(stat_days_card),
@@ -12576,6 +12964,51 @@ impl App {
         ] {
             apply_library_control_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
+        for id in [
+            id!(profile_title),
+            id!(reading_home_title),
+            id!(reading_continue_title),
+            id!(profile_detail_title),
+            id!(all_notes_status),
+        ] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
+        }
+        for id in [
+            id!(profile_hint),
+            id!(reading_home_hint),
+            id!(reading_continue_hint),
+            id!(profile_status),
+        ] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
+        }
+        for id in [
+            id!(profile_notes),
+            id!(profile_reading),
+            id!(profile_completed),
+            id!(profile_duration),
+            id!(profile_chat),
+            id!(profile_skills),
+            id!(profile_settings),
+            id!(reading_continue),
+            id!(reading_browse),
+            id!(profile_back),
+        ] {
+            let widget = self.ui.widget(cx, &[id]);
+            apply_reader_button_palette(cx, widget.clone(), palette);
+            apply_reader_icon_palette(cx, widget, palette.accent);
+        }
+
+        for id in [
+            id!(profile_chat),
+            id!(profile_skills),
+            id!(profile_settings),
+            id!(reading_browse),
+            id!(profile_back),
+        ] {
+            let widget = self.ui.widget(cx, &[id]);
+            apply_flat_entry_background(cx, widget, palette);
+        }
+
         for id in [
             id!(gc0),
             id!(gc1),
@@ -13007,19 +13440,54 @@ impl App {
         set_text!(nav_vocab, "vocabulary");
         set_text!(nav_statistics, "statistics");
         set_text!(nav_settings, "settings");
-        set_text!(mobile_nav_library, "library");
+        set_text!(mobile_nav_library, "bookshelf");
         set_text!(mobile_nav_reader, "reader");
-        set_text!(mobile_nav_chat, "chat");
-        set_text!(mobile_nav_skills, "skills");
-        set_text!(mobile_nav_vocab, "vocabulary");
-        set_text!(mobile_nav_statistics, "statistics");
-        set_text!(mobile_nav_settings, "settings");
+        set_text!(mobile_nav_vocab, "words");
+        set_text!(mobile_nav_profile, "me");
+        set_text!(profile_title, "me");
+        set_text!(profile_notes, "notes");
+        set_text!(profile_reading, "reading_books");
+        set_text!(profile_completed, "completed_books");
+        set_text!(profile_duration, "reading_time");
+        set_text!(profile_back, "me");
+        set_text!(profile_hint, "profile_hint");
+        self.sync_mobile_chrome(cx);
+        set_text!(profile_chat, "chat");
+        set_text!(profile_skills, "skills");
+        set_text!(profile_settings, "settings");
+        set_text!(reading_home_title, "reader");
+        set_text!(reading_home_hint, "reading_home_hint");
+        set_text!(reading_browse, "browse_books");
+        self.sync_reading_home(cx);
+        self.sync_all_notes_status(cx);
+        if let Some(snapshot) = PROFILE_STATISTICS.read().unwrap().as_ref() {
+            self.apply_statistics(cx, snapshot);
+        }
 
-        set_text!(library_title, "library");
+        self.ui.widget(cx, ids!(library_title)).set_text(
+            cx,
+            crate::i18n::text(
+                language,
+                if self.compact_layout {
+                    "bookshelf"
+                } else {
+                    "library"
+                },
+            ),
+        );
         set_text!(library_view_list, "list_view");
         set_text!(library_view_grid, "grid_view");
         set_text!(import_epub_btn, "import_epub");
         set_text!(library_hint, "library_hint");
+        if self.compact_layout {
+            self.ui.label(cx, ids!(library_hint)).set_text(
+                cx,
+                localized(
+                    "点击“导入 EPUB”添加书籍。",
+                    "Choose Import EPUB to add books.",
+                ),
+            );
+        }
         set_text!(library_empty_title, "library_empty");
         set_text!(library_empty_hint, "library_empty_hint");
         set_text!(library_tag_filter_label, "tag_filter");
@@ -13261,7 +13729,7 @@ impl App {
         self.refresh_shelf_projection(cx);
         self.refresh_vocab_projection(cx);
         self.refresh_pending_skill_indicator(cx);
-        if self.active_page == AppPage::Statistics {
+        if matches!(self.active_page, AppPage::Statistics | AppPage::Profile) {
             spawn_load_statistics();
         }
         self.persist_reader_settings(cx);
@@ -13387,7 +13855,7 @@ impl App {
         self.refresh_vocab_projection(cx);
         self.refresh_pending_skill_indicator(cx);
         self.set_chat_streaming_controls(cx, self.ai_request.is_some());
-        if self.active_page == AppPage::Statistics {
+        if matches!(self.active_page, AppPage::Statistics | AppPage::Profile) {
             spawn_load_statistics();
         }
         if self.pending_theme_reapply {
@@ -13462,6 +13930,30 @@ impl App {
     }
 
     fn sync_mobile_chrome(&self, cx: &mut Cx) {
+        self.ui.label(cx, ids!(library_title)).set_text(
+            cx,
+            if self.compact_layout {
+                tr("bookshelf")
+            } else {
+                tr("library")
+            },
+        );
+        let detail_key = match self.active_page {
+            AppPage::Chat => Some("chat"),
+            AppPage::Skills => Some("skills"),
+            AppPage::Statistics => Some("statistics"),
+            AppPage::Settings => Some("settings"),
+            AppPage::Notes => Some("notes"),
+            _ => None,
+        };
+        self.ui
+            .widget(cx, ids!(profile_back_bar))
+            .set_visible(cx, self.compact_layout && detail_key.is_some());
+        if let Some(key) = detail_key {
+            self.ui
+                .label(cx, ids!(profile_detail_title))
+                .set_text(cx, tr(key));
+        }
         self.ui.widget(cx, ids!(mobile_nav)).set_visible(
             cx,
             !self.on_reader_page
@@ -13651,10 +14143,56 @@ impl App {
         self.set_reader_toolbar_visible(cx, self.on_reader_page && self.reader_toolbar_visible);
         self.sync_reader_toolbar_placement(cx);
 
+        for id in [
+            id!(chat_title),
+            id!(skills_title),
+            id!(statistics_title),
+            id!(settings_title),
+        ] {
+            self.ui.widget(cx, &[id]).set_visible(cx, !compact);
+        }
+        let mut skills_body = self.ui.widget(cx, ids!(skills_body));
+        let skills_flow = if compact { Flow::Down } else { Flow::right() };
+        script_apply_eval!(cx, skills_body, {flow: #(skills_flow)});
+        let mut skills_list = self.ui.widget(cx, ids!(skills_left));
+        let list_width = if compact {
+            Size::fill()
+        } else {
+            Size::Fixed(330.0)
+        };
+        let list_height = if compact {
+            Size::Fixed(240.0)
+        } else {
+            Size::fill()
+        };
+        script_apply_eval!(cx, skills_list, {width: #(list_width) height: #(list_height)});
+        let mut editor = self.ui.widget(cx, ids!(skill_editor));
+        let editor_height = if compact {
+            Size::Fixed(560.0)
+        } else {
+            Size::fill()
+        };
+        script_apply_eval!(cx, editor, {height: #(editor_height)});
+        let mut shelf_header = self.ui.widget(cx, ids!(lib_title_row));
+        let shelf_header_flow = if compact { Flow::Down } else { Flow::right() };
+        script_apply_eval!(cx, shelf_header, {flow: #(shelf_header_flow)});
+        let mut filters = self.ui.widget(cx, ids!(library_filter_row));
+        let filter_flow = if compact { Flow::Down } else { Flow::right() };
+        script_apply_eval!(cx, filters, {flow: #(filter_flow)});
+        let mut dropdown = self.ui.widget(cx, ids!(library_tag_filter));
+        let filter_width = if compact {
+            Size::fill()
+        } else {
+            Size::Fixed(180.0)
+        };
+        script_apply_eval!(cx, dropdown, {width: #(filter_width)});
+        let mut summary = self.ui.widget(cx, ids!(statistics_summary));
+        let summary_flow = if compact { Flow::Down } else { Flow::right() };
+        script_apply_eval!(cx, summary, {flow: #(summary_flow)});
         let safe_top = safe_area_insets.top;
         let mobile_nav_padding = Inset {
-            left: 4.0,
-            right: 4.0,
+            left: safe_area_insets.left + 4.0,
+            right: safe_area_insets.right + 4.0,
             top: 5.0,
             bottom: safe_area_insets.bottom + 5.0,
         };
@@ -13662,6 +14200,49 @@ impl App {
         let mut mobile_nav = self.ui.widget(cx, ids!(mobile_nav));
         script_apply_eval!(cx, mobile_safe_top, {height: #(safe_top)});
         script_apply_eval!(cx, mobile_nav, {padding: #(mobile_nav_padding)});
+        let content_padding = Inset {
+            left: safe_area_insets.left + 20.0,
+            right: safe_area_insets.right + 20.0,
+            top: 20.0,
+            bottom: 20.0,
+        };
+        for id in [id!(page_profile), id!(page_reading_home)] {
+            let mut page = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, page, {padding: #(content_padding)});
+        }
+        let detail_padding = Inset {
+            left: safe_area_insets.left + 12.0,
+            right: safe_area_insets.right + 16.0,
+            top: 4.0,
+            bottom: 4.0,
+        };
+        let mut detail = self.ui.widget(cx, ids!(profile_back_bar));
+        script_apply_eval!(cx, detail, {padding: #(detail_padding)});
+        let side_padding = Inset {
+            left: safe_area_insets.left,
+            right: safe_area_insets.right,
+            top: 0.0,
+            bottom: 0.0,
+        };
+        for id in [
+            id!(page_notes),
+            id!(page_library),
+            id!(page_chat),
+            id!(page_skills),
+        ] {
+            let mut page = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, page, {padding: #(side_padding)});
+        }
+        let scroll_padding = Inset {
+            left: safe_area_insets.left + 24.0,
+            right: safe_area_insets.right + 24.0,
+            top: 24.0,
+            bottom: 24.0,
+        };
+        for id in [id!(page_settings), id!(page_statistics)] {
+            let mut page = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, page, {padding: #(scroll_padding)});
+        }
         self.sync_reader_panel_layout(cx);
         self.ui.redraw(cx);
         true
@@ -13724,7 +14305,7 @@ impl App {
         cx.stop_timer(self.reading_checkpoint_timer);
         self.reading_checkpoint_timer = Timer::default();
         if let Some(id) = self.reading_session_id.take() {
-            spawn_finish_reading_session(id, load_statistics);
+            spawn_finish_reading_session(id, load_statistics || self.compact_layout);
         } else if load_statistics {
             if was_pending {
                 self.statistics_after_pending_session = true;
@@ -13736,6 +14317,60 @@ impl App {
 
     fn apply_statistics(&self, cx: &mut Cx, snapshot: &StatisticsSnapshot) {
         let english = app_language() == AppLanguage::English;
+        for (id, text) in [
+            (
+                id!(profile_notes),
+                if english {
+                    format!("Notes\n{} total", snapshot.total_notes)
+                } else {
+                    format!("笔记\n累计 {} 条", snapshot.total_notes)
+                },
+            ),
+            (
+                id!(profile_reading),
+                if english {
+                    format!(
+                        "Reading\n{} {}",
+                        snapshot.reading_books,
+                        if snapshot.reading_books == 1 {
+                            "book"
+                        } else {
+                            "books"
+                        }
+                    )
+                } else {
+                    format!("在读\n累计 {} 本", snapshot.reading_books)
+                },
+            ),
+            (
+                id!(profile_completed),
+                if english {
+                    format!(
+                        "Finished\n{} {}",
+                        snapshot.completed_books,
+                        if snapshot.completed_books == 1 {
+                            "book"
+                        } else {
+                            "books"
+                        }
+                    )
+                } else {
+                    format!("读完\n累计 {} 本", snapshot.completed_books)
+                },
+            ),
+            (
+                id!(profile_duration),
+                format!(
+                    "{}\n{}",
+                    localized("阅读时长", "Reading time"),
+                    Self::format_reading_duration(snapshot.total_reading_seconds)
+                ),
+            ),
+        ] {
+            self.ui.widget(cx, &[id]).set_text(cx, &text);
+        }
+        self.ui.label(cx, ids!(profile_status)).set_text(cx, "");
+        self.ui.widget(cx, ids!(page_profile)).redraw(cx);
         self.ui.label(cx, ids!(stat_today)).set_text(
             cx,
             &Self::format_reading_duration(snapshot.today_reading_seconds),
@@ -13846,9 +14481,9 @@ impl App {
         self.ui.label(cx, ids!(statistics_status)).set_text(
             cx,
             if english {
-                "Statistics updated · Reading time is saved every 30 seconds"
+                "Statistics updated"
             } else {
-                "统计已更新 · 阅读页停留时间每 30 秒自动保存"
+                "统计已更新"
             },
         );
         self.ui.widget(cx, ids!(page_statistics)).redraw(cx);
@@ -16155,10 +16790,32 @@ impl MatchEvent for App {
                 }
                 continue;
             }
+            if let Some(notes_action) = action.downcast_ref::<AllNotesAction>() {
+                match notes_action {
+                    AllNotesAction::Loaded(notes) => {
+                        *ALL_NOTES.write().unwrap() = notes.clone();
+                        self.sync_all_notes_status(cx);
+                        self.ui
+                            .widget(cx, ids!(all_notes_list))
+                            .portal_list(cx, ids!(list))
+                            .set_first_id_and_scroll(0, 0.0);
+                        self.ui.widget(cx, ids!(all_notes_list)).redraw(cx);
+                    }
+                    AllNotesAction::Error(error) => self
+                        .ui
+                        .label(cx, ids!(all_notes_status))
+                        .set_text(cx, error),
+                }
+                continue;
+            }
             if let Some(statistics_action) = action.downcast_ref::<StatisticsAction>() {
                 match statistics_action {
-                    StatisticsAction::Loaded(snapshot) => self.apply_statistics(cx, snapshot),
+                    StatisticsAction::Loaded(snapshot) => {
+                        *PROFILE_STATISTICS.write().unwrap() = Some(snapshot.clone());
+                        self.apply_statistics(cx, snapshot);
+                    }
                     StatisticsAction::Error(error) => {
+                        self.ui.label(cx, ids!(profile_status)).set_text(cx, error);
                         self.ui.label(cx, ids!(statistics_status)).set_text(
                             cx,
                             &if app_language() == AppLanguage::English {
@@ -17543,10 +18200,12 @@ impl MatchEvent for App {
                 .ui
                 .button(cx, ids!(mobile_nav_library))
                 .clicked(actions)
+            || self.ui.button(cx, ids!(reading_browse)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
+            self.library_tag_filter = None;
             self.activate_page(cx, AppPage::Library);
             // The library page or its PortalList may only be instantiated when
             // entering it after a mobile responsive transition.
@@ -17905,14 +18564,56 @@ impl MatchEvent for App {
                 self.sync_reader_customise_controls(cx);
             }
         }
-        if self.ui.button(cx, ids!(nav_reader)).clicked(actions)
-            || self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions)
-        {
+        if self.ui.button(cx, ids!(nav_reader)).clicked(actions) {
             self.activate_page(cx, AppPage::Reader);
             self.start_reading_timer();
         }
+        if self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions) {
+            self.activate_page(cx, AppPage::ReadingHome);
+        }
+        if self.ui.button(cx, ids!(reading_continue)).clicked(actions) {
+            if CURRENT_BOOK.read().unwrap().is_some() {
+                self.activate_page(cx, AppPage::Reader);
+                self.start_reading_timer();
+            } else if let Some(book) = Self::reading_home_book() {
+                self.open_book_for_reading(cx, book);
+            } else {
+                self.activate_page(cx, AppPage::Library);
+                self.refresh_shelf_projection(cx);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(mobile_nav_profile))
+            .clicked(actions)
+            || self.ui.button(cx, ids!(profile_back)).clicked(actions)
+        {
+            if self.on_reader_page {
+                self.stop_reading_timer(cx, true);
+            } else {
+                spawn_load_statistics();
+            }
+            self.activate_page(cx, AppPage::Profile);
+        }
+        if self.ui.button(cx, ids!(profile_notes)).clicked(actions) {
+            self.activate_page(cx, AppPage::Notes);
+            self.ui
+                .label(cx, ids!(all_notes_status))
+                .set_text(cx, localized("正在读取笔记…", "Loading notes…"));
+            spawn_load_all_notes();
+        }
+        for (id, filter) in [
+            (id!(profile_reading), READING_FILTER),
+            (id!(profile_completed), COMPLETED_FILTER),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                self.library_tag_filter = Some(filter.to_string());
+                self.activate_page(cx, AppPage::Library);
+                self.refresh_shelf_projection(cx);
+            }
+        }
         if self.ui.button(cx, ids!(nav_chat)).clicked(actions)
-            || self.ui.button(cx, ids!(mobile_nav_chat)).clicked(actions)
+            || self.ui.button(cx, ids!(profile_chat)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
@@ -17920,7 +18621,7 @@ impl MatchEvent for App {
             self.activate_page(cx, AppPage::Chat);
         }
         if self.ui.button(cx, ids!(nav_skills)).clicked(actions)
-            || self.ui.button(cx, ids!(mobile_nav_skills)).clicked(actions)
+            || self.ui.button(cx, ids!(profile_skills)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
@@ -17937,10 +18638,7 @@ impl MatchEvent for App {
             spawn_load_vocab();
         }
         if self.ui.button(cx, ids!(nav_statistics)).clicked(actions)
-            || self
-                .ui
-                .button(cx, ids!(mobile_nav_statistics))
-                .clicked(actions)
+            || self.ui.button(cx, ids!(profile_duration)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, true);
@@ -17953,10 +18651,7 @@ impl MatchEvent for App {
                 .set_text(cx, localized("正在更新统计数据…", "Updating statistics…"));
         }
         if self.ui.button(cx, ids!(nav_settings)).clicked(actions)
-            || self
-                .ui
-                .button(cx, ids!(mobile_nav_settings))
-                .clicked(actions)
+            || self.ui.button(cx, ids!(profile_settings)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);

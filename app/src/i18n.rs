@@ -4,6 +4,16 @@ use readwise_core::settings::AppLanguage;
 pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
     let english = language == AppLanguage::English;
     match key {
+        "reading_time" => choose(english, "阅读时长", "Reading time"),
+        "me" => choose(english, "我", "Me"),
+        "bookshelf" => choose(english, "书架", "Bookshelf"),
+        "words" => choose(english, "词汇", "Words"),
+        "notes" => choose(english, "笔记", "Notes"),
+        "reading_books" => choose(english, "在读", "Reading"),
+        "completed_books" => choose(english, "读完", "Finished"),
+        "browse_books" => choose(english, "去书架选书", "Browse books"),
+        "profile_hint" => choose(english, "每一页，都在积累", "Every page adds up"),
+        "reading_home_hint" => choose(english, "回到书中的世界", "Back to the world of books"),
         "library" => choose(english, "书库", "Library"),
         "reader" => choose(english, "阅读", "Reader"),
         "chat" => choose(english, "AI 对话", "AI Chat"),

@@ -84,6 +84,8 @@ pub async fn statistics_snapshot(pool: &SqlitePool) -> Result<StatisticsSnapshot
                 FROM reading_sessions WHERE duration_seconds > 0), 0) AS active_days, \
             COALESCE((SELECT COUNT(*) FROM books), 0) AS total_books, \
             COALESCE((SELECT COUNT(*) FROM book_status WHERE status = 'completed'), 0) AS completed_books, \
+            COALESCE((SELECT COUNT(*) FROM book_status WHERE status = 'reading'), 0) AS reading_books, \
+            COALESCE((SELECT COUNT(*) FROM notes), 0) AS total_notes, \
             COALESCE((SELECT COUNT(*) FROM vocab_book), 0) AS vocab_total, \
             COALESCE((SELECT COUNT(*) FROM vocab_book WHERE status = 'learning'), 0) AS vocab_learning, \
             COALESCE((SELECT COUNT(*) FROM vocab_book WHERE status = 'mastered'), 0) AS vocab_mastered, \
@@ -132,6 +134,8 @@ pub async fn statistics_snapshot(pool: &SqlitePool) -> Result<StatisticsSnapshot
         active_days: summary.get("active_days"),
         total_books: summary.get("total_books"),
         completed_books: summary.get("completed_books"),
+        reading_books: summary.get("reading_books"),
+        total_notes: summary.get("total_notes"),
         vocab_total: summary.get("vocab_total"),
         vocab_learning: summary.get("vocab_learning"),
         vocab_mastered: summary.get("vocab_mastered"),
@@ -156,6 +160,27 @@ mod tests {
             .block_on(sqlx::query(include_str!("../schema.sql")).execute(&pool))
             .unwrap();
         (runtime, pool)
+    }
+
+    #[test]
+    fn profile_summary_counts_all_notes_and_distinguishes_book_statuses() {
+        let (runtime, pool) = pool();
+        runtime.block_on(async {
+            sqlx::query("INSERT INTO books (id,title,author,format,file_path,file_size,language,created_at,updated_at) VALUES ('a','A','','epub','a',1,'en',0,0),('b','B','','epub','b',1,'en',0,0),('c','C','','epub','c',1,'en',0,0)").execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO book_status (book_id,status,created_at,updated_at) VALUES ('a','reading',0,0),('b','completed',0,0),('c','unread',0,0)").execute(&pool).await.unwrap();
+            crate::notes::create_note(&pool, "a", "A", "", "one").await.unwrap();
+            crate::notes::create_note(&pool, "b", "B", "", "two").await.unwrap();
+            let snapshot = statistics_snapshot(&pool).await.unwrap();
+            assert_eq!(snapshot.total_books, 3);
+            assert_eq!(snapshot.reading_books, 1);
+            assert_eq!(snapshot.completed_books, 1);
+            assert_eq!(snapshot.total_notes, 2);
+            let notes = crate::notes::get_all_notes(&pool).await.unwrap();
+            assert_eq!(notes.len(), 2);
+            assert!(notes.iter().any(|note| note.book_title.as_deref() == Some("B")));
+            crate::notes::delete_note(&pool, &notes[0].id).await.unwrap();
+            assert_eq!(statistics_snapshot(&pool).await.unwrap().total_notes, 1);
+        });
     }
 
     #[test]

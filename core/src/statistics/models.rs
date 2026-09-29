@@ -12,6 +12,8 @@ pub struct StatisticsSnapshot {
     pub active_days: i64,
     pub total_books: i64,
     pub completed_books: i64,
+    pub reading_books: i64,
+    pub total_notes: i64,
     pub vocab_total: i64,
     pub vocab_learning: i64,
     pub vocab_mastered: i64,
