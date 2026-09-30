@@ -5154,15 +5154,42 @@ script_mod! {
         label_walk: Walk{width: Fit height: Fit}
         draw_text.text_style.font_size: 10
     }
-    let ProfileMetric = ButtonFlat{
+    let ProfileMetric = View{
         width: Fill height: 96
-        margin: 0 padding: 12
-        flow: Down spacing: 8 align: Center
-        enable_long_press: true
-        icon_walk: Walk{width: 22 height: 22}
-        draw_text.text_style.font_size: 11
-        label_walk: Walk{width: Fill height: Fit}
-        draw_bg.border_radius: 12.0
+        flow: Overlay
+        metric_button := ButtonFlat{
+            width: Fill height: Fill
+            margin: 0 padding: 0
+            text: ""
+            enable_long_press: true
+            draw_bg.border_radius: 12.0
+        }
+        metric_content := View{
+            width: Fill height: Fill
+            flow: Down spacing: 8 padding: 12
+            new_batch: true
+            metric_heading := View{
+                width: Fill height: 24
+                flow: Right spacing: 8 align: Align{y: 0.5}
+                metric_icon := Icon{
+                    width: 18 height: 18
+                    icon_walk: Walk{width: 18 height: 18}
+                }
+                metric_title := Label{
+                    width: Fill height: Fit
+                    text: ""
+                    draw_text.text_style: theme.font_bold{font_size: 11}
+                }
+            }
+            metric_description_row := View{
+                width: Fill height: Fit padding: Inset{left: 26}
+                metric_description := Label{
+                    width: Fill height: Fit
+                    text: ""
+                    draw_text.text_style.font_size: 10
+                }
+            }
+        }
     }
     let ProfileEntry = ButtonFlatter{
         width: Fill height: 54
@@ -6642,13 +6669,25 @@ script_mod! {
                             profile_hint := Label{width: Fill text: "每一页，都在积累" draw_text.text_style.font_size: 12}
                             profile_metrics_top := View{
                                 width: Fill height: Fit flow: Right spacing: 12
-                                profile_notes := ProfileMetric{text: "笔记" draw_icon +: {svg: crate_resource("self:resources/icons/reader_notes.svg")}}
-                                profile_reading := ProfileMetric{text: "在读" draw_icon +: {svg: crate_resource("self:resources/icons/nav_reading.svg")}}
+                                profile_notes := ProfileMetric{metric_content +: {metric_heading +: {
+                                    metric_title.text: "笔记"
+                                    metric_icon +: {draw_icon +: {svg: crate_resource("self:resources/icons/reader_notes.svg")}}
+                                }}}
+                                profile_reading := ProfileMetric{metric_content +: {metric_heading +: {
+                                    metric_title.text: "在读"
+                                    metric_icon +: {draw_icon +: {svg: crate_resource("self:resources/icons/nav_reading.svg")}}
+                                }}}
                             }
                             profile_metrics_bottom := View{
                                 width: Fill height: Fit flow: Right spacing: 12
-                                profile_completed := ProfileMetric{text: "读完" draw_icon +: {svg: crate_resource("self:resources/icons/nav_completed.svg")}}
-                                profile_duration := ProfileMetric{text: "阅读时长" draw_icon +: {svg: crate_resource("self:resources/icons/nav_time.svg")}}
+                                profile_completed := ProfileMetric{metric_content +: {metric_heading +: {
+                                    metric_title.text: "读完"
+                                    metric_icon +: {draw_icon +: {svg: crate_resource("self:resources/icons/nav_completed.svg")}}
+                                }}}
+                                profile_duration := ProfileMetric{metric_content +: {metric_heading +: {
+                                    metric_title.text: "阅读时长"
+                                    metric_icon +: {draw_icon +: {svg: crate_resource("self:resources/icons/nav_time.svg")}}
+                                }}}
                             }
                             profile_status := Label{width: Fill height: Fit text: "" draw_text.text_style.font_size: 10}
                             profile_tools := RoundedView{
@@ -13022,6 +13061,18 @@ impl App {
             id!(profile_reading),
             id!(profile_completed),
             id!(profile_duration),
+        ] {
+            let metric = self.ui.widget(cx, &[id]);
+            apply_reader_button_palette(cx, metric.widget(cx, ids!(metric_button)), palette);
+            apply_reader_icon_palette(cx, metric.widget(cx, ids!(metric_icon)), palette.accent);
+            apply_reader_label_palette(cx, metric.widget(cx, ids!(metric_title)), palette.text);
+            apply_reader_label_palette(
+                cx,
+                metric.widget(cx, ids!(metric_description)),
+                palette.muted,
+            );
+        }
+        for id in [
             id!(profile_chat),
             id!(profile_skills),
             id!(profile_settings),
@@ -13481,10 +13532,17 @@ impl App {
         set_text!(mobile_nav_vocab, "words");
         set_text!(mobile_nav_profile, "me");
         set_text!(profile_title, "me");
-        set_text!(profile_notes, "notes");
-        set_text!(profile_reading, "reading_books");
-        set_text!(profile_completed, "completed_books");
-        set_text!(profile_duration, "reading_time");
+        for (id, key) in [
+            (id!(profile_notes), "notes"),
+            (id!(profile_reading), "reading_books"),
+            (id!(profile_completed), "completed_books"),
+            (id!(profile_duration), "reading_time"),
+        ] {
+            self.ui
+                .widget(cx, &[id])
+                .label(cx, ids!(metric_title))
+                .set_text(cx, crate::i18n::text(language, key));
+        }
         set_text!(profile_back, "me");
         set_text!(profile_hint, "profile_hint");
         self.sync_mobile_chrome(cx);
@@ -14364,16 +14422,16 @@ impl App {
             (
                 id!(profile_notes),
                 if english {
-                    format!("Notes\n{} total", snapshot.total_notes)
+                    format!("{} total", snapshot.total_notes)
                 } else {
-                    format!("笔记\n累计 {} 条", snapshot.total_notes)
+                    format!("累计 {} 条", snapshot.total_notes)
                 },
             ),
             (
                 id!(profile_reading),
                 if english {
                     format!(
-                        "Reading\n{} {}",
+                        "{} {}",
                         snapshot.reading_books,
                         if snapshot.reading_books == 1 {
                             "book"
@@ -14382,14 +14440,14 @@ impl App {
                         }
                     )
                 } else {
-                    format!("在读\n累计 {} 本", snapshot.reading_books)
+                    format!("累计 {} 本", snapshot.reading_books)
                 },
             ),
             (
                 id!(profile_completed),
                 if english {
                     format!(
-                        "Finished\n{} {}",
+                        "{} {}",
                         snapshot.completed_books,
                         if snapshot.completed_books == 1 {
                             "book"
@@ -14398,19 +14456,18 @@ impl App {
                         }
                     )
                 } else {
-                    format!("读完\n累计 {} 本", snapshot.completed_books)
+                    format!("累计 {} 本", snapshot.completed_books)
                 },
             ),
             (
                 id!(profile_duration),
-                format!(
-                    "{}\n{}",
-                    localized("阅读时长", "Reading time"),
-                    Self::format_reading_duration(snapshot.total_reading_seconds)
-                ),
+                Self::format_reading_duration(snapshot.total_reading_seconds),
             ),
         ] {
-            self.ui.widget(cx, &[id]).set_text(cx, &text);
+            self.ui
+                .widget(cx, &[id])
+                .label(cx, ids!(metric_description))
+                .set_text(cx, &text);
         }
         self.ui.label(cx, ids!(profile_status)).set_text(cx, "");
         self.ui.widget(cx, ids!(page_profile)).redraw(cx);
@@ -18642,7 +18699,12 @@ impl MatchEvent for App {
             }
             self.activate_page(cx, AppPage::Profile);
         }
-        if self.ui.button(cx, ids!(profile_notes)).clicked(actions) {
+        if self
+            .ui
+            .widget(cx, ids!(profile_notes))
+            .button(cx, ids!(metric_button))
+            .clicked(actions)
+        {
             self.activate_page(cx, AppPage::Notes);
             self.ui
                 .label(cx, ids!(all_notes_status))
@@ -18653,7 +18715,12 @@ impl MatchEvent for App {
             (id!(profile_reading), READING_FILTER),
             (id!(profile_completed), COMPLETED_FILTER),
         ] {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if self
+                .ui
+                .widget(cx, &[id])
+                .button(cx, ids!(metric_button))
+                .clicked(actions)
+            {
                 self.library_tag_filter = Some(filter.to_string());
                 self.activate_page(cx, AppPage::Library);
                 self.refresh_shelf_projection(cx);
@@ -18685,7 +18752,11 @@ impl MatchEvent for App {
             spawn_load_vocab();
         }
         if self.ui.button(cx, ids!(nav_statistics)).clicked(actions)
-            || self.ui.button(cx, ids!(profile_duration)).clicked(actions)
+            || self
+                .ui
+                .widget(cx, ids!(profile_duration))
+                .button(cx, ids!(metric_button))
+                .clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, true);

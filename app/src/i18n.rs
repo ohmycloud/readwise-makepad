@@ -4,7 +4,7 @@ use readwise_core::settings::AppLanguage;
 pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
     let english = language == AppLanguage::English;
     match key {
-        "reading_time" => choose(english, "阅读时长", "Reading time"),
+        "reading_time" => choose(english, "阅读时长", "Read time"),
         "me" => choose(english, "我", "Me"),
         "bookshelf" => choose(english, "书架", "Bookshelf"),
         "words" => choose(english, "词汇", "Words"),
