@@ -3282,8 +3282,12 @@ fn library_action_menu_geometry(viewport: Rect, anchor: Rect, menu_height: f64) 
     (dvec2(x, y), width)
 }
 
-fn library_card_release_opens_reader(menu_was_open: bool, release_is_over: bool) -> bool {
-    !menu_was_open && release_is_over
+fn library_card_release_opens_reader(
+    menu_was_open: bool,
+    release_is_over: bool,
+    release_was_tap: bool,
+) -> bool {
+    !menu_was_open && release_is_over && release_was_tap
 }
 
 /// 笔记后台操作结果。
@@ -4211,9 +4215,10 @@ mod selection_popup_tests {
 
     #[test]
     fn an_open_library_menu_blocks_card_release_from_opening_the_reader() {
-        assert!(!library_card_release_opens_reader(true, true));
-        assert!(!library_card_release_opens_reader(false, false));
-        assert!(library_card_release_opens_reader(false, true));
+        assert!(!library_card_release_opens_reader(true, true, true));
+        assert!(!library_card_release_opens_reader(false, false, true));
+        assert!(!library_card_release_opens_reader(false, true, false));
+        assert!(library_card_release_opens_reader(false, true, true));
     }
 }
 
@@ -4877,6 +4882,7 @@ script_mod! {
         }
         more_btn := ButtonFlatter{
             width: 40 height: 36 text: "•••"
+            enable_long_press: true
             draw_text.text_style.font_size: 13
         }
     }
@@ -4925,6 +4931,7 @@ script_mod! {
             }
             more_btn := ButtonFlatter{
                 width: 34 height: 30 text: "•••"
+                enable_long_press: true
                 draw_text.text_style.font_size: 11
             }
         }
@@ -6516,11 +6523,17 @@ script_mod! {
                                 align: Align{y: 0.5}
                                 vocab_search := TextInput{
                                     width: Fill height: 38
+                                    is_multiline: false
+                                    flow: Right
                                     empty_text: "搜索单词、原形或释义"
                                 }
-                                vocab_filter_all := RadioButtonTabFlat{text: "全部"}
-                                vocab_filter_learning := RadioButtonTabFlat{text: "学习中"}
-                                vocab_filter_mastered := RadioButtonTabFlat{text: "已掌握"}
+                                vocab_filters := View{
+                                    width: Fit height: Fit
+                                    flow: Right spacing: 8
+                                    vocab_filter_all := RadioButtonTabFlat{text: "全部"}
+                                    vocab_filter_learning := RadioButtonTabFlat{text: "学习中"}
+                                    vocab_filter_mastered := RadioButtonTabFlat{text: "已掌握"}
+                                }
                             }
                             vocab_filter_hint := Label{
                                 width: Fill height: Fit
@@ -10789,6 +10802,8 @@ impl Widget for VocabList {
 struct BookShelf {
     #[deref]
     view: View,
+    #[rust]
+    activation_tap: ListTap,
     /// 卡片 WidgetUid → 已加载的封面路径。纹理属于组件实例，不能只按
     /// book_index 缓存：窗口重排可能用一个新卡片实例展示同一本书。
     #[rust]
@@ -11065,7 +11080,24 @@ impl Widget for BookShelf {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
+        let list = self.view.portal_list(cx, ids!(list));
+        let rect = current_clipped_rect(cx, list.area());
+        let mut allow_activation = self.activation_tap.allows_click(event, rect);
+        // The list still receives every release so it can clear finger capture.
+        let mut actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
+        if list.scrolled(&actions) || list.was_scrolling() {
+            self.activation_tap.cancel();
+            allow_activation = false;
+        }
+        if !allow_activation {
+            actions.retain(|action| {
+                !action.as_widget_action().is_some_and(|action| {
+                    matches!(action.cast(), ViewAction::FingerUp(_))
+                        || matches!(action.cast(), ButtonAction::Clicked(_))
+                })
+            });
+        }
+        cx.extend_actions(actions);
     }
 }
 
@@ -12349,7 +12381,11 @@ impl App {
         }
         if let Some(action) = actions.find_widget_action(card.widget_uid()) {
             if let ViewAction::FingerUp(event) = action.cast() {
-                if library_card_release_opens_reader(library_menu_was_open, event.is_over) {
+                if library_card_release_opens_reader(
+                    library_menu_was_open,
+                    event.is_over,
+                    event.was_tap(),
+                ) {
                     self.open_book_for_reading(cx, book.clone());
                 }
             }
@@ -14179,6 +14215,13 @@ impl App {
         let mut filters = self.ui.widget(cx, ids!(library_filter_row));
         let filter_flow = if compact { Flow::Down } else { Flow::right() };
         script_apply_eval!(cx, filters, {flow: #(filter_flow)});
+        for id in [id!(vocab_header), id!(vocab_toolbar)] {
+            let mut row = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, row, {flow: #(filter_flow)});
+        }
+        let mut vocab_filters = self.ui.widget(cx, ids!(vocab_filters));
+        let vocab_filters_width = if compact { Size::fill() } else { Size::fit() };
+        script_apply_eval!(cx, vocab_filters, {width: #(vocab_filters_width)});
         let mut dropdown = self.ui.widget(cx, ids!(library_tag_filter));
         let filter_width = if compact {
             Size::fill()
@@ -14239,7 +14282,7 @@ impl App {
             top: 24.0,
             bottom: 24.0,
         };
-        for id in [id!(page_settings), id!(page_statistics)] {
+        for id in [id!(page_settings), id!(page_statistics), id!(page_vocab)] {
             let mut page = self.ui.widget(cx, &[id]);
             script_apply_eval!(cx, page, {padding: #(scroll_padding)});
         }
@@ -14513,6 +14556,10 @@ impl App {
     }
 
     fn refresh_vocab_projection(&self, cx: &mut Cx) {
+        let search = self.ui.text_input(cx, ids!(vocab_search));
+        if search.text() != self.vocab_search {
+            search.set_text(cx, &self.vocab_search);
+        }
         let english = app_language() == AppLanguage::English;
         let query = self.vocab_search.trim().to_lowercase();
         let visible = self
