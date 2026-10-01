@@ -39,7 +39,7 @@ cargo makepad android "${common_args[@]}" build \
     -p readwise-app --release --locked --offline
 
 # cargo-makepad currently generates a fixed MakepadApp subclass and does not
-# include app-owned Java sources. Compile our SAF picker subclass into its
+# include app-owned Java sources. Compile our picker and LAN service into its
 # persistent Java output, then run the packager once more. On the second pass
 # cargo-makepad reuses those classes while rebuilding/signing the APK.
 android_build_root="$project_dir/target/android/makepad-android-apk/readwise_app"
@@ -81,8 +81,12 @@ cargo makepad android "${common_args[@]}" javac \
     "$generated_activity"
 
 activity_class="$java_classes/org/ohmycloud/readwise/MakepadApp.class"
-if [[ ! -f "$activity_class" ]] || ! grep -a -q 'nativeOnEpubPickerResult' "$activity_class"; then
-    echo "Android EPUB picker Activity bridge did not compile correctly" >&2
+if [[ ! -f "$activity_class" ]] \
+    || ! grep -a -q 'nativeOnEpubPickerResult' "$activity_class" \
+    || ! grep -a -q 'startLanTransferService' "$activity_class" \
+    || ! grep -a -q 'requestLanBackgroundAccess' "$activity_class" \
+    || [[ ! -f "$java_classes/org/ohmycloud/readwise/MakepadApp\$LanTransferService.class" ]]; then
+    echo "Android EPUB import and LAN service bridges did not compile correctly" >&2
     exit 1
 fi
 
@@ -100,8 +104,10 @@ fi
 built_dex="$android_build_root/apk/classes.dex"
 if [[ ! -f "$built_dex" ]] \
     || ! grep -a -q 'openEpubPicker' "$built_dex" \
-    || ! grep -a -q 'nativeOnEpubPickerResult' "$built_dex"; then
-    echo "Generated APK is missing the Android EPUB picker bridge" >&2
+    || ! grep -a -q 'nativeOnEpubPickerResult' "$built_dex" \
+    || ! grep -a -q 'nativeOnLanTransferServiceStopped' "$built_dex" \
+    || ! grep -a -q 'MakepadApp\$LanTransferService' "$built_dex"; then
+    echo "Generated APK is missing an Android EPUB import or LAN service bridge" >&2
     exit 1
 fi
 

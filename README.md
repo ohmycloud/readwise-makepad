@@ -169,7 +169,9 @@ scripts/package_android.sh
 target/dist/ReadWise-android-aarch64-<版本>.apk
 ```
 
-应用使用 `org.ohmycloud.readwise` 包名、Cargo 版本、API 26 最低版本和 API 35 目标版本。Android 清单只申请 AI/API 通信必需的网络与网络状态权限，不申请相机、麦克风、定位、蓝牙、存储或查询全部应用权限。“导入 EPUB”使用 Android 系统文档选择器的单次授权，选中的文件会先复制到应用私有缓存，无需全局存储权限。
+应用使用 `org.ohmycloud.readwise` 包名、Cargo 版本、API 26 最低版本和 API 35 目标版本。Android 清单申请 AI/API 通信和局域网传书所需的网络、网络状态、dataSync 前台服务、限时 CPU 唤醒与电池优化授权请求权限，不申请相机、麦克风、定位、蓝牙、存储或查询全部应用权限。“导入 EPUB → 本机文件”使用 Android 系统文档选择器的单次授权，选中的文件会先复制到应用私有缓存，无需全局存储权限。
+
+局域网传书：手机与电脑连接同一 Wi-Fi，在手机进入“书架 → 导入 EPUB → 局域网传书”，复制显示的网址并在电脑浏览器打开。选择一个或多个 EPUB，点击“开始传书”；网页显示每本书的上传进度和导入结果，成功后手机书架自动更新。每本最大 200 MB。关闭传书界面、切换页面或切到后台仍可接收，再次打开保留网址与状态。点击“停止接收”、退出应用或开启后满 30 分钟结束会话；下一次开启生成新网址。Android 使用前台服务和限时唤醒锁维持后台接收。若手机省电策略暂停接收，点击“允许后台接收”并在系统界面允许后台运行；部分手机还需将 ReadWise 的耗电管理设为允许后台高耗电。该入口也可用于桌面版本接收书籍；iOS 暂保留本机文件导入。
 
 如需额外生成 Play Store AAB，提供发布 keystore 和密码。密码通过环境变量传递，不写入命令行或仓库；key alias 默认从 `cargo makepad android keystore-create` 生成的 `.makepad` sidecar 读取：
 

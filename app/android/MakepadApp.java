@@ -1,11 +1,23 @@
 package org.ohmycloud.readwise;
 
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
 import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.content.pm.ServiceInfo;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -21,6 +33,140 @@ import dev.makepad.android.MakepadActivity;
 /** App-specific Activity additions that cargo-makepad's generated subclass lacks. */
 public class MakepadApp extends MakepadActivity {
     private static final int EPUB_PICKER_REQUEST = 0x5257;
+    private static String lanSession;
+
+    private static native void nativeOnLanTransferServiceStopped(String session);
+
+    public String startLanTransferService(String session, boolean english) {
+        synchronized (MakepadApp.class) {
+            try {
+                Intent intent = new Intent(this, LanTransferService.class);
+                intent.putExtra("session", session);
+                intent.putExtra("english", english);
+                startForegroundService(intent);
+                lanSession = session;
+                return "";
+            } catch (Exception error) {
+                return messageFor(error);
+            }
+        }
+    }
+
+    public void stopLanTransferService(String session) {
+        synchronized (MakepadApp.class) {
+            if (session.equals(lanSession)) {
+                lanSession = null;
+                stopService(new Intent(this, LanTransferService.class));
+            }
+        }
+    }
+
+    public void requestLanBackgroundAccess() {
+        runOnUiThread(() -> {
+            PowerManager power = getSystemService(PowerManager.class);
+            Intent settings = new Intent(power.isIgnoringBatteryOptimizations(getPackageName())
+                    ? Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                    : Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            settings.setData(Uri.parse("package:" + getPackageName()));
+            try { startActivity(settings); }
+            catch (Exception unavailable) {
+                Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                fallback.setData(Uri.parse("package:" + getPackageName()));
+                startActivity(fallback);
+            }
+        });
+    }
+
+    /** Keeps the explicitly enabled receiver alive when the Activity is paused. */
+    public static class LanTransferService extends Service {
+        private static final String CHANNEL = "readwise-lan-transfer";
+        private static final String STOP = "org.ohmycloud.readwise.STOP_LAN_TRANSFER";
+        private static final int NOTIFICATION_ID = 0x5258;
+        private final Handler timer = new Handler(Looper.getMainLooper());
+        private String session;
+        private PowerManager.WakeLock receiverWakeLock;
+        private final Runnable expire = () -> stopReceiver();
+
+        @Override
+        public IBinder onBind(Intent intent) { return null; }
+
+        @Override
+        public int onStartCommand(Intent intent, int flags, int startId) {
+            if (intent == null) { stopSelf(); return START_NOT_STICKY; }
+            String requested = intent.getStringExtra("session");
+            if (STOP.equals(intent.getAction())) {
+                if (requested != null && requested.equals(session)) { stopReceiver(); }
+                return START_NOT_STICKY;
+            }
+            synchronized (MakepadApp.class) {
+                // A delayed start belonging to an already closed session must
+                // neither resurrect that session nor stop a newer receiver.
+                if (requested == null || !requested.equals(lanSession)) {
+                    if (session == null) { stopSelf(startId); }
+                    return START_NOT_STICKY;
+                }
+                session = requested;
+            }
+            boolean english = intent.getBooleanExtra("english", false);
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            manager.createNotificationChannel(new NotificationChannel(
+                    CHANNEL, english ? "LAN book transfer" : "局域网传书",
+                    NotificationManager.IMPORTANCE_LOW));
+            Intent open = new Intent(this, MakepadApp.class);
+            open.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            PendingIntent reopen = PendingIntent.getActivity(this, 0, open,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            Intent stop = new Intent(this, LanTransferService.class);
+            stop.setAction(STOP);
+            stop.putExtra("session", session);
+            PendingIntent stopAction = PendingIntent.getService(this, 0, stop,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            Notification notification = new Notification.Builder(this, CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_sys_upload)
+                    .setContentTitle(english ? "Receiving EPUB books" : "正在接收 EPUB 书籍")
+                    .setContentText(english ? "Background receiving enabled · expires in 30 minutes"
+                            : "可在后台接收 · 开启后 30 分钟到期")
+                    .setContentIntent(reopen).setOngoing(true)
+                    .addAction(new Notification.Action.Builder(null,
+                            english ? "Stop receiving" : "停止接收", stopAction).build())
+                    .build();
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIFICATION_ID, notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            } else { startForeground(NOTIFICATION_ID, notification); }
+            // A foreground service alone does not keep the CPU awake. Hold a
+            // bounded lock only for the explicitly enabled transfer session.
+            if (receiverWakeLock == null) {
+                PowerManager power = getSystemService(PowerManager.class);
+                receiverWakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
+                        "ReadWise:LanTransfer");
+                receiverWakeLock.setReferenceCounted(false);
+            }
+            receiverWakeLock.acquire(30L * 60L * 1000L + 5000L);
+            timer.removeCallbacks(expire);
+            timer.postDelayed(expire, 30L * 60L * 1000L);
+            return START_NOT_STICKY;
+        }
+
+        private void stopReceiver() {
+            if (session != null) { nativeOnLanTransferServiceStopped(session); }
+            stopForeground(true);
+            stopSelf();
+        }
+
+        // Called by Android 15 if its data-sync foreground-service quota expires.
+        public void onTimeout(int startId, int foregroundServiceType) { stopReceiver(); }
+
+        @Override
+        public void onDestroy() {
+            timer.removeCallbacks(expire);
+            if (receiverWakeLock != null && receiverWakeLock.isHeld()) {
+                receiverWakeLock.release();
+            }
+            if (session != null) { nativeOnLanTransferServiceStopped(session); }
+            super.onDestroy();
+        }
+    }
 
     private static native void nativeOnEpubPickerResult(
             int status, String[] paths, String error);

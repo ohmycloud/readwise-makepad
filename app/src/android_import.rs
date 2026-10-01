@@ -16,7 +16,7 @@ pub enum AndroidImportAction {
     Error(String),
 }
 
-unsafe fn string_from_java(env: *mut jni::JNIEnv, value: jni::jstring) -> String {
+pub(crate) unsafe fn string_from_java(env: *mut jni::JNIEnv, value: jni::jstring) -> String {
     if value.is_null() {
         return String::new();
     }

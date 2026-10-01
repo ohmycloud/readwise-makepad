@@ -1,5 +1,7 @@
 #[cfg(target_os = "android")]
 mod android_import;
+#[cfg(target_os = "android")]
+mod android_lan_transfer;
 mod app;
 mod chapter_image;
 #[cfg(target_os = "macos")]
@@ -7,6 +9,7 @@ mod desktop_import;
 #[cfg(target_os = "macos")]
 mod desktop_window;
 mod i18n;
+mod lan_transfer;
 mod mark_span;
 #[cfg(target_os = "ios")]
 mod mobile_import;

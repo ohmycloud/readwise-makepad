@@ -4629,6 +4629,12 @@ enum DbAction {
     Failed(String),
 }
 
+#[derive(Debug)]
+struct LanTransferAction {
+    session_id: String,
+    notice: crate::lan_transfer::TransferNotice,
+}
+
 fn spawn_db_init(platform_data_dir: Option<std::path::PathBuf>) {
     std::thread::spawn(move || {
         if let Some(db) = DB.get() {
@@ -5964,9 +5970,7 @@ script_mod! {
                                         draw_bg.color_active: theme.color_bg_app
                                     }
                                     import_epub_btn := ButtonFlat{
-                                        // 平台能力在初始脚本对象中确定；不要依赖 Startup
-                                        // 再把静态 false 改回来，ScriptReapply 会覆盖它。
-                                        visible: #(cfg!(any(target_os = "android", target_os = "ios", target_os = "macos")))
+                                        visible: true
                                         text: "导入 EPUB"
                                         draw_bg.color: theme.color_bg_app
                                         draw_bg.color_focus: theme.color_bg_app
@@ -7384,6 +7388,67 @@ script_mod! {
                                     width: Fill height: Fill
                                     fit: ImageFit.Smallest
                                 }
+                            }
+                        }
+                    }
+                    library_import_modal := Modal{
+                        align: TopLeft
+                        content +: {
+                            width: 480 height: 460
+                            library_import_card := RoundedView{
+                                width: Fill height: Fill
+                                new_batch: true
+                                flow: Down spacing: 12 padding: 16
+                                draw_bg.color: theme.color_bg_container
+                                draw_bg.border_radius: 14.0
+                                library_import_title := Label{width: Fill text: "导入 EPUB" draw_text.text_style.font_size: 16}
+                                library_import_scroll := ScrollYView{
+                                    width: Fill height: Fill flow: Down spacing: 12
+                                    library_import_choices := View{
+                                        width: Fill height: Fit flow: Down spacing: 12
+                                        library_import_local := Button{
+                                            visible: #(cfg!(any(target_os = "android", target_os = "ios", target_os = "macos")))
+                                            width: Fill height: 44 text: "本机文件"
+                                        }
+                                        library_import_lan := ButtonFlat{
+                                            visible: #(cfg!(not(target_os = "ios")))
+                                            width: Fill height: 44 text: "局域网传书"
+                                        }
+                                    }
+                                    library_import_receiver := View{
+                                        visible: false
+                                        width: Fill height: Fit flow: Down spacing: 12
+                                        library_import_instructions := TextBox{
+                                            width: Fill height: Fit padding: 0
+                                            flow: Flow.Right{wrap: true}
+                                            text: "两台设备连接同一 Wi-Fi，在电脑浏览器打开下方网址，选择 EPUB 上传。关闭界面或切到后台仍可接收。"
+                                            draw_text.text_style.font_size: 10
+                                        }
+                                        library_import_address := View{
+                                            width: Fill height: Fit flow: Down spacing: 12
+                                            library_import_urls := TextInput{
+                                                width: Fill height: 92 empty_text: ""
+                                                is_read_only: true is_multiline: true
+                                                flow: Flow.Right{wrap: true}
+                                                draw_text.text_style.font_size: 10
+                                            }
+                                            library_import_copy := ButtonFlat{width: Fill height: 40 text: "复制网址"}
+                                        }
+                                        library_import_background := ButtonFlat{
+                                            visible: #(cfg!(target_os = "android"))
+                                            width: Fill height: 40 text: "允许后台接收"
+                                        }
+                                        library_import_restart := ButtonFlat{visible: false width: Fill height: 40 text: "重新开启"}
+                                    }
+                                    library_import_status := TextBox{
+                                        width: Fill height: Fit padding: 0
+                                        flow: Flow.Right{wrap: true}
+                                        text: "从本机文件导入，或通过局域网从电脑传书。"
+                                        draw_text.text_style.font_size: 10
+                                    }
+                                }
+                                library_import_stop := ButtonFlat{visible: false width: Fill height: 40 text: "停止接收"}
+                                library_import_close := ButtonFlat{width: Fill height: 40 text: "关闭界面"}
                             }
                         }
                     }
@@ -11363,6 +11428,16 @@ pub struct App {
     #[rust]
     import_picker_frame: Option<NextFrame>,
     #[rust]
+    import_dialog_open: bool,
+    #[rust]
+    lan_transfer_mode: bool,
+    #[rust]
+    lan_transfer: Option<crate::lan_transfer::LanTransfer>,
+    #[rust]
+    lan_transfer_status: String,
+    #[rust]
+    lan_import_count: usize,
+    #[rust]
     editing_book_tags_id: Option<String>,
     #[rust]
     editing_book_title_id: Option<String>,
@@ -11627,6 +11702,172 @@ impl App {
         self.sync_reader_customise_controls(cx);
     }
 
+    fn configure_library_import_layout(&self, cx: &mut Cx) {
+        let size = self.responsive_window_size;
+        if size.x <= 0.0 || size.y <= 0.0 {
+            return;
+        }
+        let insets = self.safe_area_insets;
+        let available = dvec2(
+            (size.x - insets.left - insets.right).max(1.0),
+            (size.y - insets.top - insets.bottom).max(1.0),
+        );
+        let card = dvec2(
+            (available.x - 24.0).clamp(1.0, 480.0),
+            (available.y - 24.0).clamp(1.0, if self.lan_transfer_mode { 460.0 } else { 280.0 }),
+        );
+        let content = self.ui.widget(cx, ids!(library_import_modal.content));
+        if let Some(mut view) = content.borrow_mut::<View>() {
+            view.walk.abs_pos = Some(dvec2(insets.left, insets.top) + (available - card) * 0.5);
+            view.walk.width = Size::Fixed(card.x);
+            view.walk.height = Size::Fixed(card.y);
+        };
+    }
+
+    fn sync_library_import_dialog(&self, cx: &mut Cx) {
+        for (id, zh, en) in [
+            (id!(library_import_title), "导入 EPUB", "Import EPUB"),
+            (id!(library_import_local), "本机文件", "Files on this device"),
+            (id!(library_import_lan), "局域网传书", "Wi-Fi transfer"),
+            (id!(library_import_copy), "复制网址", "Copy address"),
+            (id!(library_import_background), "允许后台接收", "Allow background receiving"),
+            (id!(library_import_restart), "重新开启", "Start again"),
+            (id!(library_import_stop), "停止接收", "Stop receiving"),
+            (id!(library_import_close), "关闭界面", "Close screen"),
+            (id!(library_import_instructions),
+                "两台设备连接同一 Wi-Fi，在电脑浏览器打开下方网址，选择 EPUB 上传（每本最大 200 MB）。",
+                "Connect both devices to the same Wi-Fi. Open the address below in a computer browser and upload EPUB files (up to 200 MB each)."),
+        ] {
+            self.ui.widget(cx, &[id]).set_text(cx, localized(zh, en));
+        }
+        self.ui
+            .widget(cx, ids!(library_import_choices))
+            .set_visible(cx, !self.lan_transfer_mode);
+        self.ui
+            .widget(cx, ids!(library_import_receiver))
+            .set_visible(cx, self.lan_transfer_mode);
+        self.ui
+            .widget(cx, ids!(library_import_address))
+            .set_visible(cx, self.lan_transfer.is_some());
+        self.ui
+            .widget(cx, ids!(library_import_stop))
+            .set_visible(cx, self.lan_transfer.is_some());
+        self.ui
+            .widget(cx, ids!(library_import_restart))
+            .set_visible(cx, self.lan_transfer_mode && self.lan_transfer.is_none());
+        let urls = self
+            .lan_transfer
+            .as_ref()
+            .map(|s| s.urls.join("\n"))
+            .unwrap_or_default();
+        self.ui
+            .text_input(cx, ids!(library_import_urls))
+            .set_text(cx, &urls);
+        self.ui
+            .widget(cx, ids!(library_import_status))
+            .set_text(cx, &self.lan_transfer_status);
+        self.configure_library_import_layout(cx);
+        if self.import_dialog_open && !self.ui.modal(cx, ids!(library_import_modal)).is_open() {
+            self.ui.modal(cx, ids!(library_import_modal)).open(cx);
+        }
+        self.ui.redraw(cx);
+    }
+
+    fn open_library_import_dialog(&mut self, cx: &mut Cx) {
+        self.close_library_action_menu(cx);
+        self.ui
+            .widget(cx, ids!(book_shelf))
+            .shelf_list(cx, ids!(list))
+            .stop_scrolling();
+        self.import_dialog_open = true;
+        self.ui
+            .widget(cx, ids!(library_import_scroll))
+            .set_scroll_pos(cx, DVec2::default());
+        if self.lan_transfer.is_some() {
+            self.lan_transfer_mode = true;
+        } else {
+            self.lan_transfer_mode = false;
+            self.lan_transfer_status = localized(
+                "从本机文件导入，或通过局域网从电脑传书。",
+                "Import files from this device, or transfer books over Wi-Fi.",
+            )
+            .into();
+        }
+        self.sync_library_import_dialog(cx);
+    }
+
+    fn close_library_import_dialog(&mut self, cx: &mut Cx) {
+        self.import_dialog_open = false;
+        self.ui.modal(cx, ids!(library_import_modal)).close(cx);
+    }
+
+    fn start_lan_transfer(&mut self, cx: &mut Cx) {
+        if self.lan_transfer.is_some() {
+            return;
+        }
+        self.ui
+            .widget(cx, ids!(library_import_scroll))
+            .set_scroll_pos(cx, DVec2::default());
+        let result = DB
+            .get()
+            .ok_or_else(|| {
+                localized(
+                    "书库尚未就绪，请稍后重试。",
+                    "The library is not ready. Try again shortly.",
+                )
+                .to_string()
+            })
+            .and_then(|db| {
+                crate::lan_transfer::LanTransfer::start(
+                    db.data_dir(),
+                    app_language() == AppLanguage::English,
+                    |path| {
+                        let db = DB.get().ok_or("Library is not ready")?;
+                        let book = db.import_book(path)?;
+                        match refresh_shelf(db) {
+                            Ok(items) => Cx::post_action(ShelfAction::Loaded {
+                                items,
+                                imported: 1,
+                                import_error: None,
+                            }),
+                            Err(error) => Cx::post_action(ShelfAction::Error(error)),
+                        }
+                        Ok(book.title)
+                    },
+                    |id, notice| {
+                        Cx::post_action(LanTransferAction {
+                            session_id: id.into(),
+                            notice,
+                        })
+                    },
+                )
+            });
+        match result {
+            Ok(receiver) => {
+                self.lan_transfer = Some(receiver);
+                self.lan_transfer_mode = true;
+                self.lan_import_count = 0;
+                self.lan_transfer_status = localized("等待传书 · 关闭界面或切到后台仍可接收，网址 30 分钟后失效。", "Waiting for books. Receiving continues when this screen is closed or the app is in the background. This address expires in 30 minutes.").into();
+            }
+            Err(error) => self.lan_transfer_status = error,
+        }
+        self.sync_library_import_dialog(cx);
+    }
+
+    fn stop_lan_transfer(&mut self, cx: &mut Cx) {
+        if self.lan_transfer.take().is_some() {
+            self.ui
+                .widget(cx, ids!(library_import_scroll))
+                .set_scroll_pos(cx, DVec2::default());
+            self.lan_transfer_status = localized(
+                "传书已停止，请重新开启。",
+                "Transfer stopped. Start again to receive books.",
+            )
+            .into();
+            self.sync_library_import_dialog(cx);
+        }
+    }
+
     fn configure_reader_customise_layout(&self, cx: &mut Cx) {
         if self.responsive_window_size.x <= 0.0 || self.responsive_window_size.y <= 0.0 {
             return;
@@ -11825,6 +12066,9 @@ impl App {
     }
 
     fn activate_page(&mut self, cx: &mut Cx, page: AppPage) {
+        if page != AppPage::Library && self.import_dialog_open {
+            self.close_library_import_dialog(cx);
+        }
         if page != AppPage::Library {
             self.ui
                 .widget(cx, ids!(book_shelf))
@@ -14010,6 +14254,9 @@ impl App {
         *APP_LANGUAGE.write().unwrap() = language;
         self.sync_app_language_controls(cx, language);
         self.apply_ui_language(cx, language);
+        if self.import_dialog_open {
+            self.sync_library_import_dialog(cx);
+        }
         self.refresh_shelf_projection(cx);
         self.refresh_vocab_projection(cx);
         self.refresh_pending_skill_indicator(cx);
@@ -14124,6 +14371,9 @@ impl App {
         }
 
         self.refresh_shelf_projection(cx);
+        if self.import_dialog_open {
+            self.sync_library_import_dialog(cx);
+        }
 
         let notes_are_empty = NOTES.read().unwrap().entries.is_empty();
         self.ui
@@ -14424,6 +14674,7 @@ impl App {
             .set_visible(cx, compact);
         self.configure_reader_toolbar_layout(cx, size);
         self.configure_reader_customise_layout(cx);
+        self.configure_library_import_layout(cx);
         if self.reader_customise_draft.is_some() {
             self.sync_reader_customise_controls(cx);
         }
@@ -16838,6 +17089,7 @@ impl MatchEvent for App {
     }
 
     fn handle_shutdown(&mut self, cx: &mut Cx) {
+        self.lan_transfer = None;
         self.flush_reader_progress(cx);
         if let Some(id) = self.reading_session_id.take() {
             if let Some(db) = DB.get() {
@@ -16877,6 +17129,49 @@ impl MatchEvent for App {
             self.debounce_reader_progress_save(cx);
         }
         for action in actions {
+            if let Some(transfer) = action.downcast_ref::<LanTransferAction>() {
+                if self
+                    .lan_transfer
+                    .as_ref()
+                    .is_some_and(|s| s.id == transfer.session_id)
+                {
+                    use crate::lan_transfer::TransferNotice;
+                    self.lan_transfer_status = match &transfer.notice {
+                        TransferNotice::Receiving(name) => {
+                            if app_language() == AppLanguage::English {
+                                format!("Receiving {name}…")
+                            } else {
+                                format!("正在接收：{name}…")
+                            }
+                        }
+                        TransferNotice::Imported(title) => {
+                            self.lan_import_count += 1;
+                            if app_language() == AppLanguage::English {
+                                format!("Added {title} · {} books received", self.lan_import_count)
+                            } else {
+                                format!(
+                                    "已加入书架：{title} · 本次已传 {} 本",
+                                    self.lan_import_count
+                                )
+                            }
+                        }
+                        TransferNotice::Failed(error) => error.clone(),
+                        TransferNotice::Stopped => {
+                            self.lan_transfer = None;
+                            self.ui
+                                .widget(cx, ids!(library_import_scroll))
+                                .set_scroll_pos(cx, DVec2::default());
+                            localized(
+                                "传书已停止，请重新开启。",
+                                "Transfer stopped. Start again to receive books.",
+                            )
+                            .into()
+                        }
+                    };
+                    self.sync_library_import_dialog(cx);
+                }
+                continue;
+            }
             if action.downcast_ref::<ReaderToolbarTap>().is_some() {
                 if self.on_reader_page
                     && self.compact_layout
@@ -18394,6 +18689,72 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(import_epub_btn)).clicked(actions) {
+            self.open_library_import_dialog(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_import_close))
+            .clicked(actions)
+            || self
+                .ui
+                .modal(cx, ids!(library_import_modal))
+                .dismissed(actions)
+        {
+            self.close_library_import_dialog(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_import_stop))
+            .clicked(actions)
+        {
+            self.stop_lan_transfer(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_import_lan))
+            .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(library_import_restart))
+                .clicked(actions)
+        {
+            self.start_lan_transfer(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_import_copy))
+            .clicked(actions)
+        {
+            if let Some(receiver) = &self.lan_transfer {
+                cx.copy_to_clipboard(&receiver.urls[0]);
+                self.lan_transfer_status = localized(
+                    "网址已复制，请在同一 Wi-Fi 下的电脑浏览器打开。",
+                    "Address copied. Open it in a computer browser on the same Wi-Fi.",
+                )
+                .into();
+                self.sync_library_import_dialog(cx);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_import_background))
+            .clicked(actions)
+        {
+            #[cfg(target_os = "android")]
+            {
+                self.lan_transfer_status = match crate::android_lan_transfer::request_background_access() {
+                    Ok(()) => localized("请在系统中允许后台运行；若仍暂停接收，请将本应用的耗电管理设为允许后台高耗电。", "Allow background operation in the system dialog. If receiving still pauses, allow unrestricted battery use for ReadWise.").into(),
+                    Err(error) => error,
+                };
+                self.sync_library_import_dialog(cx);
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(library_import_local))
+            .clicked(actions)
+        {
+            self.close_library_import_dialog(cx);
             #[cfg(target_os = "macos")]
             if self.import_picker_frame.is_none() {
                 // The action is delivered inside Makepad's MouseUp dispatch,
