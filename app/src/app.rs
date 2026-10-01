@@ -4,6 +4,7 @@ use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
 use crate::reader_touch::{ListTap, ToolbarTap};
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
+use crate::shelf_list::*;
 use makepad_ai::{
     AiBackend, AiEvent, AiRequest, BackendConfig, Message, OpenAiBackend, RequestId, StreamDelta,
 };
@@ -34,6 +35,96 @@ type StatisticsSnapshot = readwise_core::statistics::models::StatisticsSnapshot;
 type VocabEntry = readwise_core::vocab::models::VocabBookEntry;
 
 app_main!(App);
+
+/// Passive widget notifications still reach widgets, but require no global
+/// control lookup. Never skip a mixed batch containing a click or data action.
+fn app_action_batch_is_passive(actions: &Actions, on_reader_page: bool) -> bool {
+    actions.iter().all(|action| {
+        let Some(widget) = action.as_widget_action() else {
+            return false;
+        };
+        matches!(
+            widget.action.downcast_ref::<ShelfListAction>(),
+            Some(ShelfListAction::Scroll)
+        ) || (!on_reader_page
+            && matches!(
+                widget.action.downcast_ref::<PortalListAction>(),
+                Some(PortalListAction::Scroll)
+            ))
+            || matches!(
+                widget.action.downcast_ref::<ViewAction>(),
+                Some(
+                    ViewAction::FingerDown(_)
+                        | ViewAction::FingerMove(_)
+                        | ViewAction::FingerHoverIn(_)
+                        | ViewAction::FingerHoverOut(_)
+                )
+            )
+            || matches!(
+                widget.action.downcast_ref::<ButtonAction>(),
+                Some(ButtonAction::Pressed(_) | ButtonAction::Released(_))
+            )
+    })
+}
+
+#[cfg(test)]
+mod passive_action_tests {
+    use super::*;
+
+    fn widget_action(value: impl WidgetActionTrait) -> Action {
+        Box::new(WidgetAction {
+            data: None,
+            action: Box::new(value),
+            widget_uid: WidgetUid(1),
+            group: None,
+        })
+    }
+
+    #[test]
+    fn scroll_only_batches_skip_global_lookups_but_reader_progress_does_not() {
+        assert!(app_action_batch_is_passive(
+            &vec![widget_action(ShelfListAction::Scroll)],
+            false
+        ));
+        let actions = vec![widget_action(PortalListAction::Scroll)];
+        assert!(app_action_batch_is_passive(&actions, false));
+        assert!(!app_action_batch_is_passive(&actions, true));
+    }
+
+    #[test]
+    fn clicks_and_custom_actions_in_scroll_batches_are_never_skipped() {
+        let actions = vec![
+            widget_action(ShelfListAction::Scroll),
+            widget_action(ButtonAction::Clicked(Default::default())),
+        ];
+        assert!(!app_action_batch_is_passive(&actions, false));
+        let actions: ActionsBuf = vec![
+            widget_action(ShelfListAction::Scroll),
+            Box::new(ReaderToolbarTap),
+        ];
+        assert!(!app_action_batch_is_passive(&actions, false));
+        assert!(!app_action_batch_is_passive(
+            &vec![widget_action(ViewAction::FingerUp(FingerUpEvent {
+                window_id: WindowId(0, 0),
+                abs: dvec2(0.0, 0.0),
+                abs_start: dvec2(0.0, 0.0),
+                capture_time: 1.0,
+                time: 1.1,
+                digit_id: Default::default(),
+                device: DigitDevice::Mouse {
+                    button: MouseButton::PRIMARY
+                },
+                has_long_press_occurred: false,
+                tap_count: 1,
+                modifiers: Default::default(),
+                rect: Default::default(),
+                is_over: true,
+                is_sweep: false,
+            }))],
+            false
+        ));
+    }
+}
 
 #[cfg(test)]
 mod reader_icon_tests {
@@ -1092,6 +1183,9 @@ struct ChatData {
     messages: Vec<ChatMessage>,
     streaming_text: String,
     is_streaming: bool,
+    /// Replacing a thread can reuse the same PortalList row IDs.
+    revision: u64,
+    streaming_revision: u64,
 }
 
 static CHAT_DATA: LazyLock<RwLock<ChatData>> = LazyLock::new(|| RwLock::new(ChatData::default()));
@@ -4940,7 +5034,7 @@ script_mod! {
     mod.widgets.BookShelfBase = #(BookShelf::register_widget(vm))
     mod.widgets.BookShelf = set_type_default() do mod.widgets.BookShelfBase{
         width: Fill height: Fill
-        list := PortalList{
+        list := ShelfList{
             width: Fill height: Fill
             padding: Inset{ left: 24 right: 24 top: 8 bottom: 24 }
             spacing: 10
@@ -5278,6 +5372,32 @@ script_mod! {
         }
     }
 
+    let ChatUserTemplate = RoundedView{
+        width: Fill height: Fit
+        margin: Inset{left: 90}
+        padding: 12
+        new_batch: true
+        draw_bg.color: theme.color_bg_highlight_inline
+        draw_bg.border_radius: 9.0
+        message := Label{
+            width: Fill height: Fit
+            text: ""
+            draw_text.text_style.font_size: 11
+        }
+    }
+    let ChatAssistantTemplate = RoundedView{
+        width: Fill height: Fit
+        margin: Inset{right: 90}
+        padding: 12
+        new_batch: true
+        draw_bg.color: theme.color_bg_container
+        draw_bg.border_radius: 9.0
+        message := Label{
+            width: Fill height: Fit
+            text: ""
+            draw_text.text_style.font_size: 11
+        }
+    }
     mod.widgets.ChatListBase = #(ChatList::register_widget(vm))
     mod.widgets.ChatList = set_type_default() do mod.widgets.ChatListBase{
         width: Fill height: Fill
@@ -5290,32 +5410,10 @@ script_mod! {
             spacing: 8
             padding: Inset{left: 20 right: 20 top: 12 bottom: 12}
             scroll_bar: ScrollBar{}
-            User := RoundedView{
-                width: Fill height: Fit
-                margin: Inset{left: 90}
-                padding: 12
-                new_batch: true
-                draw_bg.color: theme.color_bg_highlight_inline
-                draw_bg.border_radius: 9.0
-                message := Label{
-                    width: Fill height: Fit
-                    text: ""
-                    draw_text.text_style.font_size: 11
-                }
-            }
-            Assistant := RoundedView{
-                width: Fill height: Fit
-                margin: Inset{right: 90}
-                padding: 12
-                new_batch: true
-                draw_bg.color: theme.color_bg_container
-                draw_bg.border_radius: 9.0
-                message := Label{
-                    width: Fill height: Fit
-                    text: ""
-                    draw_text.text_style.font_size: 11
-                }
-            }
+            User := ChatUserTemplate{}
+            UserAlternate := ChatUserTemplate{}
+            Assistant := ChatAssistantTemplate{}
+            AssistantAlternate := ChatAssistantTemplate{}
         }
     }
 
@@ -10530,34 +10628,59 @@ struct ChatList {
     view: View,
     #[live(false)]
     reader_style: bool,
+    #[rust]
+    last_revision: u64,
+    #[rust]
+    last_streaming_revision: u64,
+    #[rust]
+    was_streaming: bool,
+    #[rust]
+    last_style: Option<(AppLanguage, ReaderBackground, ReaderTheme)>,
+    #[rust]
+    alternate_template: bool,
 }
 
 impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let data = CHAT_DATA.read().unwrap();
         let language = *APP_LANGUAGE.read().unwrap();
-        let reader_palette = Some(reader_scene_palette(
-            *READER_BACKGROUND.read().unwrap(),
-            *READER_THEME.read().unwrap(),
-        ));
+        let background = *READER_BACKGROUND.read().unwrap();
+        let theme = *READER_THEME.read().unwrap();
+        let style = (language, background, theme);
+        let style_changed = self.last_style != Some(style);
+        let thread_changed = self.last_revision != data.revision;
+        let streaming_changed = self.was_streaming != data.is_streaming
+            || self.last_streaming_revision != data.streaming_revision;
+        let palette = reader_scene_palette(background, theme);
+        if thread_changed || style_changed {
+            // A script reload may reset a cached row's measured height to a
+            // single line. Recreate only the visible rows when the whole
+            // conversation or its layout style changes.
+            self.alternate_template = !self.alternate_template;
+        }
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 let message_count = data.messages.len();
                 list.set_item_range(cx, 0, message_count + usize::from(data.is_streaming));
                 while let Some(item_id) = list.next_visible_item(cx) {
                     if data.is_streaming && item_id == message_count {
-                        let item = list.item(cx, item_id, id!(Assistant));
-                        let text = if data.streaming_text.is_empty() {
-                            if language == AppLanguage::English {
-                                "Thinking…"
-                            } else {
-                                "思考中…"
-                            }
+                        let template = if self.alternate_template {
+                            id!(AssistantAlternate)
                         } else {
-                            &data.streaming_text
+                            id!(Assistant)
                         };
-                        item.label(cx, ids!(message)).set_text(cx, text);
-                        if let Some(palette) = reader_palette {
+                        let (item, existed) = list.item_with_existed(cx, item_id, template);
+                        if !existed || thread_changed || style_changed || streaming_changed {
+                            let text = if data.streaming_text.is_empty() {
+                                if language == AppLanguage::English {
+                                    "Thinking…"
+                                } else {
+                                    "思考中…"
+                                }
+                            } else {
+                                &data.streaming_text
+                            };
+                            item.label(cx, ids!(message)).set_text(cx, text);
                             apply_reader_surface_palette(
                                 cx,
                                 item.clone(),
@@ -10574,12 +10697,16 @@ impl Widget for ChatList {
                         continue;
                     };
                     let template = match message.role {
+                        ChatRole::User if self.alternate_template => id!(UserAlternate),
                         ChatRole::User => id!(User),
+                        ChatRole::Assistant if self.alternate_template => id!(AssistantAlternate),
                         ChatRole::Assistant => id!(Assistant),
                     };
-                    let item = list.item(cx, item_id, template);
-                    item.label(cx, ids!(message)).set_text(cx, &message.text);
-                    if let Some(palette) = reader_palette {
+                    let (item, existed) = list.item_with_existed(cx, item_id, template);
+                    let finished_stream_row =
+                        self.was_streaming && !data.is_streaming && item_id + 1 == message_count;
+                    if !existed || thread_changed || style_changed || finished_stream_row {
+                        item.label(cx, ids!(message)).set_text(cx, &message.text);
                         let background = match message.role {
                             ChatRole::User if self.reader_style => palette.field,
                             ChatRole::Assistant => palette.surface,
@@ -10593,10 +10720,20 @@ impl Widget for ChatList {
                 }
             }
         }
+        self.last_revision = data.revision;
+        self.last_streaming_revision = data.streaming_revision;
+        self.was_streaming = data.is_streaming;
+        self.last_style = Some(style);
+        if style_changed {
+            cx.cx.redraw_all();
+        }
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if matches!(event, Event::LiveEdit | Event::ScriptReapply) {
+            self.last_style = None;
+        }
         self.view.handle_event(cx, event, scope);
     }
 }
@@ -10708,18 +10845,30 @@ struct VocabList {
     projection_revision: usize,
     #[rust]
     alternate_template: bool,
+    #[rust]
+    last_style: Option<(AppLanguage, ReaderBackground, ReaderTheme)>,
 }
 
 impl Widget for VocabList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let projection = VOCAB_VISIBLE.read().unwrap();
         let language = *APP_LANGUAGE.read().unwrap();
+        let background = *READER_BACKGROUND.read().unwrap();
+        let theme = *READER_THEME.read().unwrap();
+        let style = (language, background, theme);
+        let style_changed = self.last_style != Some(style);
+        let palette = reader_scene_palette(background, theme);
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, projection.entries.len());
-                if self.projection_revision != projection.revision {
+                let projection_changed = self.projection_revision != projection.revision;
+                if projection_changed {
                     list.set_first_id_and_scroll(0, 0.0);
                     self.projection_revision = projection.revision;
+                }
+                if projection_changed || style_changed {
+                    // Script reload can reset a cached card's measured height.
+                    // Recreate visible cards on the next draw.
                     self.alternate_template = !self.alternate_template;
                 }
                 let template = if self.alternate_template {
@@ -10731,108 +10880,118 @@ impl Widget for VocabList {
                     let Some(entry) = projection.entry_for_item_id(item_id) else {
                         continue;
                     };
-                    let item = list.item(cx, item_id, template);
-                    let heading = if entry.word.eq_ignore_ascii_case(&entry.lemma) {
-                        entry.word.clone()
-                    } else {
-                        format!("{} · {}", entry.word, entry.lemma)
-                    };
-                    item.label(cx, ids!(vocab_word)).set_text(cx, &heading);
-                    item.label(cx, ids!(vocab_status)).set_text(
-                        cx,
-                        if entry.status == "mastered" {
-                            crate::i18n::text(language, "mastered")
+                    let (item, existed) = list.item_with_existed(cx, item_id, template);
+                    if !existed || style_changed {
+                        let heading = if entry.word.eq_ignore_ascii_case(&entry.lemma) {
+                            entry.word.clone()
                         } else {
-                            crate::i18n::text(language, "learning")
-                        },
-                    );
-                    item.label(cx, ids!(vocab_gloss)).set_text(
-                        cx,
-                        entry
-                            .gloss
+                            format!("{} · {}", entry.word, entry.lemma)
+                        };
+                        item.label(cx, ids!(vocab_word)).set_text(cx, &heading);
+                        item.label(cx, ids!(vocab_status)).set_text(
+                            cx,
+                            if entry.status == "mastered" {
+                                crate::i18n::text(language, "mastered")
+                            } else {
+                                crate::i18n::text(language, "learning")
+                            },
+                        );
+                        item.label(cx, ids!(vocab_gloss)).set_text(
+                            cx,
+                            entry
+                                .gloss
+                                .as_deref()
+                                .filter(|gloss| !gloss.trim().is_empty())
+                                .unwrap_or(if language == AppLanguage::English {
+                                    "No definition"
+                                } else {
+                                    "暂无释义"
+                                }),
+                        );
+                        let context = entry
+                            .context_sentence
                             .as_deref()
-                            .filter(|gloss| !gloss.trim().is_empty())
-                            .unwrap_or(if language == AppLanguage::English {
-                                "No definition"
+                            .filter(|context| !context.trim().is_empty());
+                        item.widget(cx, ids!(vocab_context))
+                            .set_visible(cx, context.is_some());
+                        item.label(cx, ids!(vocab_context))
+                            .set_text(cx, context.unwrap_or(""));
+                        let level = entry
+                            .level
+                            .filter(|level| *level > 0)
+                            .map(|level| format!("L{level}"))
+                            .unwrap_or_else(|| {
+                                if language == AppLanguage::English {
+                                    "Unlisted".to_string()
+                                } else {
+                                    "词表外".to_string()
+                                }
+                            });
+                        item.label(cx, ids!(vocab_meta)).set_text(
+                            cx,
+                            &if language == AppLanguage::English {
+                                format!("{level} · Reviewed {} times", entry.review_count)
                             } else {
-                                "暂无释义"
-                            }),
-                    );
-                    let context = entry
-                        .context_sentence
-                        .as_deref()
-                        .filter(|context| !context.trim().is_empty());
-                    item.widget(cx, ids!(vocab_context))
-                        .set_visible(cx, context.is_some());
-                    item.label(cx, ids!(vocab_context))
-                        .set_text(cx, context.unwrap_or(""));
-                    let level = entry
-                        .level
-                        .filter(|level| *level > 0)
-                        .map(|level| format!("L{level}"))
-                        .unwrap_or_else(|| {
-                            if language == AppLanguage::English {
-                                "Unlisted".to_string()
+                                format!("{level} · 已复习 {} 次", entry.review_count)
+                            },
+                        );
+                        item.button(cx, ids!(vocab_toggle)).set_text(
+                            cx,
+                            if entry.status == "mastered" {
+                                crate::i18n::text(language, "keep_learning")
                             } else {
-                                "词表外".to_string()
-                            }
-                        });
-                    item.label(cx, ids!(vocab_meta)).set_text(
-                        cx,
-                        &if language == AppLanguage::English {
-                            format!("{level} · Reviewed {} times", entry.review_count)
-                        } else {
-                            format!("{level} · 已复习 {} 次", entry.review_count)
-                        },
-                    );
-                    item.button(cx, ids!(vocab_toggle)).set_text(
-                        cx,
-                        if entry.status == "mastered" {
-                            crate::i18n::text(language, "keep_learning")
-                        } else {
-                            crate::i18n::text(language, "mark_mastered")
-                        },
-                    );
-                    item.widget(cx, ids!(vocab_speak))
-                        .set_text(cx, crate::i18n::text(language, "speak"));
-                    item.widget(cx, ids!(vocab_review))
-                        .set_text(cx, crate::i18n::text(language, "review"));
-                    item.widget(cx, ids!(vocab_remove))
-                        .set_text(cx, crate::i18n::text(language, "remove"));
-                    item.widget(cx, ids!(vocab_card_bottom))
-                        .set_visible(cx, true);
-                    let palette = reader_scene_palette(
-                        *READER_BACKGROUND.read().unwrap(),
-                        *READER_THEME.read().unwrap(),
-                    );
-                    apply_reader_surface_palette(cx, item.clone(), palette.surface, palette.border);
-                    let vocab_word = item.widget(cx, ids!(vocab_word));
-                    let vocab_status = item.widget(cx, ids!(vocab_status));
-                    let vocab_gloss = item.widget(cx, ids!(vocab_gloss));
-                    let vocab_context = item.widget(cx, ids!(vocab_context));
-                    let vocab_meta = item.widget(cx, ids!(vocab_meta));
-                    apply_reader_label_palette(cx, vocab_word, palette.text);
-                    apply_reader_label_palette(cx, vocab_status, palette.accent);
-                    apply_reader_label_palette(cx, vocab_gloss, palette.text);
-                    apply_reader_label_palette(cx, vocab_context, palette.muted);
-                    apply_reader_label_palette(cx, vocab_meta, palette.muted);
-                    for id in [
-                        id!(vocab_speak),
-                        id!(vocab_review),
-                        id!(vocab_toggle),
-                        id!(vocab_remove),
-                    ] {
-                        let button = item.widget(cx, &[id]);
-                        apply_reader_button_palette(cx, button, palette);
+                                crate::i18n::text(language, "mark_mastered")
+                            },
+                        );
+                        item.widget(cx, ids!(vocab_speak))
+                            .set_text(cx, crate::i18n::text(language, "speak"));
+                        item.widget(cx, ids!(vocab_review))
+                            .set_text(cx, crate::i18n::text(language, "review"));
+                        item.widget(cx, ids!(vocab_remove))
+                            .set_text(cx, crate::i18n::text(language, "remove"));
+                        item.widget(cx, ids!(vocab_card_bottom))
+                            .set_visible(cx, true);
+                        apply_reader_surface_palette(
+                            cx,
+                            item.clone(),
+                            palette.surface,
+                            palette.border,
+                        );
+                        let vocab_word = item.widget(cx, ids!(vocab_word));
+                        let vocab_status = item.widget(cx, ids!(vocab_status));
+                        let vocab_gloss = item.widget(cx, ids!(vocab_gloss));
+                        let vocab_context = item.widget(cx, ids!(vocab_context));
+                        let vocab_meta = item.widget(cx, ids!(vocab_meta));
+                        apply_reader_label_palette(cx, vocab_word, palette.text);
+                        apply_reader_label_palette(cx, vocab_status, palette.accent);
+                        apply_reader_label_palette(cx, vocab_gloss, palette.text);
+                        apply_reader_label_palette(cx, vocab_context, palette.muted);
+                        apply_reader_label_palette(cx, vocab_meta, palette.muted);
+                        for id in [
+                            id!(vocab_speak),
+                            id!(vocab_review),
+                            id!(vocab_toggle),
+                            id!(vocab_remove),
+                        ] {
+                            let button = item.widget(cx, &[id]);
+                            apply_reader_button_palette(cx, button, palette);
+                        }
                     }
                     item.draw_all_unscoped(cx);
                 }
             }
         }
+        self.last_style = Some(style);
+        if style_changed {
+            cx.cx.redraw_all();
+        }
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if matches!(event, Event::LiveEdit | Event::ScriptReapply) {
+            self.last_style = None;
+        }
         self.view.handle_event(cx, event, scope);
     }
 }
@@ -10855,6 +11014,8 @@ struct BookShelf {
     last_view_mode: LibraryViewMode,
     #[rust]
     grid_columns: usize,
+    #[rust]
+    grid_cover_height: f64,
     #[rust]
     list_cover_heights: HashMap<String, f64>,
     #[rust]
@@ -10951,6 +11112,8 @@ impl Widget for BookShelf {
         };
         let grid_columns = shelf_grid_columns_for_width(available_width);
         let grid_cover_height = shelf_grid_cover_height(available_width, grid_columns);
+        let grid_geometry_changed = self.grid_columns != grid_columns
+            || (self.grid_cover_height - grid_cover_height).abs() > 0.5;
         let language_changed = self.last_language != language;
         self.last_language = language;
         if language_changed {
@@ -10967,7 +11130,7 @@ impl Widget for BookShelf {
             self.list_cover_width = measured_width;
         }
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+            if let Some(mut list) = step.as_shelf_list().borrow_mut() {
                 let item_count = if view_mode == LibraryViewMode::Grid {
                     shelf_grid_row_count(shelf.entries.len(), grid_columns)
                 } else {
@@ -10984,6 +11147,7 @@ impl Widget for BookShelf {
                     self.grid_columns = grid_columns;
                     self.alternate_template = !self.alternate_template;
                 }
+                self.grid_cover_height = grid_cover_height;
                 let template = if view_mode == LibraryViewMode::Grid {
                     if self.alternate_template {
                         id!(GridRowAlternate)
@@ -11005,42 +11169,55 @@ impl Widget for BookShelf {
                     }
                     let (item, existed) = list.item_with_existed(cx, item_id, template);
                     if view_mode == LibraryViewMode::Grid {
-                        for (column, cell_id) in [
-                            id!(grid_cell_0),
-                            id!(grid_cell_1),
-                            id!(grid_cell_2),
-                            id!(grid_cell_3),
-                            id!(grid_cell_4),
-                            id!(grid_cell_5),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            let cell = item.widget(cx, &[cell_id]);
-                            cell.set_visible(cx, column < grid_columns);
-                            if column >= grid_columns {
-                                continue;
-                            }
-                            let card = cell.widget(cx, ids!(grid_card));
-                            let book_index = shelf_grid_book_index(
-                                item_id,
-                                column,
-                                grid_columns,
-                                shelf.entries.len(),
-                            );
-                            card.set_visible(cx, book_index.is_some());
-                            if let Some(book_index) = book_index {
-                                if let Some(mut cover) = card.view(cx, ids!(cover)).borrow_mut() {
-                                    cover.walk.height = Size::Fixed(grid_cover_height);
+                        // Stable rows already have their cell visibility, cover
+                        // geometry and labels. Avoid walking six nested card
+                        // trees for every scroll frame.
+                        if !existed || language_changed || grid_geometry_changed {
+                            for (column, cell_id) in [
+                                id!(grid_cell_0),
+                                id!(grid_cell_1),
+                                id!(grid_cell_2),
+                                id!(grid_cell_3),
+                                id!(grid_cell_4),
+                                id!(grid_cell_5),
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            {
+                                let cell = item.widget(cx, &[cell_id]);
+                                cell.set_visible(cx, column < grid_columns);
+                                if column >= grid_columns {
+                                    continue;
                                 }
-                                if !existed || language_changed {
-                                    self.bind_book_card(
-                                        cx,
-                                        &card,
-                                        &shelf.entries[book_index],
-                                        language,
-                                        false,
-                                    );
+                                let card = cell.widget(cx, ids!(grid_card));
+                                let book_index = shelf_grid_book_index(
+                                    item_id,
+                                    column,
+                                    grid_columns,
+                                    shelf.entries.len(),
+                                );
+                                card.set_visible(cx, book_index.is_some());
+                                if let Some(book_index) = book_index {
+                                    if let Some(mut cover) = card.view(cx, ids!(cover)).borrow_mut()
+                                    {
+                                        let cover_height_matches = matches!(
+                                            cover.walk.height,
+                                            Size::Fixed(height)
+                                                if (height - grid_cover_height).abs() <= 0.5
+                                        );
+                                        if !cover_height_matches {
+                                            cover.walk.height = Size::Fixed(grid_cover_height);
+                                        }
+                                    }
+                                    if !existed || language_changed {
+                                        self.bind_book_card(
+                                            cx,
+                                            &card,
+                                            &shelf.entries[book_index],
+                                            language,
+                                            false,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -11119,7 +11296,7 @@ impl Widget for BookShelf {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let list = self.view.portal_list(cx, ids!(list));
+        let list = self.view.shelf_list(cx, ids!(list));
         let rect = current_clipped_rect(cx, list.area());
         let mut allow_activation = self.activation_tap.allows_click(event, rect);
         // The list still receives every release so it can clear finger capture.
@@ -11641,6 +11818,12 @@ impl App {
     }
 
     fn activate_page(&mut self, cx: &mut Cx, page: AppPage) {
+        if page != AppPage::Library {
+            self.ui
+                .widget(cx, ids!(book_shelf))
+                .shelf_list(cx, ids!(list))
+                .stop_scrolling();
+        }
         let retain_toolbar = self.on_reader_page && page == AppPage::Reader;
         if self.on_reader_page && page != AppPage::Reader {
             // Reader overlays retain their own local visibility even after the
@@ -15427,7 +15610,13 @@ impl App {
 
     fn clear_chat(&mut self, cx: &mut Cx) {
         self.cancel_chat(cx);
-        *CHAT_DATA.write().unwrap() = ChatData::default();
+        let mut data = CHAT_DATA.write().unwrap();
+        let revision = data.revision.wrapping_add(1);
+        *data = ChatData {
+            revision,
+            ..Default::default()
+        };
+        drop(data);
         self.chat_thread_id = None;
         self.set_chat_status(cx, tr("new_chat_ready"));
         self.ui.redraw(cx);
@@ -16655,6 +16844,9 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if app_action_batch_is_passive(actions, self.on_reader_page) {
+            return;
+        }
         // A menu action can close the overlay before this action batch reaches
         // the shelf-card loop. Preserve the state from the start of the batch
         // so that the same pointer release can never open a book underneath.
@@ -17228,7 +17420,9 @@ impl MatchEvent for App {
                         self.ui
                             .text_input(cx, ids!(ai_api_key))
                             .set_text(cx, &settings.api_key);
-                        *CHAT_DATA.write().unwrap() = ChatData {
+                        let mut data = CHAT_DATA.write().unwrap();
+                        let revision = data.revision.wrapping_add(1);
+                        *data = ChatData {
                             messages: messages
                                 .iter()
                                 .map(|message| ChatMessage {
@@ -17243,8 +17437,10 @@ impl MatchEvent for App {
                                     text: message.content.clone(),
                                 })
                                 .collect(),
+                            revision,
                             ..Default::default()
                         };
+                        drop(data);
                         self.configure_ai_backend(cx);
                         // Restore the thread at its tail before the chat page's
                         // first visible draw instead of animating from item zero.
@@ -18140,7 +18336,7 @@ impl MatchEvent for App {
         let shelf_list = self
             .ui
             .widget(cx, ids!(book_shelf))
-            .portal_list(cx, ids!(list));
+            .shelf_list(cx, ids!(list));
         for (item_id, item) in shelf_list.items_with_actions(actions) {
             if shelf_view_mode == LibraryViewMode::Grid {
                 for (column, cell_id) in [
@@ -19752,6 +19948,7 @@ impl AppMain for App {
         });
         makepad_widgets::widgets_mod(vm);
         makepad_code_editor::script_mod(vm);
+        crate::shelf_list::script_mod(vm);
         crate::ruby_word::script_mod(vm);
         crate::reader_hit::script_mod(vm);
         crate::reader_inline_code::script_mod(vm);
@@ -19987,11 +20184,11 @@ impl AppMain for App {
                 }
             }
             if !stream_text.is_empty() {
-                CHAT_DATA
-                    .write()
-                    .unwrap()
-                    .streaming_text
-                    .push_str(&stream_text);
+                {
+                    let mut data = CHAT_DATA.write().unwrap();
+                    data.streaming_text.push_str(&stream_text);
+                    data.streaming_revision = data.streaming_revision.wrapping_add(1);
+                }
                 self.set_chat_status(cx, tr("outputting_answer"));
                 self.redraw_chat(cx);
             } else if reasoning_started {
@@ -20006,7 +20203,11 @@ impl AppMain for App {
                             request_id,
                             delta: StreamDelta::TextDelta { text },
                         } if self.ai_request == Some(request_id) && !self.ai_stream.saw_content => {
-                            CHAT_DATA.write().unwrap().streaming_text.push_str(&text);
+                            {
+                                let mut data = CHAT_DATA.write().unwrap();
+                                data.streaming_text.push_str(&text);
+                                data.streaming_revision = data.streaming_revision.wrapping_add(1);
+                            }
                             self.redraw_chat(cx);
                         }
                         AiEvent::Complete {

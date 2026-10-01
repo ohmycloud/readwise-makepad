@@ -24,6 +24,7 @@ mod reader_text;
 mod reader_touch;
 mod ruby_word;
 mod sample_chapter;
+mod shelf_list;
 
 /// 零依赖的最小 logger：把 core（log 门面）的日志打到 stderr。
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
