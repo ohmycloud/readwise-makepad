@@ -6132,6 +6132,13 @@ script_mod! {
                                                     draw_text.color: theme.color_label_inner_inactive
                                                     draw_text.text_style.font_size: 8.5
                                                 }
+                                                // The desktop status fills this row, but
+                                                // is hidden on mobile. Keep a mobile spacer
+                                                // so remaining pages stays at the right edge.
+                                                reader_footer_spacer := View{
+                                                    visible: false
+                                                    width: Fill height: Fill
+                                                }
                                                 reader_pages_left := Label{
                                                     width: Fit height: Fit
                                                     text: ""
@@ -14412,6 +14419,9 @@ impl App {
             .set_visible(cx, compact && safe_area_insets.top > 0.0);
         self.ui.widget(cx, ids!(title)).set_visible(cx, true);
         self.ui.widget(cx, ids!(status)).set_visible(cx, !compact);
+        self.ui
+            .widget(cx, ids!(reader_footer_spacer))
+            .set_visible(cx, compact);
         self.configure_reader_toolbar_layout(cx, size);
         self.configure_reader_customise_layout(cx);
         if self.reader_customise_draft.is_some() {
