@@ -20,6 +20,7 @@ pub struct HitRun {
     row: Option<usize>,
     /// Resolved TextFlow row areas after Makepad's per-row alignment.
     drawn_rows: Vec<(usize, Rect)>,
+    ink_rows: Vec<(usize, Rect)>,
 }
 
 struct PendingRun {
@@ -67,7 +68,7 @@ pub fn end_capture(cx: &Cx, origin: DVec2) -> (Vec<HitRun>, Vec<(Rect, usize)>) 
         .filter_map(|pending| {
             let mut run = pending.run;
             if pending.ink_rows.len() == run.layout.rows.len() {
-                run.drawn_rows = pending
+                run.ink_rows = pending
                     .ink_rows
                     .iter()
                     .enumerate()
@@ -80,7 +81,8 @@ pub fn end_capture(cx: &Cx, origin: DVec2) -> (Vec<HitRun>, Vec<(Rect, usize)>) 
                         Some((index, rect))
                     })
                     .collect();
-            } else if pending.row_areas.len() == run.layout.rows.len() {
+            }
+            if pending.row_areas.len() == run.layout.rows.len() {
                 run.drawn_rows = pending
                     .row_areas
                     .iter()
@@ -128,9 +130,13 @@ pub fn end_capture(cx: &Cx, origin: DVec2) -> (Vec<HitRun>, Vec<(Rect, usize)>) 
 pub fn painted_rows(runs: &[HitRun]) -> Vec<(Rect, usize)> {
     runs.iter()
         .flat_map(|run| {
-            if !run.drawn_rows.is_empty() {
-                return run
-                    .drawn_rows
+            let rows = if run.ink_rows.is_empty() {
+                &run.drawn_rows
+            } else {
+                &run.ink_rows
+            };
+            if !rows.is_empty() {
+                return rows
                     .iter()
                     .filter_map(|(index, rect)| {
                         let row = run.layout.rows.get(*index)?;
@@ -189,6 +195,7 @@ pub fn capture_code_rows(
                         start,
                         row: Some(row),
                         drawn_rows: Vec::new(),
+                        ink_rows: Vec::new(),
                     },
                     painted_row: Some((area, padding)),
                     row_areas: Vec::new(),
@@ -267,6 +274,7 @@ pub fn draw_text(tf: &mut TextFlow, cx: &mut Cx2d, text: &str) {
                     start,
                     row: None,
                     drawn_rows: Vec::new(),
+                    ink_rows: Vec::new(),
                 },
                 painted_row: None,
                 row_areas,
@@ -415,7 +423,7 @@ fn painted_row_screen_x(left: f64, row_start: f64, scale: f64, x: f32) -> f64 {
 
 /// TextFlow records selection against the layout's predicted rows. On macOS
 /// its multi-row draw follows the turtle's *actual* row positions instead.
-/// Rebuild plain-paragraph rectangles from the painted rows so a long block
+/// Rebuild tracked rich-text rectangles from the painted rows so a long block
 /// cannot accumulate a vertical offset between text, hit testing and color.
 pub fn selection_rects(runs: &[HitRun], from: usize, to: usize) -> Vec<Rect> {
     let mut rects = Vec::new();
@@ -629,6 +637,50 @@ mod tests {
     #[test]
     fn captured_row_field_preserves_draw_text_instance_alignment() {
         assert_eq!(std::mem::size_of::<DrawText>() % 16, 0);
+    }
+
+    #[test]
+    fn ruby_reservation_moves_only_its_row_and_shares_space_between_words() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let list = DrawList2d::new(&mut cx);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &event);
+        draw.draw_lists[list.id()].redraw_id = draw.redraw_id;
+        draw.draw_list_stack.push(list.id());
+        let mut cx = Cx2d::new(&mut draw);
+        cx.begin_root_turtle(
+            dvec2(300.0, 400.0),
+            Layout {
+                flow: Flow::right_wrap(),
+                ..Layout::default()
+            },
+        );
+        let mut rows = Vec::new();
+        for annotated in [false, true, false, false] {
+            let start = cx.align_list_len();
+            let rect = Rect {
+                pos: cx.turtle().pos(),
+                size: dvec2(100.0, 20.0),
+            };
+            let mut area = Area::Empty;
+            cx.add_aligned_rect_area(&mut area, rect);
+            cx.turtle_mut().allocate_height(20.0);
+            cx.emit_turtle_walk(rect, start);
+            if annotated {
+                // The ruby appears after preceding plain text on this row.
+                cx.reserve_turtle_row_top(18.0);
+                cx.reserve_turtle_row_top(18.0);
+                cx.reserve_turtle_row_top(14.0);
+                assert_eq!(cx.turtle().pos().y, rect.pos.y + 18.0);
+                assert_eq!(area.rect(&cx).pos.y, cx.turtle().pos().y);
+            }
+            rows.push(area);
+            cx.turtle_new_line_with_spacing(8.0);
+        }
+        let tops: Vec<_> = rows.iter().map(|area| area.rect(&cx).pos.y).collect();
+        assert_eq!(tops, vec![0.0, 46.0, 74.0, 102.0]);
+        // Normal rows resume their configured 28px pitch immediately.
+        assert_eq!(cx.turtle().pos().y, 130.0);
     }
 
     #[test]

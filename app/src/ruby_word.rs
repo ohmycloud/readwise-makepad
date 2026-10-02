@@ -259,6 +259,23 @@ impl Widget for RubyWord {
             });
         }
         let word_source = tf.text_len();
+        // Reserve only the rows occupied by this word. Measure a stable sample
+        // even after the gloss is hidden, so marking it known preserves layout.
+        self.draw_gloss.text_style.font_size = appearance.font_size;
+        let slot = self
+            .draw_gloss
+            .layout(cx, 0.0, 0.0, None, false, Align::default(), "注音");
+        let slot_height = slot
+            .rows
+            .first()
+            .map(|row| {
+                ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_gloss.font_scale) as f64
+            })
+            .unwrap_or(appearance.font_size as f64 * 1.4)
+            + self.gloss_gap as f64
+            + 2.0;
+        let old_inset = tf.draw_text.row_top_inset;
+        tf.draw_text.row_top_inset = slot_height;
         tf.areas_tracker.push_tracker();
         if let Some((r, g, b, a)) = appearance.word_background {
             draw_word_with_background(
@@ -280,6 +297,7 @@ impl Widget for RubyWord {
             crate::reader_hit::draw_text(tf, cx, &self.word);
         }
         let (start, end) = tf.areas_tracker.pop_tracker();
+        tf.draw_text.row_top_inset = old_inset;
         if word_color.is_some() {
             tf.font_colors.pop();
         }
@@ -293,18 +311,29 @@ impl Widget for RubyWord {
             self.drawn_areas = tf.areas_tracker.areas[start..end].to_vec();
         }
 
-        if !self.gloss.is_empty() {
-            // 词在行尾折行时首段是个小残段，注音要锚在最宽的那段（词的主体）上
-            let widest = self
-                .drawn_areas
-                .iter()
-                .max_by(|a, b| {
-                    let wa = a.rect(cx).size.x;
-                    let wb = b.rect(cx).size.x;
-                    wa.partial_cmp(&wb).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .copied();
-            if let Some(first) = widest {
+        // 词在行尾折行时首段是个小残段，注音要锚在最宽的那段（词的主体）上
+        let widest = self
+            .drawn_areas
+            .iter()
+            .max_by(|a, b| {
+                let wa = a.rect(cx).size.x;
+                let wb = b.rect(cx).size.x;
+                wa.partial_cmp(&wb).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied();
+        if let Some(first) = widest {
+            let word_rect = first.rect(cx);
+            // Keep page-cut geometry identical when a known word loses its gloss.
+            crate::reader_hit::capture_overlay(
+                cx,
+                first,
+                Rect {
+                    pos: word_rect.pos - dvec2(0.0, slot_height),
+                    size: word_rect.size + dvec2(0.0, slot_height),
+                },
+                word_source,
+            );
+            if !self.gloss.is_empty() {
                 // 设置页可配置的注音字号/颜色
                 self.draw_gloss.text_style.font_size = appearance.font_size;
                 let (r, g, b) = appearance.color;
@@ -337,21 +366,6 @@ impl Widget for RubyWord {
                     .unwrap_or(self.draw_gloss.text_style.font_size as f64 * 1.4);
                 let x = rect.pos.x + (rect.size.x - gloss_w) * 0.5;
                 let y = rect.pos.y - gloss_box_h - self.gloss_gap as f64;
-                // The gloss and its word form one indivisible visual row.
-                // A page cut through this span would split the annotation
-                // from the word even if the ordinary TextFlow rows fit.
-                crate::reader_hit::capture_overlay(
-                    cx,
-                    first,
-                    Rect {
-                        pos: dvec2(x.min(rect.pos.x), y),
-                        size: dvec2(
-                            (x + gloss_w).max(rect.pos.x + rect.size.x) - x.min(rect.pos.x),
-                            rect.pos.y + rect.size.y - y,
-                        ),
-                    },
-                    word_source,
-                );
                 if let Some((r, g, b, a)) = appearance.background {
                     self.draw_fill.color = Vec4f {
                         x: r,

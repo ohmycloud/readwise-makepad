@@ -600,6 +600,7 @@ pub struct Turtle {
     used_height: f64,
     prev_row_metrics: Metrics,
     current_row_metrics: Metrics,
+    row_top_inset: f64,
     wrap_spacing: f64,
     align_start: usize,
     finished_rows_start: usize,
@@ -1352,6 +1353,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             used_height: layout.padding.top,
             prev_row_metrics: Metrics::default(),
             current_row_metrics: Metrics::default(),
+            row_top_inset: 0.0,
             guard: Area::Empty,
         };
 
@@ -1453,6 +1455,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             used_height: layout.padding.top,
             prev_row_metrics: Metrics::default(),
             current_row_metrics: Metrics::default(),
+            row_top_inset: 0.0,
             guard,
         };
 
@@ -1560,7 +1563,10 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                             }
                             // Include the inter-walk spacing, otherwise a right-aligned row is
                             // shifted too far right and its last walk overflows the inner edge.
-                            row_width += row_walks_end.saturating_sub(row_walks_start).saturating_sub(1) as f64 * spacing;
+                            row_width += row_walks_end
+                                .saturating_sub(row_walks_start)
+                                .saturating_sub(1) as f64
+                                * spacing;
                             let row_unused_width = (inner_effective_width - row_width).max(0.0);
                             let dx = align_x * row_unused_width;
 
@@ -2161,6 +2167,25 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.turtle_new_line_with_spacing(0.0);
     }
 
+    /// Reserve space above this visual row, including content already drawn
+    /// on it. Multiple inline annotations share the largest reservation.
+    pub fn reserve_turtle_row_top(&mut self, height: f64) {
+        let delta = (height - self.turtle().row_top_inset).max(0.0);
+        if delta == 0.0 {
+            return;
+        }
+        let start = self
+            .finished_walks
+            .get(self.current_row_walks_start())
+            .map(|walk| walk.align_list_start)
+            .unwrap_or(self.align_list.len());
+        self.move_align_list(start, self.align_list.len(), 0.0, delta, false);
+        let turtle = self.turtle_mut();
+        turtle.pos.y += delta;
+        turtle.used_height += delta;
+        turtle.row_top_inset += delta;
+    }
+
     pub fn turtle_new_line_with_spacing(&mut self, spacing: f64) {
         self.turtle_new_line_internal(spacing, self.align_list.len());
     }
@@ -2196,6 +2221,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
         self.turtle_mut().prev_row_metrics = self.turtle().current_row_metrics;
         self.turtle_mut().current_row_metrics = Metrics::default();
+        self.turtle_mut().row_top_inset = 0.0;
         self.finished_rows.push(self.finished_walks.len());
     }
 

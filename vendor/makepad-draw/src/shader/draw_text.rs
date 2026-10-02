@@ -1272,7 +1272,7 @@ pub struct DrawText {
     #[rust]
     pub captured_row_areas: Option<Vec<Area>>,
     #[rust]
-    _captured_row_area_padding: u64,
+    pub row_top_inset: f64,
     #[rust]
     pending_slug_flush_generation: u64,
     #[rust]
@@ -2342,6 +2342,9 @@ impl DrawText {
                     cx.turtle_new_line_with_spacing(ws);
                     self.extend_area = true;
                 }
+                if !row.glyphs.is_empty() {
+                    cx.reserve_turtle_row_top(self.row_top_inset);
+                }
 
                 // Compute row_origin: for row 0 (continuation row), use the
                 // layouter's position (correct indent on the existing line).
@@ -2350,7 +2353,10 @@ impl DrawText {
                 // position which doesn't account for taller inline widgets
                 // (pills) inflating the previous row's height.
                 let row_origin = if row_idx == 0 {
-                    origin_in_lpxs + Size::from(row.origin_in_lpxs) * self.font_scale
+                    let mut origin =
+                        origin_in_lpxs + Size::from(row.origin_in_lpxs) * self.font_scale;
+                    origin.y += (cx.turtle().pos().y - turtle_pos.y) as f32;
+                    origin
                 } else {
                     let tp = cx.turtle().pos();
                     Point::new(
@@ -2391,7 +2397,7 @@ impl DrawText {
                 // Update turtle allocation for this row.
                 if row_idx == 0 {
                     let turtle = cx.turtle_mut();
-                    turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
+                    turtle.move_to(dvec2(origin_in_lpxs.x as f64, row_top_y));
                     turtle.allocate_width(used_size_in_lpxs.width as f64);
                     turtle.allocate_height(row_h);
                 } else {
@@ -2433,6 +2439,12 @@ impl DrawText {
             self.flush_slug_textures_if_allowed(cx);
         } else {
             // ── SINGLE-WALK path (single-row text, reuse mode, or Linux/Win) ──
+            if text.rows.iter().any(|row| !row.glyphs.is_empty()) {
+                cx.reserve_turtle_row_top(self.row_top_inset);
+            }
+            let inset_delta = (cx.turtle().pos().y - turtle_pos.y) as f32;
+            let origin_in_lpxs = origin_in_lpxs + Size::new(0.0, inset_delta);
+            let new_turtle_pos = new_turtle_pos + dvec2(0.0, inset_delta as f64);
             let align_list_start = cx.align_list_len();
             if callback_before_text {
                 for (row_index, row) in text.rows.iter().enumerate() {

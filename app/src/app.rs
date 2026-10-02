@@ -5756,13 +5756,6 @@ script_mod! {
                 para_html := Html{
                     width: Fill height: Fit
                     selectable: true
-                    padding: Inset{ top: 22 }
-                    text_style_normal.line_spacing: 2.2
-                    text_style_bold.line_spacing: 2.2
-                    text_style_italic.line_spacing: 2.2
-                    text_style_fixed.line_spacing: 2.2
-                    paragraph_margin.bottom: 1.4
-                    heading_margin.bottom: 1.1
                     a := mod.widgets.ReaderLink{}
                     ruby := mod.widgets.RubyWord{}
                     reader_run := mod.widgets.ReaderRun{}
@@ -5797,11 +5790,6 @@ script_mod! {
                 para_html := Html{
                     width: Fill{max: 960} height: Fit
                     selectable: true
-                    padding: Inset{top: 22}
-                    text_style_normal.line_spacing: 2.2
-                    text_style_bold.line_spacing: 2.2
-                    text_style_italic.line_spacing: 2.2
-                    text_style_fixed.line_spacing: 2.2
                     a := mod.widgets.ReaderLink{}
                     ruby := mod.widgets.RubyWord{}
                     img := mod.widgets.ChapterImage{}
@@ -9866,11 +9854,7 @@ impl ChapterList {
         } else {
             id!(Para)
         };
-        let line_spacing = if has_gloss {
-            reader_spacing.gloss_line_spacing()
-        } else {
-            reader_spacing.plain_line_spacing()
-        };
+        let line_spacing = reader_spacing.plain_line_spacing();
         let item = list.item(cx, cache_id, template);
         let previous_layout_width = self
             .item_layout_widths
@@ -10077,7 +10061,7 @@ impl ChapterList {
                     .retain(|key, _| key.chapter != chapter_idx || key.block != item_id);
             }
         }
-        let painted_selection = if !measure && reader_plain_paragraph(para) {
+        let painted_selection = if tracked.is_some() {
             native_probe.and_then(|(start, end)| {
                 let rects = crate::reader_hit::selection_rects(&runs, start, end);
                 (!rects.is_empty()).then_some(rects)
@@ -10085,6 +10069,7 @@ impl ChapterList {
         } else {
             None
         };
+        let used_painted_selection = painted_selection.is_some();
         if tracked.is_some() {
             self.hit_runs
                 .insert(item.widget_uid(), (item_id, reader_source_hash(para), runs));
@@ -10131,7 +10116,7 @@ impl ChapterList {
                     .unwrap_or_else(|| {
                         captured_draw_color_rects(cx, &inner.text_flow.draw_selection)
                     });
-                if !reader_plain_paragraph(para) {
+                if !used_painted_selection && !reader_plain_paragraph(para) {
                     crate::reader_inline_code::correct_rects(cx, &mut raw);
                 }
                 inner.text_flow.draw_selection.end_many_instances(cx);
@@ -13456,7 +13441,7 @@ impl App {
             .widget(cx, ids!(reader_preview_columns))
             .borrow_mut::<View>()
         {
-            columns_view.layout.padding.top = if settings.gloss_enabled { 22.0 } else { 0.0 };
+            columns_view.layout.padding.top = 0.0;
             columns_view.redraw(cx);
         }
         if let Some(mut preview) = self
@@ -13504,11 +13489,7 @@ impl App {
                 flow.font_size = size;
                 flow.font_color = palette.text;
                 flow.draw_text.color = palette.text;
-                let line_spacing = if settings.gloss_enabled {
-                    spacing.gloss_line_spacing()
-                } else {
-                    spacing.plain_line_spacing()
-                };
+                let line_spacing = spacing.plain_line_spacing();
                 for (index, style) in [
                     &mut flow.text_style_normal,
                     &mut flow.text_style_bold,

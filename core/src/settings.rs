@@ -319,10 +319,6 @@ impl ReaderSpacing {
             Self::Custom(value) => value,
         }
     }
-
-    pub fn gloss_line_spacing(self) -> f32 {
-        self.plain_line_spacing() + 1.0
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -524,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_spacing_preserves_extra_room_for_glosses() {
+    fn reader_spacing_round_trips_custom_values() {
         for spacing in [
             ReaderSpacing::Default,
             ReaderSpacing::Comfortable,
@@ -532,7 +528,6 @@ mod tests {
             ReaderSpacing::Custom(0.8),
             ReaderSpacing::Custom(2.5),
         ] {
-            assert!(spacing.gloss_line_spacing() > spacing.plain_line_spacing());
             assert_eq!(ReaderSpacing::from_str(&spacing.as_str()), spacing);
         }
         assert_eq!(ReaderSpacing::from_str("unknown"), ReaderSpacing::Default);
