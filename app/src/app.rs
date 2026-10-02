@@ -529,16 +529,9 @@ impl ReaderSwipeGesture {
     }
 }
 
-static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> =
-    LazyLock::new(|| RwLock::new(sample_chapter::build_paragraphs(PARA_COUNT)));
-static CODE_BLOCKS: LazyLock<RwLock<Vec<Option<String>>>> = LazyLock::new(|| {
-    RwLock::new(
-        sample_chapter::build_paragraphs(PARA_COUNT)
-            .iter()
-            .map(|chunk| readwise_core::books::epub_meta::code_block_text(chunk))
-            .collect(),
-    )
-});
+static PARAGRAPHS: LazyLock<RwLock<Vec<String>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+static CODE_BLOCKS: LazyLock<RwLock<Vec<Option<String>>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
 
 fn replace_paragraphs(chunks: Vec<String>) {
     if *PARAGRAPHS.read().unwrap() == chunks {
@@ -2150,10 +2143,28 @@ struct ShelfItem {
     status: String,
     progress_current: i64,
     progress_total: i64,
+    last_read_at: Option<i64>,
     want_to_read: bool,
     tags: Vec<String>,
     cover_path: Option<String>,
     file_path: String,
+}
+
+/// Keep the open book in this process; otherwise use persisted reading time.
+/// Older databases may have a reading status without a recorded timestamp.
+fn recent_read_shelf_item<'a>(
+    items: &'a [ShelfItem],
+    current_id: Option<&str>,
+) -> Option<&'a ShelfItem> {
+    current_id
+        .and_then(|id| items.iter().find(|book| book.id == id))
+        .or_else(|| {
+            items
+                .iter()
+                .filter(|book| book.last_read_at.is_some())
+                .max_by_key(|book| book.last_read_at)
+        })
+        .or_else(|| items.iter().find(|book| book.status == "reading"))
 }
 
 const WANT_TO_READ_FILTER: &str = "\0readwise:want-to-read";
@@ -2195,11 +2206,34 @@ mod shelf_filter_tests {
             status: "unread".to_string(),
             progress_current: 0,
             progress_total: 0,
+            last_read_at: None,
             want_to_read: false,
             tags: tags.iter().map(|tag| tag.to_string()).collect(),
             cover_path: None,
             file_path: String::new(),
         }
+    }
+
+    #[test]
+    fn recent_reading_uses_last_read_time_and_keeps_the_open_book() {
+        let mut older = book("older", &[]);
+        older.status = "reading".into();
+        older.last_read_at = Some(10);
+        let mut latest = book("latest", &[]);
+        latest.status = "completed".into();
+        latest.last_read_at = Some(20);
+        let books = vec![older, latest];
+
+        assert_eq!(recent_read_shelf_item(&books, None).unwrap().id, "latest");
+        assert_eq!(
+            recent_read_shelf_item(&books, Some("older")).unwrap().id,
+            "older"
+        );
+        assert_eq!(
+            recent_read_shelf_item(&books, Some("deleted")).unwrap().id,
+            "latest"
+        );
+        assert!(recent_read_shelf_item(&[book("unread", &[])], None).is_none());
     }
 
     #[test]
@@ -4457,6 +4491,7 @@ fn refresh_shelf(db: &readwise_core::Db) -> Result<usize, String> {
             status: b.status.clone(),
             progress_current: b.progress_current,
             progress_total: b.progress_total,
+            last_read_at: b.last_read_at,
             want_to_read: b.want_to_read,
             tags: b.tags.clone(),
             cover_path: b.cover_abs_path.clone(),
@@ -5873,7 +5908,7 @@ script_mod! {
                                 width: Fill height: Fit
                                 align: Center
                                 titlebar_reader_title := Label{
-                                    text: "阅读 · 示例章节"
+                                    text: "阅读"
                                     draw_text.text_style.font_size: 14
                                 }
                             }
@@ -6585,7 +6620,7 @@ script_mod! {
                                     align: Align{y: 0.5}
                                     max_lines: 1
                                     text_overflow: Ellipsis
-                                    text: "阅读 · 示例章节"
+                                    text: "阅读"
                                     draw_text +: {
                                         text_style.font_size: 14
                                     }
@@ -6622,7 +6657,7 @@ script_mod! {
                                         width: Fill height: Fit
                                         align: Center
                                         title := Label{
-                                            text: "阅读 · 示例章节"
+                                            text: "阅读"
                                             draw_text.text_style.font_size: 14
                                         }
                                     }
@@ -11674,6 +11709,10 @@ pub struct App {
     #[rust]
     active_page: AppPage,
     #[rust]
+    shelf_ready: bool,
+    #[rust]
+    pending_last_read_open: bool,
+    #[rust]
     pending_theme_reapply: bool,
     #[rust]
     toc_open: bool,
@@ -12318,11 +12357,7 @@ impl App {
             .as_ref()
             .map(|book| book.id.clone());
         let shelf = SHELF.read().unwrap();
-        shelf
-            .iter()
-            .find(|book| current_id.as_deref() == Some(book.id.as_str()))
-            .or_else(|| shelf.iter().find(|book| book.status == "reading"))
-            .cloned()
+        recent_read_shelf_item(&shelf, current_id.as_deref()).cloned()
     }
 
     fn sync_reading_home(&self, cx: &mut Cx) {
@@ -12775,6 +12810,7 @@ impl App {
             .set_visible(cx, show_shelf);
         self.ui.widget(cx, ids!(book_shelf)).redraw(cx);
         self.ui.widget(cx, ids!(page_library)).redraw(cx);
+        self.sync_reading_home(cx);
     }
 
     fn set_library_tag_filter(&mut self, cx: &mut Cx, index: usize) {
@@ -18458,6 +18494,7 @@ impl MatchEvent for App {
                         imported,
                         import_error,
                     } => {
+                        self.shelf_ready = true;
                         if !INITIAL_LIBRARY_READY_LOGGED.swap(true, Ordering::Relaxed) {
                             if let Some(elapsed) = startup_elapsed_ms() {
                                 ::log::info!("Startup: library projection ready in {elapsed}ms");
@@ -18505,6 +18542,13 @@ impl MatchEvent for App {
                         };
                         self.ui.label(cx, ids!(library_hint)).set_text(cx, &hint);
                         self.ui.redraw(cx);
+                        if std::mem::take(&mut self.pending_last_read_open)
+                            && self.active_page == AppPage::ReadingHome
+                        {
+                            if let Some(book) = Self::reading_home_book() {
+                                self.open_book_for_reading(cx, book);
+                            }
+                        }
                     }
                     ShelfAction::TagsSaved { items } => {
                         self.editing_book_tags_id = None;
@@ -19526,18 +19570,40 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(nav_reader)).clicked(actions) {
-            self.activate_page(cx, AppPage::Reader);
-            self.start_reading_timer();
+            if let Some(book) = Self::reading_home_book() {
+                self.pending_last_read_open = false;
+                if CURRENT_BOOK
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|current| current.id == book.id)
+                {
+                    self.activate_page(cx, AppPage::Reader);
+                    self.start_reading_timer();
+                } else {
+                    self.open_book_for_reading(cx, book);
+                }
+            } else {
+                self.pending_last_read_open = !self.shelf_ready;
+                self.activate_page(cx, AppPage::ReadingHome);
+            }
         }
         if self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions) {
             self.activate_page(cx, AppPage::ReadingHome);
         }
         if self.ui.button(cx, ids!(reading_continue)).clicked(actions) {
-            if CURRENT_BOOK.read().unwrap().is_some() {
-                self.activate_page(cx, AppPage::Reader);
-                self.start_reading_timer();
-            } else if let Some(book) = Self::reading_home_book() {
-                self.open_book_for_reading(cx, book);
+            if let Some(book) = Self::reading_home_book() {
+                if CURRENT_BOOK
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|current| current.id == book.id)
+                {
+                    self.activate_page(cx, AppPage::Reader);
+                    self.start_reading_timer();
+                } else {
+                    self.open_book_for_reading(cx, book);
+                }
             } else {
                 self.activate_page(cx, AppPage::Library);
                 self.refresh_shelf_projection(cx);

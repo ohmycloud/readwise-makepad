@@ -111,6 +111,7 @@ pub async fn get_shelf_items(
                   COALESCE(s.status, 'unread') AS status,
                   COALESCE(s.progress_current, 0) AS progress_current,
                   COALESCE(s.progress_total, 0) AS progress_total,
+                  s.last_read_at,
                   s.metadata AS status_metadata
            FROM books b LEFT JOIN book_status s ON b.id = s.book_id
            ORDER BY b.created_at DESC"#,
@@ -145,6 +146,7 @@ pub async fn get_shelf_items(
                 status: row.get("status"),
                 progress_current: row.get("progress_current"),
                 progress_total: row.get("progress_total"),
+                last_read_at: row.get("last_read_at"),
                 want_to_read,
                 tags,
                 created_at: row.get("created_at"),
