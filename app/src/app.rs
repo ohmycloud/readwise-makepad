@@ -256,25 +256,6 @@ fn reader_customise_rect(size: DVec2, insets: SafeAreaInsets) -> Rect {
     }
 }
 
-fn reader_customise_font_choices() -> [(LiveId, ReaderFont); 14] {
-    [
-        (id!(customise_font_0), ReaderFont::Canela),
-        (id!(customise_font_1), ReaderFont::Original),
-        (id!(customise_font_2), ReaderFont::Athelas),
-        (id!(customise_font_3), ReaderFont::AvenirNext),
-        (id!(customise_font_4), ReaderFont::Charter),
-        (id!(customise_font_5), ReaderFont::Georgia),
-        (id!(customise_font_6), ReaderFont::Iowan),
-        (id!(customise_font_7), ReaderFont::Palatino),
-        (id!(customise_font_8), ReaderFont::ProximaNova),
-        (id!(customise_font_9), ReaderFont::Publico),
-        (id!(customise_font_10), ReaderFont::SanFrancisco),
-        (id!(customise_font_11), ReaderFont::NewYork),
-        (id!(customise_font_12), ReaderFont::Seravek),
-        (id!(customise_font_13), ReaderFont::TimesNewRoman),
-    ]
-}
-
 fn reader_font_display_label(language: AppLanguage, font: ReaderFont) -> &'static str {
     if font == ReaderFont::Original {
         crate::i18n::text(language, "reader_font_original")
@@ -4962,6 +4943,8 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    mod.widgets.PopupMenuPosition = #(PopupMenuPosition::script_api(vm))
+
     // Keep the slider's native drag handling while drawing the reading controls
     // as a quiet gray track, cyan progress, and an always-visible white thumb.
     let ReaderLayoutSlider = SliderMinimal{
@@ -7589,39 +7572,20 @@ script_mod! {
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_font_label := Label{width: Fill text: "Font"}
-                                        reader_customise_font_button := ButtonFlatter{
-                                            visible: false
-                                            width: Fill height: 40 margin: 0
-                                            text: "Original"
-                                        }
-                                        reader_customise_font_slot := View{
-                                            width: 180 height: Fit
-                                            reader_customise_font_choice := DropDown{
-                                                width: Fill height: 32
-                                                align: Align{x: 0.0 y: 0.5}
-                                                padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
-                                                labels: ["Original"]
+                                        reader_customise_font_choice := DropDown{
+                                            width: 180 height: 32
+                                            align: Align{x: 0.0 y: 0.5}
+                                            padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
+                                            popup_menu_position: mod.widgets.PopupMenuPosition.BelowInput
+                                            popup_menu: mod.widgets.PopupMenuFlat{
+                                                width: 180
+                                                menu_item: mod.widgets.PopupMenuItem{
+                                                    height: 14
+                                                    padding: Inset{left: 12 right: 8 top: 0 bottom: 0}
+                                                }
                                             }
+                                            labels: ["Original"]
                                         }
-                                    }
-                                    reader_customise_font_options := View{
-                                        visible: false
-                                        width: Fill height: Fit
-                                        flow: Flow.Right{wrap: true} spacing: 6
-                                        customise_font_0 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_1 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_2 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_3 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_4 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_5 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_6 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_7 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_8 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_9 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_10 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_11 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_12 := ButtonFlatter{height: 36 margin: 0 text: ""}
-                                        customise_font_13 := ButtonFlatter{height: 36 margin: 0 text: ""}
                                     }
                                     reader_customise_size_row := View{
                                         width: Fill height: Fit
@@ -7771,6 +7735,14 @@ script_mod! {
                                             width: 180 height: 32
                                             align: Align{x: 0.0 y: 0.5}
                                             padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
+                                            popup_menu_position: mod.widgets.PopupMenuPosition.BelowInput
+                                            popup_menu: mod.widgets.PopupMenuFlat{
+                                                width: 180
+                                                menu_item: mod.widgets.PopupMenuItem{
+                                                    height: 22
+                                                    padding: Inset{left: 12 right: 8 top: 0 bottom: 0}
+                                                }
+                                            }
                                             labels: ["1", "2", "Auto Set"]
                                         }
                                     }
@@ -11702,6 +11674,8 @@ pub struct App {
     #[rust]
     reader_customise_draft: Option<ReaderSettings>,
     #[rust]
+    reader_customise_open_dropdown: Option<LiveId>,
+    #[rust]
     active_font_applied: Option<ReaderFont>,
     #[rust]
     preview_font_applied: Option<ReaderFont>,
@@ -11878,6 +11852,7 @@ impl App {
     }
 
     fn open_reader_customise(&mut self, cx: &mut Cx) {
+        self.reader_customise_open_dropdown = None;
         self.reader_customise_draft = Some(current_reader_settings());
         self.pending_customise_preview_after_draw = true;
         READER_CUSTOMISE_OPEN.store(true, Ordering::Release);
@@ -11890,9 +11865,6 @@ impl App {
             reader.page_turn.cancel();
             reader.pager.pending_turn = None;
         }
-        self.ui
-            .widget(cx, ids!(reader_customise_font_options))
-            .set_visible(cx, false);
         self.configure_reader_customise_layout(cx);
         self.ui
             .widget(cx, ids!(reader_customise_scroll))
@@ -12102,8 +12074,14 @@ impl App {
         ] {
             let row = self.ui.widget(cx, &[id]);
             if let Some(mut view) = row.borrow_mut::<View>() {
-                view.layout.flow = if stacked { Flow::Down } else { Flow::right() };
-                view.layout.spacing = if stacked { 6.0 } else { 8.0 };
+                let dropdown_row =
+                    id == id!(reader_customise_font_row) || id == id!(reader_customise_columns_row);
+                view.layout.flow = if stacked && !dropdown_row {
+                    Flow::Down
+                } else {
+                    Flow::right()
+                };
+                view.layout.spacing = if stacked && !dropdown_row { 6.0 } else { 8.0 };
             };
         }
         for id in [
@@ -12139,35 +12117,12 @@ impl App {
             script_apply_eval!(cx, label, {width: #(width)});
         }
         for id in [
-            id!(reader_customise_font_slot),
+            id!(reader_customise_font_choice),
             id!(reader_customise_columns_choice),
         ] {
             let mut choice = self.ui.widget(cx, &[id]);
-            let width = if stacked {
-                Size::fill()
-            } else {
-                Size::Fixed(180.0)
-            };
+            let width = Size::Fixed(180.0);
             script_apply_eval!(cx, choice, {width: #(width)});
-        }
-        // DropDown has an unbounded popup; use inline choices when
-        // the dialog cannot contain its fourteen font rows.
-        let inline_fonts = stacked || rect.size.y < 500.0;
-        self.ui
-            .widget(cx, ids!(reader_customise_font_slot))
-            .set_visible(cx, !inline_fonts);
-        let mut font_button = self.ui.widget(cx, ids!(reader_customise_font_button));
-        font_button.set_visible(cx, inline_fonts);
-        let width = if stacked {
-            Size::fill()
-        } else {
-            Size::Fixed(180.0)
-        };
-        script_apply_eval!(cx, font_button, {width: #(width)});
-        if !inline_fonts {
-            self.ui
-                .widget(cx, ids!(reader_customise_font_options))
-                .set_visible(cx, false);
         }
         let mut save = self.ui.widget(cx, ids!(reader_customise_save));
         let width = if stacked {
@@ -12181,7 +12136,20 @@ impl App {
         script_apply_eval!(cx, modal, {});
     }
 
+    fn close_reader_customise_dropdowns(&mut self, cx: &mut Cx) {
+        self.reader_customise_open_dropdown = None;
+        for id in [
+            id!(reader_customise_font_choice),
+            id!(reader_customise_columns_choice),
+        ] {
+            if let Some(mut dropdown) = self.ui.widget(cx, &[id]).borrow_mut::<DropDown>() {
+                dropdown.set_closed(cx);
+            }
+        }
+    }
+
     fn close_reader_customise(&mut self, cx: &mut Cx) {
+        self.close_reader_customise_dropdowns(cx);
         READER_CUSTOMISE_OPEN.store(false, Ordering::Release);
         self.reader_customise_draft = None;
         self.pending_customise_preview_after_draw = false;
@@ -12189,6 +12157,7 @@ impl App {
     }
 
     fn save_reader_customise(&mut self, cx: &mut Cx) {
+        self.close_reader_customise_dropdowns(cx);
         let draft = self.reader_customise_draft.take();
         READER_CUSTOMISE_OPEN.store(false, Ordering::Release);
         self.pending_customise_preview_after_draw = false;
@@ -12199,6 +12168,51 @@ impl App {
                 self.persist_reader_settings(cx);
             }
         }
+    }
+
+    fn dismiss_reader_customise_dropdowns_outside(&mut self, cx: &mut Cx, abs: DVec2) -> bool {
+        if self.reader_customise_draft.is_none() {
+            return false;
+        }
+        // Makepad's DropDown dismisses on MouseDown outside its popup, but
+        // Android sends TouchUpdate. Consume the outside press so controls
+        // behind the overlay cannot also be activated.
+        let dropdowns = [
+            (id!(reader_customise_font_choice), 202.0),
+            (id!(reader_customise_columns_choice), 72.0),
+        ];
+        let pressed_choice = dropdowns.iter().find_map(|(id, _)| {
+            let widget = self.ui.widget(cx, &[*id]);
+            let control = widget.area().rect(cx);
+            control.contains(abs).then_some(*id)
+        });
+        if let Some(active_id) = self.reader_customise_open_dropdown {
+            let menu_height = dropdowns
+                .iter()
+                .find_map(|(id, height)| (*id == active_id).then_some(*height))
+                .unwrap_or(0.0);
+            let active = self.ui.widget(cx, &[active_id]);
+            let control = active.area().rect(cx);
+            let menu = Rect {
+                pos: control.pos + dvec2(0.0, control.size.y),
+                size: dvec2(control.size.x, menu_height),
+            };
+            if control.contains(abs) {
+                self.close_reader_customise_dropdowns(cx);
+                return true;
+            }
+            if menu.contains(abs) {
+                return false;
+            }
+            self.close_reader_customise_dropdowns(cx);
+            if let Some(id) = pressed_choice {
+                self.reader_customise_open_dropdown = Some(id);
+                return false;
+            }
+            return true;
+        }
+        self.reader_customise_open_dropdown = pressed_choice;
+        false
     }
 
     fn project_db_counts(&self, cx: &mut Cx, vocab_count: usize, known_count: usize) {
@@ -13302,14 +13316,6 @@ impl App {
         language: AppLanguage,
         font: ReaderFont,
     ) {
-        self.ui
-            .button(cx, ids!(reader_customise_font_button))
-            .set_text(cx, reader_font_display_label(language, font));
-        for (id, option) in reader_customise_font_choices() {
-            self.ui
-                .widget(cx, &[id])
-                .set_text(cx, reader_font_display_label(language, option));
-        }
         let choice = self.ui.drop_down(cx, ids!(reader_customise_font_choice));
         choice.set_labels(
             cx,
@@ -13392,11 +13398,6 @@ impl App {
                 .set_visible(cx, settings.gloss_enabled);
         }
         self.sync_reader_customise_font_labels(cx, app_language(), font);
-        for (id, option) in reader_customise_font_choices() {
-            let button = self.ui.widget(cx, &[id]);
-            apply_reader_button_palette(cx, button, palette);
-            self.paint_customise_choice(cx, id, font == option, palette);
-        }
         self.ui
             .drop_down(cx, ids!(reader_customise_columns_choice))
             .set_selected_item(
@@ -13978,7 +13979,6 @@ impl App {
             id!(reader_customise_cancel),
             id!(reader_customise_save),
             id!(reader_customise_font_choice),
-            id!(reader_customise_font_button),
             id!(reader_customise_columns_choice),
             id!(reader_customise_gloss_color_green),
             id!(reader_customise_gloss_color_blue),
@@ -15005,6 +15005,7 @@ impl App {
         self.configure_reader_customise_layout(cx);
         self.configure_library_import_layout(cx);
         if self.reader_customise_draft.is_some() {
+            self.close_reader_customise_dropdowns(cx);
             self.sync_reader_customise_controls(cx);
         }
         self.set_reader_toolbar_visible(cx, self.on_reader_page && self.reader_toolbar_visible);
@@ -19320,32 +19321,12 @@ impl MatchEvent for App {
         {
             self.save_reader_customise(cx);
         }
-        if self
-            .ui
-            .button(cx, ids!(reader_customise_font_button))
-            .clicked(actions)
-        {
-            let options = self.ui.widget(cx, ids!(reader_customise_font_options));
-            options.set_visible(cx, !options.visible());
-            self.ui.widget(cx, ids!(reader_customise_scroll)).redraw(cx);
-        }
-        for (id, font) in reader_customise_font_choices() {
-            if self.ui.button(cx, &[id]).clicked(actions) {
-                if let Some(draft) = self.reader_customise_draft.as_mut() {
-                    draft.font = font;
-                    self.ui
-                        .widget(cx, ids!(reader_customise_font_options))
-                        .set_visible(cx, false);
-                    self.load_reader_font(cx, font, true);
-                    self.sync_reader_customise_controls(cx);
-                }
-            }
-        }
         if let Some(index) = self
             .ui
             .drop_down(cx, ids!(reader_customise_font_choice))
             .selected(actions)
         {
+            self.reader_customise_open_dropdown = None;
             if let (Some(draft), Some(font)) = (
                 self.reader_customise_draft.as_mut(),
                 ReaderFont::from_index(index),
@@ -19524,6 +19505,7 @@ impl MatchEvent for App {
             .drop_down(cx, ids!(reader_customise_columns_choice))
             .selected(actions)
         {
+            self.reader_customise_open_dropdown = None;
             if let Some(draft) = self.reader_customise_draft.as_mut() {
                 draft.columns = match index {
                     0 => ReaderColumns::One,
@@ -20791,6 +20773,11 @@ impl AppMain for App {
                 .map(|touch| touch.abs),
             _ => None,
         };
+        if let Some(abs) = pointer_start {
+            if self.dismiss_reader_customise_dropdowns_outside(cx, abs) {
+                return;
+            }
+        }
         if self.on_reader_page
             && (self.toc_open || self.bookmarks_open || self.note_open || self.search_open)
         {
