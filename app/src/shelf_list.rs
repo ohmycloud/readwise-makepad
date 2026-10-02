@@ -1,5 +1,5 @@
-//! Shelf-only PortalList fork from Makepad dev 4f9ce7a (MIT OR Apache-2.0).
-//! Keep reader/TOC pagination and interaction on the upstream component.
+//! PortalList fork for the bookshelf and table of contents from Makepad dev
+//! 4f9ce7a (MIT OR Apache-2.0). Reader body pagination stays upstream.
 //! Local changes: seek large scroll offsets via the height tree before drawing;
 //! hitting the bottom stops outward inertia, never an active drag.
 //! Do not accumulate hidden overscroll that a reverse drag must first repay.

@@ -121,6 +121,7 @@ mod passive_action_tests {
             widget_action(ButtonAction::Clicked(Default::default())),
         ];
         assert!(!app_action_batch_is_passive(&actions, false));
+        assert!(!app_action_batch_is_passive(&actions, true));
         let actions: ActionsBuf = vec![
             widget_action(ShelfListAction::Scroll),
             Box::new(ReaderToolbarTap),
@@ -5178,7 +5179,7 @@ script_mod! {
         active_bg: theme.color_bg_highlight_inline
         inactive_bg: theme.color_bg_app
         text_color: theme.color_text
-        list := PortalList{
+        list := ShelfList{
             width: Fill height: Fill
             padding: Inset{ left: 8 right: 8 top: 8 bottom: 8 }
             spacing: 2
@@ -10625,7 +10626,7 @@ impl Widget for TocList {
         });
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+            if let Some(mut list) = step.as_shelf_list().borrow_mut() {
                 list.set_item_range(cx, 0, toc.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
                     let Some(entry) = toc.get(item_id) else {
@@ -10660,7 +10661,7 @@ impl Widget for TocList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let list = self.view.portal_list(cx, ids!(list));
+        let list = self.view.shelf_list(cx, ids!(list));
         let rect = current_clipped_rect(cx, list.area());
         let mut allow_click = self.activation_tap.allows_click(event, rect);
         let mut actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
@@ -12924,7 +12925,7 @@ impl App {
             .set_text(cx, "");
         self.ui
             .widget(cx, ids!(toc_list))
-            .portal_list(cx, ids!(list))
+            .shelf_list(cx, ids!(list))
             .set_first_id_and_scroll(0, 0.0);
         self.replace_notes(cx, Vec::new());
         self.set_reader_title_text(
@@ -20280,7 +20281,7 @@ impl MatchEvent for App {
         let toc_list = self
             .ui
             .widget(cx, ids!(toc_list))
-            .portal_list(cx, ids!(list));
+            .shelf_list(cx, ids!(list));
         for (item_id, item) in toc_list.items_with_actions(actions) {
             if item.button(cx, ids!(toc_item_btn)).clicked(actions) {
                 let target = CURRENT_BOOK
