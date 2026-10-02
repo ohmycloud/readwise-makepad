@@ -274,6 +274,14 @@ fn reader_customise_font_choices() -> [(LiveId, ReaderFont); 14] {
     ]
 }
 
+fn reader_font_display_label(language: AppLanguage, font: ReaderFont) -> &'static str {
+    if font == ReaderFont::Original {
+        crate::i18n::text(language, "reader_font_original")
+    } else {
+        font.label()
+    }
+}
+
 fn library_surface_visibility(visible_count: usize) -> (bool, bool) {
     // Keep the data-owning PortalList mounted even when it is empty. If it is
     // hidden, a responsive rebuild can leave it uninstantiated and later
@@ -6546,9 +6554,14 @@ script_mod! {
                                         draw_bg.shadow_color: #0003
                                         draw_bg.shadow_radius: 16.0
                                         draw_bg.shadow_offset: vec2(0, 5)
-                                        reader_theme_title := Label{
-                                            text: "Themes & Settings"
-                                            draw_text.text_style.font_size: 15
+                                        reader_theme_title_row := View{
+                                            width: Fill height: Fit
+                                            align: HCenter
+                                            reader_theme_title := Label{
+                                                width: Fit height: Fit
+                                                text: "Themes & Settings"
+                                                draw_text.text_style.font_size: 15
+                                            }
                                         }
                                         reader_theme_modes := View{
                                             width: Fill height: Fit
@@ -13235,6 +13248,31 @@ impl App {
         });
     }
 
+    fn sync_reader_customise_font_labels(
+        &self,
+        cx: &mut Cx,
+        language: AppLanguage,
+        font: ReaderFont,
+    ) {
+        self.ui
+            .button(cx, ids!(reader_customise_font_button))
+            .set_text(cx, reader_font_display_label(language, font));
+        for (id, option) in reader_customise_font_choices() {
+            self.ui
+                .widget(cx, &[id])
+                .set_text(cx, reader_font_display_label(language, option));
+        }
+        let choice = self.ui.drop_down(cx, ids!(reader_customise_font_choice));
+        choice.set_labels(
+            cx,
+            ReaderFont::ALL
+                .iter()
+                .map(|font| reader_font_display_label(language, *font).to_string())
+                .collect(),
+        );
+        choice.set_selected_item(cx, font.index());
+    }
+
     fn sync_reader_customise_controls(&self, cx: &mut Cx) {
         let settings = self
             .reader_customise_draft
@@ -13299,24 +13337,12 @@ impl App {
                 .widget(cx, &[id])
                 .set_visible(cx, settings.gloss_enabled);
         }
-        self.ui
-            .button(cx, ids!(reader_customise_font_button))
-            .set_text(cx, font.label());
+        self.sync_reader_customise_font_labels(cx, app_language(), font);
         for (id, option) in reader_customise_font_choices() {
             let button = self.ui.widget(cx, &[id]);
-            button.set_text(cx, option.label());
             apply_reader_button_palette(cx, button, palette);
             self.paint_customise_choice(cx, id, font == option, palette);
         }
-        let font_choice = self.ui.drop_down(cx, ids!(reader_customise_font_choice));
-        font_choice.set_labels(
-            cx,
-            ReaderFont::ALL
-                .iter()
-                .map(|font| font.label().to_string())
-                .collect(),
-        );
-        font_choice.set_selected_item(cx, font.index());
         self.ui
             .drop_down(cx, ids!(reader_customise_columns_choice))
             .set_selected_item(
@@ -14239,6 +14265,107 @@ impl App {
         set_text!(close_card_btn, "close");
         set_text!(add_vocab_btn, "add_vocabulary");
         set_text!(know_btn, "mark_known");
+        set_text!(reader_theme_title, "reader_themes_settings");
+        set_text!(reader_mode_original, "reader_mode_original");
+        set_text!(reader_mode_quiet, "reader_mode_quiet");
+        set_text!(reader_mode_paper, "reader_mode_paper");
+        set_text!(reader_mode_bold, "reader_mode_bold");
+        set_text!(reader_mode_calm, "reader_mode_calm");
+        set_text!(reader_mode_focus, "reader_mode_focus");
+        set_text!(reader_customise_btn, "reader_customise");
+        set_text!(reader_customise_title, "reader_customise");
+        set_text!(reader_preview_heading, "reader_preview");
+        set_text!(reader_customise_text_title, "text_section");
+        set_text!(reader_customise_font_label, "reader_font");
+        set_text!(reader_customise_size_label, "reader_text_size");
+        set_text!(reader_customise_bold, "reader_bold_text");
+        set_text!(reader_customise_gloss_title, "reader_annotations");
+        set_text!(reader_customise_gloss_enable, "reader_show_annotations");
+        set_text!(reader_customise_gloss_size_label, "reader_annotation_size");
+        set_text!(
+            reader_customise_gloss_color_label,
+            "reader_annotation_color"
+        );
+        set_text!(
+            reader_customise_gloss_bg_label,
+            "reader_annotation_background"
+        );
+        set_text!(reader_customise_word_color_label, "word_color");
+        set_text!(reader_customise_word_bg_label, "word_background");
+        set_text!(reader_customise_layout_title, "reader_accessibility_layout");
+        set_text!(reader_customise_line_label, "reader_line_spacing");
+        set_text!(reader_customise_character_label, "reader_character_spacing");
+        set_text!(reader_customise_word_label, "reader_word_spacing");
+        set_text!(reader_customise_margin_label, "reader_margins");
+        set_text!(reader_customise_columns_title, "reader_columns");
+        set_text!(reader_customise_justify, "reader_justify_text");
+        set_text!(reader_customise_reset, "reader_reset_theme");
+        set_text!(reader_customise_cancel, "cancel");
+        set_text!(reader_customise_save, "reader_save_apply");
+        for (id, key) in [
+            (
+                id!(reader_customise_gloss_color_green),
+                "reader_color_green",
+            ),
+            (id!(reader_customise_gloss_color_blue), "reader_color_blue"),
+            (
+                id!(reader_customise_gloss_color_orange),
+                "reader_color_orange",
+            ),
+            (id!(reader_customise_gloss_color_gray), "reader_color_gray"),
+            (id!(reader_customise_gloss_bg_none), "reader_color_none"),
+            (id!(reader_customise_gloss_bg_gray), "reader_color_gray"),
+            (id!(reader_customise_gloss_bg_green), "reader_color_green"),
+            (id!(reader_customise_gloss_bg_blue), "reader_color_blue"),
+            (
+                id!(reader_customise_word_color_default),
+                "reader_color_default",
+            ),
+            (id!(reader_customise_word_color_green), "reader_color_green"),
+            (id!(reader_customise_word_color_blue), "reader_color_blue"),
+            (
+                id!(reader_customise_word_color_orange),
+                "reader_color_orange",
+            ),
+            (id!(reader_customise_word_bg_none), "reader_color_none"),
+            (id!(reader_customise_word_bg_gray), "reader_color_gray"),
+            (id!(reader_customise_word_bg_green), "reader_color_green"),
+            (id!(reader_customise_word_bg_blue), "reader_color_blue"),
+        ] {
+            self.ui
+                .widget(cx, &[id])
+                .set_text(cx, crate::i18n::text(language, key));
+        }
+        let columns = self.ui.drop_down(cx, ids!(reader_customise_columns_choice));
+        columns.set_labels(
+            cx,
+            vec![
+                "1".to_string(),
+                "2".to_string(),
+                crate::i18n::text(language, "reader_auto_set").to_string(),
+            ],
+        );
+        columns.set_selected_item(
+            cx,
+            match self
+                .reader_customise_draft
+                .as_ref()
+                .map(|draft| draft.columns)
+                .unwrap_or_else(|| *READER_COLUMNS.read().unwrap())
+            {
+                ReaderColumns::One => 0,
+                ReaderColumns::Two => 1,
+                ReaderColumns::Auto => 2,
+            },
+        );
+        self.sync_reader_customise_font_labels(
+            cx,
+            language,
+            self.reader_customise_draft
+                .as_ref()
+                .map(|draft| draft.font)
+                .unwrap_or_else(|| *READER_FONT.read().unwrap()),
+        );
 
         set_text!(vocab_title, "vocabulary");
         set_text!(vocab_start_review, "start_review");

@@ -192,6 +192,44 @@ pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
         "background_sage" => choose(english, "浅绿", "Sage"),
         "background_night" => choose(english, "夜间", "Night"),
         "background_theme" => choose(english, "跟随主题", "Follow Theme"),
+        "reader_themes_settings" => choose(english, "主题与设置", "Themes & Settings"),
+        "reader_mode_original" => choose(english, "原版", "Original"),
+        "reader_mode_quiet" => choose(english, "静谧", "Quiet"),
+        "reader_mode_paper" => choose(english, "纸张", "Paper"),
+        "reader_mode_bold" => choose(english, "鲜明", "Bold"),
+        "reader_mode_calm" => choose(english, "柔和", "Calm"),
+        "reader_mode_focus" => choose(english, "专注", "Focus"),
+        "reader_customise" => choose(english, "自定义", "Customise"),
+        "reader_preview" => choose(english, "注音预览", "Annotation Preview"),
+        "reader_font" => choose(english, "字体", "Font"),
+        "reader_font_original" => choose(english, "原版", "Original"),
+        "reader_text_size" => choose(english, "正文字号", "Text Size"),
+        "reader_bold_text" => choose(english, "加粗正文", "Bold Text"),
+        "reader_annotations" => choose(english, "词语注音", "Word Annotations"),
+        "reader_show_annotations" => choose(english, "显示词语注音", "Show word annotations"),
+        "reader_annotation_size" => choose(english, "注音字号", "Annotation Size"),
+        "reader_annotation_color" => choose(english, "注音颜色", "Annotation Color"),
+        "reader_annotation_background" => {
+            choose(english, "注音背景", "Annotation Background")
+        }
+        "reader_accessibility_layout" => {
+            choose(english, "辅助阅读与排版", "Accessibility & Layout")
+        }
+        "reader_line_spacing" => choose(english, "行间距", "LINE SPACING"),
+        "reader_character_spacing" => choose(english, "字间距", "CHARACTER SPACING"),
+        "reader_word_spacing" => choose(english, "词间距", "WORD SPACING"),
+        "reader_margins" => choose(english, "页边距", "MARGINS"),
+        "reader_columns" => choose(english, "分栏", "Columns"),
+        "reader_auto_set" => choose(english, "自动", "Auto Set"),
+        "reader_justify_text" => choose(english, "两端对齐", "Justify Text"),
+        "reader_reset_theme" => choose(english, "重置主题", "Reset Theme"),
+        "reader_save_apply" => choose(english, "保存并应用", "Save & Apply"),
+        "reader_color_green" => choose(english, "绿", "Green"),
+        "reader_color_blue" => choose(english, "蓝", "Blue"),
+        "reader_color_orange" => choose(english, "橙", "Orange"),
+        "reader_color_gray" => choose(english, "灰", "Gray"),
+        "reader_color_none" => choose(english, "无", "None"),
+        "reader_color_default" => choose(english, "默认", "Default"),
         "body_font" => choose(english, "正文字体", "Body Font"),
         "standard" => choose(english, "标准", "Standard"),
         "monospace" => choose(english, "等宽", "Monospace"),
@@ -361,5 +399,51 @@ mod tests {
     #[test]
     fn unknown_key_is_visible_instead_of_becoming_blank() {
         assert_eq!(text(AppLanguage::English, "missing.key"), "missing.key");
+    }
+
+    #[test]
+    fn reader_appearance_dialog_has_both_languages() {
+        for key in [
+            "reader_themes_settings",
+            "reader_mode_original",
+            "reader_mode_quiet",
+            "reader_mode_paper",
+            "reader_mode_bold",
+            "reader_mode_calm",
+            "reader_mode_focus",
+            "reader_customise",
+            "reader_preview",
+            "reader_font",
+            "reader_font_original",
+            "reader_text_size",
+            "reader_bold_text",
+            "reader_annotations",
+            "reader_show_annotations",
+            "reader_annotation_size",
+            "reader_annotation_color",
+            "reader_annotation_background",
+            "reader_accessibility_layout",
+            "reader_line_spacing",
+            "reader_character_spacing",
+            "reader_word_spacing",
+            "reader_margins",
+            "reader_columns",
+            "reader_auto_set",
+            "reader_justify_text",
+            "reader_reset_theme",
+            "reader_save_apply",
+            "reader_color_green",
+            "reader_color_blue",
+            "reader_color_orange",
+            "reader_color_gray",
+            "reader_color_none",
+            "reader_color_default",
+        ] {
+            let chinese = text(AppLanguage::Chinese, key);
+            let english = text(AppLanguage::English, key);
+            assert_ne!(chinese, key, "missing Chinese text for {key}");
+            assert_ne!(english, key, "missing English text for {key}");
+            assert_ne!(chinese, english, "untranslated text for {key}");
+        }
     }
 }
