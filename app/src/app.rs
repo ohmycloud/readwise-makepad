@@ -1,7 +1,8 @@
 use crate::chapter_image::ChapterImageAction;
 use crate::reader_book_pages::BookPages;
 use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
-use crate::reader_touch::{ListTap, ToolbarTap};
+use crate::reader_touch::{DoubleTap, ListTap, TapOutcome, ToolbarTap};
+use crate::reader_word::word_range_at;
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
 use crate::shelf_list::*;
@@ -89,6 +90,28 @@ mod passive_action_tests {
         let actions = vec![widget_action(PortalListAction::Scroll)];
         assert!(app_action_batch_is_passive(&actions, false));
         assert!(!app_action_batch_is_passive(&actions, true));
+    }
+
+    #[test]
+    fn deferred_reader_taps_inspect_widget_payloads() {
+        assert!(reader_tap_opens_inline(&widget_action(
+            RubyWordAction::Clicked {
+                word: "solitude".into(),
+                gloss: "孤独".into(),
+                anchor: dvec2(100.0, 200.0),
+            }
+        )));
+        assert!(reader_tap_opens_inline(&widget_action(
+            makepad_widgets::html::HtmlLinkAction::Clicked {
+                url: "chapter.xhtml".into(),
+                key_modifiers: Default::default(),
+            }
+        )));
+        assert!(!reader_tap_opens_inline(&widget_action(
+            ButtonAction::Clicked(Default::default())
+        )));
+        let toolbar: Action = Box::new(ReaderToolbarTap);
+        assert!(!reader_tap_opens_inline(&toolbar));
     }
 
     #[test]
@@ -313,52 +336,25 @@ fn reader_last_page_start(block_count: usize, blocks_per_page: usize) -> usize {
     (last / span) * span
 }
 
-fn word_range_at(text: &str, byte_index: usize) -> Option<(usize, usize)> {
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.is_empty() {
-        return None;
-    }
-    let mut byte_index = byte_index.min(text.len().saturating_sub(1));
-    while byte_index > 0 && !text.is_char_boundary(byte_index) {
-        byte_index -= 1;
-    }
-    let index = text[..byte_index].chars().count();
-    let selected = chars[index];
-    if selected.is_whitespace() {
-        return None;
-    }
-    let is_cjk = |ch: char| {
-        matches!(
-            ch as u32,
-            0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
-        )
+fn reader_tap_opens_inline(action: &Action) -> bool {
+    reader_tap_selectable_inline(action)
+        || action.as_widget_action().is_some_and(|action| {
+            matches!(
+                action.cast(),
+                crate::chapter_image::ChapterImageAction::Open(_)
+            )
+        })
+}
+
+fn reader_tap_selectable_inline(action: &Action) -> bool {
+    let Some(action) = action.as_widget_action() else {
+        return false;
     };
-    if is_cjk(selected) {
-        return Some((byte_index, byte_index + selected.len_utf8()));
-    }
-    let is_word_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '\'' | '’' | '-');
-    if !is_word_char(selected) {
-        return Some((byte_index, byte_index + selected.len_utf8()));
-    }
-    let mut start = index;
-    while start > 0 && is_word_char(chars[start - 1]) {
-        start -= 1;
-    }
-    let mut end = index + 1;
-    while end < chars.len() && is_word_char(chars[end]) {
-        end += 1;
-    }
-    let start = text
-        .char_indices()
-        .nth(start)
-        .map(|(offset, _)| offset)
-        .unwrap_or(text.len());
-    let end = text
-        .char_indices()
-        .nth(end)
-        .map(|(offset, _)| offset)
-        .unwrap_or(text.len());
-    Some((start, end))
+    matches!(action.cast(), RubyWordAction::Clicked { .. })
+        || matches!(
+            action.cast(),
+            makepad_widgets::html::HtmlLinkAction::Clicked { .. }
+        )
 }
 
 fn should_keep_started_reading_session(
@@ -621,6 +617,20 @@ fn supports_unified_reader_hit_test(html: &str) -> bool {
     true
 }
 
+fn reader_plain_paragraph(html: &str) -> bool {
+    let html = html.trim();
+    let Some(open_end) = html.find('>') else {
+        return false;
+    };
+    let open = &html[..open_end];
+    if open != "<p" && !open.starts_with("<p ") {
+        return false;
+    }
+    html[open_end + 1..]
+        .strip_suffix("</p>")
+        .is_some_and(|body| !body.contains('<'))
+}
+
 fn selection_range_in_block(
     range: TextRange,
     block_id: usize,
@@ -713,8 +723,8 @@ mod table_block_tests {
         ordered_selection_range, reader_block_visual_height, reader_drag_moves_forward,
         reader_fallback_source_index, reader_geometry_capture_policy,
         reader_geometry_width_is_stable, reader_markup_available_width, reader_pagination_rows,
-        reader_painted_page_cuts, selection_range_in_block, supports_unified_reader_hit_test,
-        visual_selection_row_bounds,
+        reader_painted_page_cuts, reader_plain_paragraph, selection_range_in_block,
+        supports_unified_reader_hit_test, visual_selection_row_bounds,
     };
     use makepad_widgets::{dvec2, Rect};
 
@@ -757,6 +767,19 @@ mod table_block_tests {
         assert!(!supports_unified_reader_hit_test(
             "<table><tr><td>cell</td></tr></table>"
         ));
+    }
+
+    #[test]
+    fn long_plain_paragraph_uses_painted_row_selection_geometry() {
+        let text = "夏帆觉得母亲内里已全然换了个人。".repeat(30);
+        assert!(reader_plain_paragraph(&format!("<p>{text}</p>")));
+        assert!(reader_plain_paragraph(
+            "<p class='body'>穿得稍微像样些嘛。</p>"
+        ));
+        assert!(!reader_plain_paragraph(
+            "<p>带有<ruby>注音</ruby>的正文</p>"
+        ));
+        assert!(!reader_plain_paragraph("<p>带有<em>斜体</em>的正文</p>"));
     }
 
     #[test]
@@ -1907,10 +1930,10 @@ mod responsive_layout_tests {
     }
 
     #[test]
-    fn long_press_selects_a_word_or_one_cjk_character() {
+    fn long_press_and_double_click_share_word_boundaries() {
         assert_eq!(word_range_at("read wise", 2), Some((0, 4)));
         assert_eq!(word_range_at("can't stop", 3), Some((0, 5)));
-        assert_eq!(word_range_at("阅读", 3), Some((3, 6)));
+        assert_eq!(word_range_at("阅读", 3), Some((0, 6)));
         assert_eq!(word_range_at("A—can’t", 7), Some((4, 11)));
         assert_eq!(word_range_at("read wise", 4), None);
         assert_eq!(word_range_at("阅读。", 6), Some((6, 9)));
@@ -8036,6 +8059,14 @@ struct ChapterList {
     #[rust]
     toolbar_tap: ToolbarTap,
     #[rust]
+    word_tap: DoubleTap,
+    #[rust]
+    pending_reader_tap: ActionsBuf,
+    #[rust]
+    reader_tap_timer: Timer,
+    #[rust]
+    pending_tap_context: Option<(u64, usize)>,
+    #[rust]
     compact_layout: bool,
     /// TextFlow 本帧真实选区矩形，按正文块/范围/排版签名缓存为 item 相对坐标。
     /// 当前选区与保存后的永久高亮共用它，禁止再用另一套纯文本重排几何。
@@ -8452,6 +8483,72 @@ fn reader_markup_available_width(
 }
 
 impl ChapterList {
+    fn cancel_pending_reader_tap(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.reader_tap_timer);
+        self.reader_tap_timer = Timer::empty();
+        self.pending_reader_tap.clear();
+        self.pending_tap_context = None;
+    }
+
+    fn cancel_reader_tap(&mut self, cx: &mut Cx) {
+        self.word_tap.cancel();
+        self.toolbar_tap.cancel();
+        self.cancel_pending_reader_tap(cx);
+    }
+
+    fn defer_reader_tap(&mut self, cx: &mut Cx, actions: ActionsBuf) {
+        if actions.is_empty() {
+            return;
+        }
+        cx.extend_actions(std::mem::take(&mut self.pending_reader_tap));
+        cx.stop_timer(self.reader_tap_timer);
+        self.pending_reader_tap = actions;
+        self.pending_tap_context = Some((
+            READER_CONTENT_VERSION.load(Ordering::Relaxed),
+            CURRENT_CHAPTER.load(Ordering::Relaxed),
+        ));
+        self.reader_tap_timer =
+            cx.start_timeout(makepad_widgets::makepad_platform::event::finger::TAP_COUNT_TIME);
+    }
+
+    fn word_at_pointer(&self, cx: &mut Cx, abs: DVec2) -> Option<TextRange> {
+        // Unlike drag selection, double-click must not snap blank margins to
+        // an unrelated paragraph. Hit the painted glyph rather than its caret.
+        for (id, widget, clip) in self.active_items(cx) {
+            if !clip.contains(abs) {
+                continue;
+            }
+            let paragraphs = PARAGRAPHS.read().unwrap();
+            let paragraph = paragraphs.get(id)?;
+            let offset = if let Some((_, _, runs)) = self
+                .hit_runs
+                .get(&widget.widget_uid())
+                .filter(|(block, hash, _)| *block == id && *hash == reader_source_hash(paragraph))
+            {
+                let native =
+                    crate::reader_hit::hit_word_index(runs, abs - widget.area().rect(cx).pos)?;
+                self.text_map(id, paragraph)?.source_index(native)
+            } else {
+                self.hit_block_char(cx, abs)
+                    .filter(|(block, _)| *block == id)?
+                    .1
+            };
+            let text = readwise_core::vocab::annotate::rendered_text(paragraph);
+            let (start, end) = word_range_at(&text, offset)?;
+            return Some(((id, start), (id, end)));
+        }
+        None
+    }
+
+    fn select_pointer_word(&mut self, cx: &mut Cx, abs: DVec2) {
+        self.reset_selection_gesture();
+        *SEL_RANGE.write().unwrap() = self.word_at_pointer(cx, abs);
+        self.last_abs = Some(abs);
+        SELECTED_TEXT.write().unwrap().clear();
+        self.apply_visible_selection(cx);
+        self.finish_selection();
+    }
+
     fn track_toolbar_tap(&mut self, cx: &mut Cx, event: &Event) -> bool {
         if !self.compact_layout {
             self.toolbar_tap.cancel();
@@ -9104,6 +9201,7 @@ impl ChapterList {
             return;
         }
         self.compact_layout = compact_layout;
+        self.cancel_reader_tap(cx);
         self.apply_reader_margin(cx);
         let drag_scrolling = compact_layout || cfg!(any(target_os = "android", target_os = "ios"));
         let mut list_widget = self.view.widget(cx, ids!(list));
@@ -9595,18 +9693,7 @@ impl ChapterList {
                 if !self.reader_rect(cx).contains(event.abs) {
                     return;
                 }
-                let Some((block_id, text_offset)) = self.hit_block_char(cx, event.abs) else {
-                    return;
-                };
-                let Some((start, end)) =
-                    PARAGRAPHS
-                        .read()
-                        .unwrap()
-                        .get(block_id)
-                        .and_then(|paragraph| {
-                            let text = readwise_core::vocab::annotate::rendered_text(paragraph);
-                            word_range_at(&text, text_offset)
-                        })
+                let Some(((block_id, start), (_, end))) = self.word_at_pointer(cx, event.abs)
                 else {
                     return;
                 };
@@ -9977,6 +10064,14 @@ impl ChapterList {
                     .retain(|key, _| key.chapter != chapter_idx || key.block != item_id);
             }
         }
+        let painted_selection = if !measure && reader_plain_paragraph(para) {
+            native_probe.and_then(|(start, end)| {
+                let rects = crate::reader_hit::selection_rects(&runs, start, end);
+                (!rects.is_empty()).then_some(rects)
+            })
+        } else {
+            None
+        };
         if tracked.is_some() {
             self.hit_runs
                 .insert(item.widget_uid(), (item_id, reader_source_hash(para), runs));
@@ -10010,8 +10105,22 @@ impl ChapterList {
         if capture_geometry {
             let html = item.widget(cx, ids!(para_html));
             if let Some(mut inner) = html.borrow_mut::<Html>() {
-                let mut raw = captured_draw_color_rects(cx, &inner.text_flow.draw_selection);
-                crate::reader_inline_code::correct_rects(cx, &mut raw);
+                let mut raw = painted_selection
+                    .map(|rects| {
+                        rects
+                            .into_iter()
+                            .map(|mut rect| {
+                                rect.pos += item_rect.pos;
+                                rect
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        captured_draw_color_rects(cx, &inner.text_flow.draw_selection)
+                    });
+                if !reader_plain_paragraph(para) {
+                    crate::reader_inline_code::correct_rects(cx, &mut raw);
+                }
                 inner.text_flow.draw_selection.end_many_instances(cx);
                 if measure {
                     painted_bottom = painted_bottom.max(
@@ -10223,6 +10332,31 @@ impl Widget for ChapterList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.reader_tap_timer.is_event(event).is_some() {
+            self.reader_tap_timer = Timer::empty();
+            let context = (
+                READER_CONTENT_VERSION.load(Ordering::Relaxed),
+                CURRENT_CHAPTER.load(Ordering::Relaxed),
+            );
+            if self.pending_tap_context.take() == Some(context)
+                && ACTIVE_PAGE.load(Ordering::Relaxed) == AppPage::Reader.persisted()
+            {
+                cx.extend_actions(std::mem::take(&mut self.pending_reader_tap));
+            } else {
+                self.pending_reader_tap.clear();
+            }
+            return;
+        }
+        if matches!(
+            event,
+            Event::Scroll(_)
+                | Event::LiveEdit
+                | Event::ScriptReapply
+                | Event::WindowLostFocus(_)
+                | Event::MouseLeave(_)
+        ) {
+            self.cancel_reader_tap(cx);
+        }
         if READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
             && matches!(
                 event,
@@ -10236,12 +10370,12 @@ impl Widget for ChapterList {
                     | Event::KeyUp(_)
             )
         {
-            self.toolbar_tap.cancel();
+            self.cancel_reader_tap(cx);
             return;
         }
         self.page_turn.handle_event(cx, event, self.view.area());
         if matches!(event, Event::WindowGeomChange(_)) {
-            self.toolbar_tap.cancel();
+            self.cancel_reader_tap(cx);
             self.page_turn.cancel();
             self.pager.pending_turn = None;
         }
@@ -10260,7 +10394,7 @@ impl Widget for ChapterList {
                     | Event::LongPress(_)
             )
         {
-            self.toolbar_tap.cancel();
+            self.cancel_reader_tap(cx);
             return;
         }
         let reader_info_open = READER_INFO_POPUP_OPEN.load(Ordering::Relaxed);
@@ -10275,7 +10409,24 @@ impl Widget for ChapterList {
             ))
             || (reader_info_open && matches!(event, Event::Scroll(_)))
         {
+            self.cancel_reader_tap(cx);
+            return;
+        }
+        let mut tap_outcome = self.word_tap.track(event, self.reader_rect(cx));
+        if self.word_tap.second_press() {
+            // Hold the second press locally; never open the first tap's card.
+            self.cancel_pending_reader_tap(cx);
+        }
+        if tap_outcome == TapOutcome::Double {
             self.toolbar_tap.cancel();
+            self.cancel_pending_reader_tap(cx);
+            self.handle_child_event(cx, event, scope, true);
+            let abs = match event {
+                Event::MouseUp(e) => e.abs,
+                Event::TouchUpdate(e) => e.touches[0].abs,
+                _ => unreachable!(),
+            };
+            self.select_pointer_word(cx, abs);
             return;
         }
         if !self.pager.active && !self.selecting {
@@ -10326,13 +10477,13 @@ impl Widget for ChapterList {
             }
         }
         if matches!(event, Event::LongPress(_)) {
-            self.toolbar_tap.cancel();
+            self.cancel_reader_tap(cx);
             self.track_selection(cx, event);
             self.handle_child_event(cx, event, scope, self.touch_selection.is_some());
             return;
         }
         if self.touch_selection.is_some() && matches!(event, Event::TouchUpdate(_)) {
-            self.toolbar_tap.cancel();
+            self.cancel_reader_tap(cx);
             let released = matches!(event, Event::TouchUpdate(event) if event.touches.iter().any(|touch| {
                 self.touch_selection.as_ref().is_some_and(|selection| selection.uid == touch.uid)
                     && touch.state == TouchState::Stop
@@ -10345,7 +10496,7 @@ impl Widget for ChapterList {
             }
             return;
         }
-        let toolbar_tap = self.track_toolbar_tap(cx, event);
+        let mut toolbar_tap = self.track_toolbar_tap(cx, event);
         if let Event::TouchUpdate(e) = event {
             let rect = self.reader_rect(cx);
             if e.touches
@@ -10360,26 +10511,29 @@ impl Widget for ChapterList {
                 cx.hide_clipboard_actions();
             }
         }
-        if toolbar_tap {
-            let actions = cx.capture_actions(|cx| self.handle_child_event(cx, event, scope, false));
-            let inline_activated = actions.iter().any(|action| {
-                matches!(action.cast(), RubyWordAction::Clicked { .. })
-                    || matches!(
-                        action.cast(),
-                        makepad_widgets::html::HtmlLinkAction::Clicked { .. }
-                    )
-                    || matches!(
-                        action.cast(),
-                        crate::chapter_image::ChapterImageAction::Open(_)
-                    )
-            });
-            cx.extend_actions(actions);
-            if !inline_activated {
-                Cx::post_action(ReaderToolbarTap);
-            }
-        } else {
-            self.handle_child_event(cx, event, scope, false);
+        let actions = cx.capture_actions(|cx| self.handle_child_event(cx, event, scope, false));
+        let list = self.view.portal_list(cx, ids!(list));
+        if !self.pager.active && (list.was_scrolling() || list.scrolled(&actions)) {
+            // A finger that stops inertia is not the first half of a double tap.
+            self.cancel_reader_tap(cx);
+            tap_outcome = TapOutcome::None;
+            toolbar_tap = false;
         }
+        let inline_activated = actions.iter().any(reader_tap_opens_inline);
+        let mut delayed = Vec::new();
+        let mut immediate = Vec::new();
+        for action in actions {
+            if tap_outcome == TapOutcome::Single && reader_tap_selectable_inline(&action) {
+                delayed.push(action);
+            } else {
+                immediate.push(action);
+            }
+        }
+        cx.extend_actions(immediate);
+        if toolbar_tap && !inline_activated {
+            delayed.push(Box::new(ReaderToolbarTap));
+        }
+        self.defer_reader_tap(cx, delayed);
         self.track_selection(cx, event);
     }
 }
@@ -16821,6 +16975,7 @@ impl App {
         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
         let chapter_list = self.ui.widget(cx, ids!(chapter_list));
         if let Some(mut inner) = chapter_list.borrow_mut::<ChapterList>() {
+            inner.cancel_reader_tap(cx);
             inner.reset_selection_gesture();
         }
         let list = chapter_list.portal_list(cx, ids!(list));
@@ -17003,6 +17158,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        crate::reader_word::warm_up();
         self.app_in_foreground = true;
         let has_current_book = CURRENT_BOOK.read().unwrap().is_some();
         let page =

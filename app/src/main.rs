@@ -25,6 +25,7 @@ mod reader_page_turn;
 mod reader_scroll;
 mod reader_text;
 mod reader_touch;
+mod reader_word;
 mod ruby_word;
 mod sample_chapter;
 mod shelf_list;

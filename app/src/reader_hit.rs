@@ -7,6 +7,7 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
 pub struct HitRun {
@@ -209,10 +210,18 @@ pub fn draw_text(tf: &mut TextFlow, cx: &mut Cx2d, text: &str) {
     let start = tf.text_len();
     let area_start = tf.areas_tracker.areas.len();
     let capture_ink = capture && CAPTURE_INK.with(Cell::get);
+    if capture {
+        tf.draw_text.captured_row_areas = Some(Vec::new());
+    }
     if capture_ink {
         tf.draw_text.captured_ink_rows = Some(Vec::new());
     }
     tf.draw_text(cx, text);
+    let painted_areas = if capture {
+        tf.draw_text.captured_row_areas.take().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let ink_rows = if capture_ink {
         tf.draw_text.captured_ink_rows.take().unwrap_or_default()
     } else {
@@ -239,7 +248,12 @@ pub fn draw_text(tf: &mut TextFlow, cx: &mut Cx2d, text: &str) {
         .and_then(|row| row.glyphs.first())
         .map(|glyph| glyph.font_size_in_lpxs * dt.temp_y_shift)
         .unwrap_or(0.0);
-    let row_areas = tf.areas_tracker.areas[area_start..]
+    let areas: &[Area] = if painted_areas.is_empty() {
+        &tf.areas_tracker.areas[area_start..]
+    } else {
+        &painted_areas
+    };
+    let row_areas = areas
         .iter()
         .map(|area| (*area, area.rect(cx).pos))
         .collect();
@@ -287,6 +301,27 @@ fn nearest_row<T>(rows: impl Iterator<Item = (Rect, T)>, point: DVec2) -> Option
 }
 
 pub fn hit_index(runs: &[HitRun], point: DVec2) -> Option<usize> {
+    hit_text_index(runs, point, false)
+}
+
+/// Word gestures need the glyph under the pointer, not the nearest caret:
+/// the right half of a word's last letter must still select that word.
+pub fn hit_word_index(runs: &[HitRun], point: DVec2) -> Option<usize> {
+    hit_text_index(runs, point, true)
+}
+
+fn grapheme_at_x(text: &str, left: f32, right: f32, x: f32) -> Option<usize> {
+    if x < left || x >= right {
+        return None;
+    }
+    let count = text.graphemes(true).count();
+    let index = ((x - left) / (right - left) * count as f32) as usize;
+    text.grapheme_indices(true)
+        .nth(index)
+        .map(|(index, _)| index)
+}
+
+fn hit_text_index(runs: &[HitRun], point: DVec2, word: bool) -> Option<usize> {
     let rows = runs.iter().flat_map(|run| {
         run.layout
             .rows
@@ -296,27 +331,131 @@ pub fn hit_index(runs: &[HitRun], point: DVec2) -> Option<usize> {
                 if run.row.is_some_and(|painted_row| painted_row != index) {
                     return None;
                 }
-                let first = row.glyphs.first()?;
-                let left = run.origin.x + first.origin_in_lpxs.x as f64 * run.scale;
-                let right = run.origin.x + row.width_in_lpxs as f64 * run.scale;
-                let baseline = run.origin.y + row.origin_in_lpxs.y as f64 * run.scale;
-                let top = baseline - row.ascender_in_lpxs as f64 * run.scale;
-                let bottom = baseline - row.descender_in_lpxs as f64 * run.scale;
-                Some((
-                    Rect {
-                        pos: dvec2(left, top),
-                        size: dvec2(right - left, bottom - top),
-                    },
-                    (run, row),
-                ))
+                let rect = run.row_rect(index, row)?;
+                Some((rect, (run, index, row)))
             })
     });
-    let (run, row) = nearest_row(rows, point)?;
-    Some(
-        run.start
-            + row.text.start_in_parent()
-            + row.x_in_lpxs_to_index(((point.x - run.origin.x) / run.scale) as f32),
-    )
+    let (run, index, row) = nearest_row(rows, point)?;
+    let x = run.row_x_in_lpxs(index, row, point.x);
+    if word {
+        let mut groups = row
+            .glyphs
+            .chunk_by(|a, b| a.cluster == b.cluster)
+            .peekable();
+        while let Some(group) = groups.next() {
+            let start = group[0].cluster;
+            let end = groups.peek().map_or(row.text.len(), |next| next[0].cluster);
+            let left = group[0].origin_in_lpxs.x;
+            let right = groups
+                .peek()
+                .map_or(row.width_in_lpxs, |next| next[0].origin_in_lpxs.x);
+            if let Some(index) = grapheme_at_x(&row.text[start..end], left, right, x) {
+                return Some(run.start + row.text.start_in_parent() + start + index);
+            }
+        }
+        return None;
+    }
+    Some(run.start + row.text.start_in_parent() + row.x_in_lpxs_to_index(x))
+}
+
+impl HitRun {
+    fn row_start_x(
+        row: &makepad_widgets::makepad_draw::text::layouter::LaidoutRow,
+        index: usize,
+    ) -> f64 {
+        if index == 0 {
+            row.glyphs
+                .first()
+                .map_or(0.0, |glyph| glyph.origin_in_lpxs.x as f64)
+        } else {
+            0.0
+        }
+    }
+
+    fn row_rect(
+        &self,
+        index: usize,
+        row: &makepad_widgets::makepad_draw::text::layouter::LaidoutRow,
+    ) -> Option<Rect> {
+        if let Some((_, rect)) = self.drawn_rows.iter().find(|(row, _)| *row == index) {
+            return Some(*rect);
+        }
+        let first = row.glyphs.first()?;
+        let left = self.origin.x + first.origin_in_lpxs.x as f64 * self.scale;
+        let right = self.origin.x + row.width_in_lpxs as f64 * self.scale;
+        let baseline = self.origin.y + row.origin_in_lpxs.y as f64 * self.scale;
+        let top = baseline - row.ascender_in_lpxs as f64 * self.scale;
+        let bottom = baseline - row.descender_in_lpxs as f64 * self.scale;
+        Some(Rect {
+            pos: dvec2(left, top),
+            size: dvec2(right - left, bottom - top),
+        })
+    }
+
+    fn row_x_in_lpxs(
+        &self,
+        index: usize,
+        row: &makepad_widgets::makepad_draw::text::layouter::LaidoutRow,
+        x: f64,
+    ) -> f32 {
+        let left = self
+            .row_rect(index, row)
+            .map_or(self.origin.x, |rect| rect.pos.x);
+        painted_row_local_x(left, Self::row_start_x(row, index), self.scale, x)
+    }
+}
+
+fn painted_row_local_x(left: f64, row_start: f64, scale: f64, x: f64) -> f32 {
+    ((x - left) / scale + row_start) as f32
+}
+
+fn painted_row_screen_x(left: f64, row_start: f64, scale: f64, x: f32) -> f64 {
+    left + (x as f64 - row_start) * scale
+}
+
+/// TextFlow records selection against the layout's predicted rows. On macOS
+/// its multi-row draw follows the turtle's *actual* row positions instead.
+/// Rebuild plain-paragraph rectangles from the painted rows so a long block
+/// cannot accumulate a vertical offset between text, hit testing and color.
+pub fn selection_rects(runs: &[HitRun], from: usize, to: usize) -> Vec<Rect> {
+    let mut rects = Vec::new();
+    for run in runs {
+        for (index, row) in run.layout.rows.iter().enumerate() {
+            if run.row.is_some_and(|painted| painted != index) {
+                continue;
+            }
+            let start = run.start + row.text.start_in_parent();
+            let end = start + row.text.len();
+            let a = from.max(start);
+            let b = to.min(end);
+            if a >= b {
+                continue;
+            }
+            let Some(actual) = run.row_rect(index, row) else {
+                continue;
+            };
+            let row_x = HitRun::row_start_x(row, index);
+            let left = painted_row_screen_x(
+                actual.pos.x,
+                row_x,
+                run.scale,
+                row.index_to_x_in_lpxs(a - start),
+            );
+            let right = painted_row_screen_x(
+                actual.pos.x,
+                row_x,
+                run.scale,
+                row.index_to_x_in_lpxs(b - start),
+            );
+            if right > left {
+                rects.push(Rect {
+                    pos: dvec2(left, actual.pos.y - 2.0),
+                    size: dvec2(right - left, actual.size.y + 4.0),
+                });
+            }
+        }
+    }
+    rects
 }
 
 /// Intercept text whose runs we can record completely, including paragraphs
@@ -486,6 +625,41 @@ impl Widget for ReaderRun {
 mod tests {
     use super::*;
     use makepad_widgets::makepad_html::parse_html;
+
+    #[test]
+    fn captured_row_field_preserves_draw_text_instance_alignment() {
+        assert_eq!(std::mem::size_of::<DrawText>() % 16, 0);
+    }
+
+    #[test]
+    fn later_painted_rows_keep_hit_and_selection_coordinates_inverse() {
+        // A right-column row may be aligned 18 px away from the run origin.
+        // Its caret and highlight must use the same resolved horizontal base.
+        let painted_left = 42.0;
+        let predicted_left = 24.0;
+        let first_glyph = 0.0;
+        let scale = 1.25;
+        let caret = 96.0_f32;
+        let screen = painted_row_screen_x(painted_left, first_glyph, scale, caret);
+        assert_eq!(screen, 162.0);
+        assert_eq!(
+            painted_row_local_x(painted_left, first_glyph, scale, screen),
+            caret
+        );
+        assert_ne!(
+            painted_row_local_x(predicted_left, first_glyph, scale, screen),
+            caret
+        );
+    }
+
+    #[test]
+    fn word_hit_keeps_the_right_half_of_a_glyph_and_ligature() {
+        assert_eq!(grapheme_at_x("读", 0.0, 20.0, 19.0), Some(0));
+        assert_eq!(grapheme_at_x("fi", 0.0, 20.0, 19.0), Some(1));
+        assert_eq!(grapheme_at_x("e\u{301}", 0.0, 20.0, 19.0), Some(0));
+        assert_eq!(grapheme_at_x("读", 0.0, 20.0, 20.0), None);
+        assert_eq!(grapheme_at_x("读", 0.0, 20.0, -1.0), None);
+    }
 
     #[test]
     fn centered_caption_keeps_tracked_text_offsets() {

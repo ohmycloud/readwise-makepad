@@ -1267,6 +1267,12 @@ pub struct DrawText {
     /// Actual glyph quads, grouped by visual row, when a caller requests them.
     #[rust]
     pub captured_ink_rows: Option<Vec<Option<Rect>>>,
+    /// Resolved row boxes for callers that need hit testing after per-row
+    /// turtle placement and alignment. Kept separate from glyph ink bounds.
+    #[rust]
+    pub captured_row_areas: Option<Vec<Area>>,
+    #[rust]
+    _captured_row_area_padding: u64,
     #[rust]
     pending_slug_flush_generation: u64,
     #[rust]
@@ -2363,6 +2369,11 @@ impl DrawText {
                     ((ex - sx) * self.font_scale) as f64,
                     row_h,
                 );
+                if let Some(areas) = self.captured_row_areas.as_mut() {
+                    let mut area = Area::Empty;
+                    cx.add_aligned_rect_area(&mut area, row_rect);
+                    areas.push(area);
+                }
 
                 if callback_before_text {
                     f(cx, row_rect, row.ascender_in_lpxs);
@@ -2449,6 +2460,28 @@ impl DrawText {
             }
 
             self.draw_text(cx, origin_in_lpxs, &text);
+
+            if let Some(areas) = self.captured_row_areas.as_mut() {
+                for (row_index, row) in text.rows.iter().enumerate() {
+                    let (sx, ex) = row_span_x_bounds_in_lpxs(
+                        row,
+                        row_index == 0,
+                        row_index + 1 == text.rows.len(),
+                    );
+                    let row_rect = rect(
+                        (origin_in_lpxs.x + (row.origin_in_lpxs.x + sx) * self.font_scale) as f64,
+                        (origin_in_lpxs.y
+                            + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale)
+                            as f64
+                            + shift_y as f64,
+                        ((ex - sx) * self.font_scale) as f64,
+                        ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale) as f64,
+                    );
+                    let mut area = Area::Empty;
+                    cx.add_aligned_rect_area(&mut area, row_rect);
+                    areas.push(area);
+                }
+            }
 
             let turtle = cx.turtle_mut();
             turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
