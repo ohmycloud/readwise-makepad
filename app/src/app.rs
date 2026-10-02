@@ -8484,6 +8484,17 @@ fn reader_markup_available_width(
 }
 
 impl ChapterList {
+    fn redraw_visible_code_views(&mut self, cx: &mut Cx) {
+        // Code blocks keep their own draw lists. Repaint both levels after a page
+        // switch so glyphs cached while another list was scrolling are refreshed.
+        let codes = CODE_BLOCKS.read().unwrap();
+        for (block, item, _) in &self.pager.drawn {
+            if codes.get(*block).is_some_and(Option::is_some) {
+                item.redraw(cx);
+                item.widget(cx, ids!(code_view)).redraw(cx);
+            }
+        }
+    }
     fn cancel_pending_reader_tap(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.reader_tap_timer);
         self.reader_tap_timer = Timer::empty();
@@ -11580,6 +11591,8 @@ pub struct App {
     #[rust]
     import_picker_frame: Option<NextFrame>,
     #[rust]
+    reader_code_refresh_frame: Option<NextFrame>,
+    #[rust]
     import_dialog_open: bool,
     #[rust]
     lan_transfer_mode: bool,
@@ -12218,6 +12231,7 @@ impl App {
     }
 
     fn activate_page(&mut self, cx: &mut Cx, page: AppPage) {
+        let returning_to_reader = !self.on_reader_page && page == AppPage::Reader;
         if page != AppPage::Library && self.import_dialog_open {
             self.close_library_import_dialog(cx);
         }
@@ -12251,6 +12265,11 @@ impl App {
         self.active_page = page;
         ACTIVE_PAGE.store(page.persisted(), Ordering::Relaxed);
         self.on_reader_page = page == AppPage::Reader;
+        if returning_to_reader {
+            self.reader_code_refresh_frame = Some(cx.new_next_frame());
+        } else if !self.on_reader_page {
+            self.reader_code_refresh_frame = None;
+        }
         if !self.on_reader_page {
             READER_INFO_POPUP_OPEN.store(false, Ordering::Relaxed);
             if self.reader_customise_draft.is_some() {
@@ -20595,6 +20614,23 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self
+            .reader_code_refresh_frame
+            .as_ref()
+            .and_then(|frame| frame.is_event(event))
+            .is_some()
+        {
+            self.reader_code_refresh_frame = None;
+            if self.on_reader_page {
+                if let Some(mut reader) = self
+                    .ui
+                    .widget(cx, ids!(chapter_list))
+                    .borrow_mut::<ChapterList>()
+                {
+                    reader.redraw_visible_code_views(cx);
+                }
+            }
+        }
         #[cfg(target_os = "macos")]
         if self
             .import_picker_frame
