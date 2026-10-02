@@ -7594,14 +7594,13 @@ script_mod! {
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
-                                        reader_customise_size_label := Label{width: Fill text: "Text Size"}
+                                        reader_customise_size_label := Label{width: 164 text: "Text Size"}
                                         reader_customise_size_controls := View{
-                                            width: Fit height: Fit
+                                            width: Fill height: Fit
                                             flow: Right spacing: 8
                                             align: Align{y: 0.5}
-                                            reader_customise_size_down := ButtonFlat{text: "A-"}
-                                            reader_customise_size_value := Label{text: "12"}
-                                            reader_customise_size_up := ButtonFlat{text: "A+"}
+                                            reader_customise_size_slider := ReaderLayoutSlider{min: 8. max: 20. step: 0. precision: 0}
+                                            reader_customise_size_value := Label{width: 58 text: "12"}
                                         }
                                     }
                                     reader_customise_bold := CheckBox{text: "Bold Text"}
@@ -7613,14 +7612,13 @@ script_mod! {
                                     reader_customise_gloss_size_row := View{
                                         width: Fill height: Fit flow: Right spacing: 8
                                         align: Align{y: 0.5}
-                                        reader_customise_gloss_size_label := Label{width: Fill text: "Annotation Size"}
+                                        reader_customise_gloss_size_label := Label{width: 164 text: "Annotation Size"}
                                         reader_customise_gloss_size_controls := View{
-                                            width: Fit height: Fit
+                                            width: Fill height: Fit
                                             flow: Right spacing: 8
                                             align: Align{y: 0.5}
-                                            reader_customise_gloss_size_down := ButtonFlat{text: "-"}
-                                            reader_customise_gloss_size_value := Label{text: "7.5"}
-                                            reader_customise_gloss_size_up := ButtonFlat{text: "+"}
+                                            reader_customise_gloss_size_slider := ReaderLayoutSlider{min: 6. max: 12. step: 0. precision: 1}
+                                            reader_customise_gloss_size_value := Label{width: 58 text: "7.5"}
                                         }
                                     }
                                     reader_customise_gloss_color_row := View{
@@ -12088,6 +12086,8 @@ impl App {
             };
         }
         for id in [
+            id!(reader_customise_size_label),
+            id!(reader_customise_gloss_size_label),
             id!(reader_customise_line_label),
             id!(reader_customise_character_label),
             id!(reader_customise_word_label),
@@ -13295,6 +13295,9 @@ impl App {
             .label(cx, ids!(reader_customise_size_value))
             .set_text(cx, &format!("{size:.0}"));
         self.ui
+            .slider(cx, ids!(reader_customise_size_slider))
+            .set_value(cx, size as f64);
+        self.ui
             .label(cx, ids!(reader_customise_line_value))
             .set_text(cx, &format!("{:.2}×", spacing.plain_line_spacing()));
         self.ui
@@ -13330,6 +13333,9 @@ impl App {
         self.ui
             .label(cx, ids!(reader_customise_gloss_size_value))
             .set_text(cx, &format!("{:.1}", settings.gloss_font_size));
+        self.ui
+            .slider(cx, ids!(reader_customise_gloss_size_slider))
+            .set_value(cx, settings.gloss_font_size as f64);
         for id in [
             id!(reader_customise_gloss_size_row),
             id!(reader_customise_gloss_color_row),
@@ -13856,6 +13862,8 @@ impl App {
             id!(reader_customise_gloss_title),
             id!(reader_customise_layout_title),
             id!(reader_customise_columns_title),
+            id!(reader_customise_size_value),
+            id!(reader_customise_gloss_size_value),
             id!(reader_customise_line_value),
             id!(reader_customise_character_value),
             id!(reader_customise_word_value),
@@ -13929,10 +13937,6 @@ impl App {
             id!(reader_customise_font_choice),
             id!(reader_customise_font_button),
             id!(reader_customise_columns_choice),
-            id!(reader_customise_size_down),
-            id!(reader_customise_size_up),
-            id!(reader_customise_gloss_size_down),
-            id!(reader_customise_gloss_size_up),
             id!(reader_customise_gloss_color_green),
             id!(reader_customise_gloss_color_blue),
             id!(reader_customise_gloss_color_orange),
@@ -19299,28 +19303,6 @@ impl MatchEvent for App {
                 self.sync_reader_customise_controls(cx);
             }
         }
-        if self
-            .ui
-            .button(cx, ids!(reader_customise_size_down))
-            .clicked(actions)
-        {
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                let size = draft.font_size.unwrap_or(READER_FONT_DEFAULT);
-                draft.font_size = Some((size - 1.0).clamp(READER_FONT_MIN, READER_FONT_MAX));
-                self.sync_reader_customise_controls(cx);
-            }
-        }
-        if self
-            .ui
-            .button(cx, ids!(reader_customise_size_up))
-            .clicked(actions)
-        {
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                let size = draft.font_size.unwrap_or(READER_FONT_DEFAULT);
-                draft.font_size = Some((size + 1.0).clamp(READER_FONT_MIN, READER_FONT_MAX));
-                self.sync_reader_customise_controls(cx);
-            }
-        }
         if let Some(bold) = self
             .ui
             .check_box(cx, ids!(reader_customise_bold))
@@ -19339,22 +19321,6 @@ impl MatchEvent for App {
         {
             if let Some(draft) = self.reader_customise_draft.as_mut() {
                 draft.gloss_enabled = enabled;
-                gloss_preview_changed = true;
-            }
-        }
-        let gloss_size_delta = i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_gloss_size_up))
-                .clicked(actions),
-        ) - i32::from(
-            self.ui
-                .button(cx, ids!(reader_customise_gloss_size_down))
-                .clicked(actions),
-        );
-        if gloss_size_delta != 0 {
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                draft.gloss_font_size =
-                    (draft.gloss_font_size + gloss_size_delta as f32 * 0.5).clamp(6.0, 12.0);
                 gloss_preview_changed = true;
             }
         }
@@ -19413,6 +19379,14 @@ impl MatchEvent for App {
         if gloss_preview_changed {
             self.sync_reader_customise_controls(cx);
         }
+        let size_value = self
+            .ui
+            .slider(cx, ids!(reader_customise_size_slider))
+            .slided(actions);
+        let gloss_size_value = self
+            .ui
+            .slider(cx, ids!(reader_customise_gloss_size_slider))
+            .slided(actions);
         let line_value = self
             .ui
             .slider(cx, ids!(reader_customise_line_slider))
@@ -19443,6 +19417,32 @@ impl MatchEvent for App {
         };
         if let Some(draft) = self.reader_customise_draft.as_mut() {
             let mut changed = false;
+            if let Some(value) = size_value {
+                // The drawn thumb stops short of the widget edge; keep both
+                // endpoints reachable without swallowing the first step.
+                let edge = (READER_FONT_MAX - READER_FONT_MIN) as f64 * 0.05;
+                let size = if value <= READER_FONT_MIN as f64 + edge {
+                    READER_FONT_MIN
+                } else if value >= READER_FONT_MAX as f64 - edge {
+                    READER_FONT_MAX
+                } else {
+                    value.round() as f32
+                };
+                draft.font_size = Some(size.clamp(READER_FONT_MIN, READER_FONT_MAX));
+                changed = true;
+            }
+            if let Some(value) = gloss_size_value {
+                let edge = (12.0 - 6.0) * 0.05;
+                let size = if value <= 6.0 + edge {
+                    6.0
+                } else if value >= 12.0 - edge {
+                    12.0
+                } else {
+                    (value * 2.0).round() / 2.0
+                };
+                draft.gloss_font_size = (size as f32).clamp(6.0, 12.0);
+                changed = true;
+            }
             if let Some(value) = line_value {
                 draft.spacing = ReaderSpacing::from_value(
                     (snap_edge(value, 0.8, 2.5) * 100.0).round() as f32 / 100.0,
