@@ -7391,26 +7391,23 @@ script_mod! {
                             image_viewer_card := RoundedView{
                                 width: Fill height: Fill
                                 new_batch: true
-                                flow: Down spacing: 10
+                                flow: Overlay
                                 margin: Inset{left: 18 right: 18 top: 18 bottom: 18}
-                                padding: Inset{left: 12 right: 12 top: 10 bottom: 12}
+                                padding: 12
                                 draw_bg.color: theme.color_bg_container
                                 draw_bg.border_radius: 10.0
-                                image_viewer_header := View{
-                                    width: Fill height: Fit
-                                    flow: Right spacing: 10
-                                    align: Align{y: 0.5}
-                                    image_viewer_info := Label{
-                                        width: Fill height: Fit
-                                        text: "原图"
-                                        draw_text.color: theme.color_label_inner
-                                        draw_text.text_style.font_size: 10
-                                    }
-                                    image_viewer_close := ButtonFlat{text: "关闭"}
-                                }
-                                image_viewer_image := Image{
+                                image_viewer_center := View{
                                     width: Fill height: Fill
-                                    fit: ImageFit.Smallest
+                                    align: Center
+                                    image_viewer_image := Image{
+                                        width: 1 height: 1
+                                        fit: ImageFit.Stretch
+                                    }
+                                }
+                                image_viewer_close_row := View{
+                                    width: Fill height: Fit
+                                    align: Align{x: 1.0}
+                                    image_viewer_close := ButtonFlat{text: "关闭"}
                                 }
                             }
                         }
@@ -13047,21 +13044,31 @@ impl App {
             );
             return;
         }
-        let info = image
-            .size_in_pixels(cx)
-            .map(|(width, height)| {
-                if app_language() == AppLanguage::English {
-                    format!("Original image · {width} × {height} px")
-                } else {
-                    format!("原图 · {width} × {height} 像素")
-                }
-            })
-            .unwrap_or_else(|| localized("原图", "Original image").to_string());
-        self.ui
-            .label(cx, ids!(image_viewer_info))
-            .set_text(cx, &info);
+        self.layout_reader_image_viewer(cx);
         self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
         self.ui.modal(cx, ids!(reader_image_modal)).open(cx);
+    }
+
+    fn layout_reader_image_viewer(&mut self, cx: &mut Cx) {
+        let image = self.ui.image(cx, ids!(image_viewer_image));
+        let Some((image_width, image_height)) = image.size_in_pixels(cx) else {
+            return;
+        };
+        if image_width == 0 || image_height == 0 {
+            return;
+        }
+        let size = self.responsive_window_size;
+        let safe = self.safe_area_insets;
+        // Card margins and padding each consume space on both sides.
+        let available_width = (size.x - safe.left - safe.right - 60.0).max(1.0);
+        let available_height = (size.y - safe.top - safe.bottom - 60.0).max(1.0);
+        let scale =
+            (available_width / image_width as f64).min(available_height / image_height as f64);
+        if let Some(mut inner) = image.borrow_mut() {
+            inner.walk.width = Size::Fixed(image_width as f64 * scale);
+            inner.walk.height = Size::Fixed(image_height as f64 * scale);
+        }
+        image.redraw(cx);
     }
 
     fn cancel_delete_book_confirmation(&mut self, cx: &mut Cx) {
@@ -13853,7 +13860,6 @@ impl App {
             id!(reader_bookmarks_title),
             id!(reader_search_title),
             id!(card_word),
-            id!(image_viewer_info),
             id!(library_rename_title),
             id!(reader_turn_mode_label),
             id!(reader_theme_title),
@@ -14945,6 +14951,7 @@ impl App {
         self.responsive_window_size = size;
         self.compact_layout = compact;
         self.safe_area_insets = safe_area_insets;
+        self.layout_reader_image_viewer(cx);
         self.ui
             .widget(cx, ids!(sidebar))
             .set_visible(cx, !compact && !self.on_reader_page);
