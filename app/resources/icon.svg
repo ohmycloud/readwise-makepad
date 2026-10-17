@@ -1,14 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect x="0" y="0" width="1024" height="1024" fill="#1f6f63"/>
-  <rect x="0" y="0" width="1024" height="512" fill="#23796c"/>
-  <path d="M170 740 Q340 675 512 715 Q684 675 854 740 L854 330 Q684 270 512 315 Q340 270 170 330 Z" fill="#f5f1e6"/>
-  <path d="M512 315 L512 715" stroke="#1f6f63" stroke-width="14"/>
-  <line x1="240" y1="430" x2="430" y2="414" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
-  <line x1="240" y1="510" x2="430" y2="494" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
-  <line x1="240" y1="590" x2="368" y2="580" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
-  <line x1="594" y1="510" x2="784" y2="494" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
-  <line x1="594" y1="590" x2="742" y2="580" stroke="#9fb8b0" stroke-width="24" stroke-linecap="round"/>
-  <line x1="594" y1="430" x2="784" y2="414" stroke="#e8734a" stroke-width="32" stroke-linecap="round"/>
-  <line x1="618" y1="352" x2="668" y2="347" stroke="#e8734a" stroke-width="20" stroke-linecap="round"/>
-  <line x1="692" y1="345" x2="742" y2="340" stroke="#e8734a" stroke-width="20" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">ReadWise — Terracotta giraffe</title>
+  <rect id="background" width="256" height="256" fill="#F8DDD2"/>
+  <g id="giraffe">
+    <path fill="#57332D" d="M39 75 C62 69 86 76 98 99 C74 114 48 105 39 75 Z M217 75 C194 69 170 76 158 99 C182 114 208 105 217 75 Z"/>
+    <path fill="#DF8267" d="M50 82 C66 80 79 84 87 96 C71 101 57 96 50 82 Z M206 82 C190 80 177 84 169 96 C185 101 199 96 206 82 Z"/>
+    <path fill="#57332D" d="M97 49 H117 V84 H97 Z M139 49 H159 V84 H139 Z"/>
+    <circle cx="107" cy="49" r="13" fill="#57332D"/>
+    <circle cx="149" cy="49" r="13" fill="#57332D"/>
+    <path fill="#57332D" d="M102 72 H154 C170 72 179 84 177 100 L165 212 Q164 225 150 225 H106 Q92 225 91 212 L79 100 C77 84 86 72 102 72 Z"/>
+    <path fill="#DF8267" d="M102 80 H154 C165 80 171 88 169 99 L157 211 Q156 217 150 217 H106 Q100 217 99 211 L87 99 C85 88 91 80 102 80 Z"/>
+    <path fill="#DF8267" d="M103 49 H111 V84 H103 Z M145 49 H153 V84 H145 Z"/>
+    <circle cx="107" cy="49" r="6" fill="#DF8267"/>
+    <circle cx="149" cy="49" r="6" fill="#DF8267"/>
+    <circle cx="108" cy="122" r="6.5" fill="#57332D"/>
+    <circle cx="148" cy="122" r="6.5" fill="#57332D"/>
+    <rect x="71" y="154" width="114" height="57" rx="28.5" fill="#57332D"/>
+    <rect x="79" y="162" width="98" height="41" rx="20.5" fill="#F8DDD2"/>
+    <ellipse cx="96" cy="182.5" rx="5" ry="7" fill="#57332D"/>
+    <ellipse cx="160" cy="182.5" rx="5" ry="7" fill="#57332D"/>
+  </g>
 </svg>

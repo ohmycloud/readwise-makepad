@@ -1092,6 +1092,41 @@ mod migration_tests {
     }
 
     #[test]
+    fn old_and_new_pen_and_highlighter_slots_persist_without_recolouring_notes() {
+        let (rt, pool) = runtime_and_pool();
+        rt.block_on(initialize_schema(&pool)).unwrap();
+        let db = Db {
+            rt,
+            pool,
+            data_dir: std::path::PathBuf::new(),
+        };
+        let mut settings = db.load_reader_settings().unwrap();
+        assert_eq!(settings.highlight_color_slot, 4);
+        assert_eq!(settings.selection_color_slot, 0);
+        // No settings migration may rewrite an already saved annotation.
+        db.rt.block_on(sqlx::query(
+            "INSERT INTO books (id, title, author, format, file_path, file_size, language, created_at, updated_at) VALUES ('book', 'Test', '', 'epub', '', 0, 'en', 0, 0)"
+        ).execute(&db.pool)).unwrap();
+        db.rt.block_on(sqlx::query(
+            "INSERT INTO book_notes (id, book_id, type, cfi, style, color, section_id, norm_start, norm_end, note, created_at, updated_at) VALUES ('legacy', 'book', 'annotation', '', 'highlight', 'orange', '0', 0, 3, '', 0, 0)"
+        ).execute(&db.pool)).unwrap();
+        for slot in 0..8 {
+            settings.selection_color_slot = slot;
+            settings.highlight_color_slot = slot;
+            db.save_reader_settings(&settings).unwrap();
+            assert_eq!(db.load_reader_settings().unwrap(), settings);
+            let color: String = db
+                .rt
+                .block_on(
+                    sqlx::query_scalar("SELECT color FROM book_notes WHERE id = 'legacy'")
+                        .fetch_one(&db.pool),
+                )
+                .unwrap();
+            assert_eq!(color, "orange");
+        }
+    }
+
+    #[test]
     fn reader_customisation_survives_database_round_trip() {
         let (rt, pool) = runtime_and_pool();
         rt.block_on(initialize_schema(&pool)).unwrap();

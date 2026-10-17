@@ -345,6 +345,7 @@ pub struct ReaderSettings {
     pub word_color_slot: usize,
     pub word_background_slot: usize,
     pub selection_color_slot: usize,
+    /// Original palette: 0..=3; aA yellow/green/blue/pink palette: 4..=7.
     pub highlight_color_slot: usize,
 }
 
@@ -372,7 +373,7 @@ impl Default for ReaderSettings {
             word_color_slot: 0,
             word_background_slot: 0,
             selection_color_slot: 0,
-            highlight_color_slot: 0,
+            highlight_color_slot: 4,
         }
     }
 }
@@ -404,8 +405,8 @@ impl ReaderSettings {
         self.gloss_background_slot = self.gloss_background_slot.min(3);
         self.word_color_slot = self.word_color_slot.min(3);
         self.word_background_slot = self.word_background_slot.min(3);
-        self.selection_color_slot = self.selection_color_slot.min(3);
-        self.highlight_color_slot = self.highlight_color_slot.min(3);
+        self.selection_color_slot = self.selection_color_slot.min(7);
+        self.highlight_color_slot = self.highlight_color_slot.min(7);
         self
     }
 
@@ -444,7 +445,8 @@ mod tests {
 
         assert_eq!(settings.font_size, Some(20.0));
         assert_eq!(settings.gloss_font_size, 7.5);
-        assert_eq!(settings.highlight_color_slot, 3);
+        assert_eq!(settings.highlight_color_slot, 7);
+        assert_eq!(settings.selection_color_slot, 7);
     }
 
     #[test]

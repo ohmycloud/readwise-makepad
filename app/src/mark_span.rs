@@ -1,12 +1,20 @@
 use makepad_widgets::*;
 use std::sync::{LazyLock, RwLock};
 
-/// 高亮颜色槽位：0=黄 1=青 2=蓝 3=橙（设置页可选，MarkSpan 每帧读取）。
-pub static HL_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(0));
+/// 0..=3 retain the original colours and saved preferences. The aA picker uses
+/// 4..=7 (yellow/green/blue/pink); never reuse a legacy slot or note colour name.
+pub static HL_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(4));
+pub const MARKER_SLOTS: [usize; 4] = [4, 5, 6, 7];
+pub const MARKER_RGB: [u32; 4] = [0xf2c4_38ff, 0x7cc6_6fff, 0x6aa8_f0ff, 0xf084_acff];
 
 /// 槽位 → 半透明底色。
 pub fn hl_color(slot: usize) -> Vec4f {
     match slot {
+        4..=7 => {
+            let mut color = Vec4f::from_u32(MARKER_RGB[slot - 4]);
+            color.w = 0.35;
+            color
+        }
         1 => Vec4f {
             x: 0.498,
             y: 0.698,
@@ -35,14 +43,79 @@ pub fn hl_color(slot: usize) -> Vec4f {
 }
 
 /// 槽位 → 存库颜色名（book_notes.color）。
-pub const HL_COLOR_NAMES: &[&str] = &["yellow", "teal", "blue", "orange"];
+pub const HL_COLOR_NAMES: &[&str] = &[
+    "yellow",
+    "teal",
+    "blue",
+    "orange",
+    "marker-yellow",
+    "marker-green",
+    "marker-blue",
+    "marker-pink",
+];
 
 pub fn hl_slot_for_name(color: &str) -> usize {
     match color {
+        "marker-yellow" => 4,
+        "marker-green" => 5,
+        "marker-blue" => 6,
+        "marker-pink" => 7,
         "teal" | "green" => 1,
         "blue" => 2,
         "orange" | "red" | "violet" => 3,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_note_colours_and_aliases_keep_their_original_rgba() {
+        for (name, slot, expected) in [
+            ("yellow", 0, (0.851, 0.788, 0.416)),
+            ("teal", 1, (0.498, 0.698, 0.651)),
+            ("blue", 2, (0.290, 0.565, 0.850)),
+            ("orange", 3, (0.910, 0.529, 0.353)),
+        ] {
+            assert_eq!(hl_slot_for_name(name), slot);
+            let color = hl_color(slot);
+            assert_eq!((color.x, color.y, color.z), expected);
+            assert_eq!(color.w, 0.35);
+        }
+        for (alias, slot) in [("green", 1), ("red", 3), ("violet", 3), ("unknown", 0)] {
+            assert_eq!(hl_slot_for_name(alias), slot);
+        }
+    }
+
+    #[test]
+    fn all_marker_colours_round_trip_without_colliding_with_legacy_names() {
+        for (slot, name) in HL_COLOR_NAMES.iter().enumerate() {
+            assert_eq!(hl_slot_for_name(name), slot);
+        }
+        for (index, slot) in MARKER_SLOTS.into_iter().enumerate() {
+            let color = hl_color(slot);
+            let expected = Vec4f::from_u32(MARKER_RGB[index]);
+            assert_eq!(
+                (color.x, color.y, color.z),
+                (expected.x, expected.y, expected.z)
+            );
+            assert_eq!(color.w, 0.35);
+        }
+        assert_ne!(hl_color(2), hl_color(6));
+        assert_ne!(hl_color(3), hl_color(7));
+        let default = readwise_core::settings::ReaderSettings::default();
+        assert_eq!(default.highlight_color_slot, MARKER_SLOTS[0]);
+        assert_eq!(
+            readwise_core::settings::ReaderSettings {
+                highlight_color_slot: usize::MAX,
+                ..default
+            }
+            .normalized()
+            .highlight_color_slot,
+            *MARKER_SLOTS.last().unwrap()
+        );
     }
 }
 

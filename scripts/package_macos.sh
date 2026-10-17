@@ -45,7 +45,7 @@ cargo makepad desktop build -p readwise-app --release --locked --offline
 built_app="$project_dir/target/makepad-desktop/macos/release/readwise-app.app"
 dist_dir="$project_dir/target/dist"
 dist_app="$dist_dir/ReadWise.app"
-archive="$dist_dir/ReadWise-macOS-$app_version.zip"
+archive="$dist_dir/ReadWise-macOS-$(uname -m)-$app_version.zip"
 
 if [[ ! -x "$built_app/Contents/MacOS/readwise-app" ]]; then
     echo "Expected app bundle was not generated at $built_app" >&2

@@ -5,6 +5,7 @@ use crate::reader_touch::{DoubleTap, ListTap, TapOutcome, ToolbarTap};
 use crate::reader_word::word_range_at;
 use crate::ruby_word::RubyWordAction;
 use crate::sample_chapter;
+use crate::settings_swatch::ColorKind;
 use crate::shelf_list::*;
 use makepad_ai::{
     AiBackend, AiEvent, AiRequest, BackendConfig, Message, OpenAiBackend, RequestId, StreamDelta,
@@ -2514,6 +2515,7 @@ static READER_WORD_SPACING: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new
 static READER_MARGIN: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(0.0));
 static READER_JUSTIFY_TEXT: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
 static READER_CUSTOMISE_OPEN: AtomicBool = AtomicBool::new(false);
+static READER_APPEARANCE_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// 选中文字的高亮色槽位：0=青 1=蓝 2=橙 3=黄。
 static SELECTION_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(0));
@@ -3377,7 +3379,18 @@ fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) ->
     } else {
         above.clamp(min_y, max_y)
     };
-    (dvec2(x, y), popup_width)
+    (dvec2(x, y.clamp(min_y, max_y)), popup_width)
+}
+
+fn reader_overlay_viewport(viewport: Rect, size: DVec2, safe: SafeAreaInsets) -> Rect {
+    let left = viewport.pos.x.max(safe.left);
+    let top = viewport.pos.y.max(safe.top);
+    let right = (viewport.pos.x + viewport.size.x).min(size.x - safe.right);
+    let bottom = (viewport.pos.y + viewport.size.y).min(size.y - safe.bottom);
+    Rect {
+        pos: dvec2(left, top),
+        size: dvec2((right - left).max(0.0), (bottom - top).max(0.0)),
+    }
 }
 
 fn word_card_geometry(viewport: Rect, anchor: DVec2, card_height: f64) -> (DVec2, f64) {
@@ -3603,7 +3616,8 @@ fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
         let slot = *crate::mark_span::HL_SLOT.read().unwrap();
-        let color = crate::mark_span::HL_COLOR_NAMES[slot.min(3)];
+        let names = crate::mark_span::HL_COLOR_NAMES;
+        let color = names[slot.min(names.len() - 1)];
         let ((sb, sc), (eb, ec)) = range;
         match db.add_highlight(&book_id, chapter, (sb, sc, eb, ec), color) {
             Ok(id) => {
@@ -4303,6 +4317,47 @@ mod selection_popup_tests {
     }
 
     #[test]
+    fn wrapped_selection_actions_stay_inside_mobile_safe_areas() {
+        for (size, safe) in [
+            (
+                dvec2(320.0, 568.0),
+                SafeAreaInsets {
+                    top: 24.0,
+                    bottom: 34.0,
+                    ..SafeAreaInsets::default()
+                },
+            ),
+            (
+                dvec2(844.0, 390.0),
+                SafeAreaInsets {
+                    left: 44.0,
+                    right: 44.0,
+                    bottom: 21.0,
+                    ..SafeAreaInsets::default()
+                },
+            ),
+        ] {
+            let viewport = reader_overlay_viewport(
+                Rect {
+                    pos: dvec2(0.0, 0.0),
+                    size,
+                },
+                size,
+                safe,
+            );
+            for anchor in [dvec2(0.0, 0.0), size * 0.5, size, size + dvec2(20.0, 20.0)] {
+                for height in [88.0, 126.0] {
+                    let (position, width) = selection_popup_geometry(viewport, anchor, height);
+                    assert!(position.x >= safe.left);
+                    assert!(position.y >= safe.top);
+                    assert!(position.x + width <= size.x - safe.right);
+                    assert!(position.y + height <= size.y - safe.bottom);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn word_card_stays_near_the_clicked_word() {
         let viewport = Rect {
             pos: dvec2(100.0, 80.0),
@@ -4747,6 +4802,143 @@ enum LocalAiAction {
 enum ReaderSettingsAction {
     Saved,
     Error(String),
+}
+
+/// Non-modal aA content and the modal draft editor both own user input, while
+/// draw/measure/reload events must still reach the chapter underneath them.
+fn reader_colour_panel_blocks_event(
+    appearance_open: bool,
+    customise_open: bool,
+    event: &Event,
+) -> bool {
+    (appearance_open || customise_open)
+        && matches!(
+            event,
+            Event::MouseDown(_)
+                | Event::MouseMove(_)
+                | Event::MouseUp(_)
+                | Event::Scroll(_)
+                | Event::TouchUpdate(_)
+                | Event::LongPress(_)
+                | Event::KeyDown(_)
+                | Event::KeyUp(_)
+        )
+}
+
+/// A future highlighter choice has no effect on the geometry or existing marks.
+fn reader_customise_change_is_highlight_only(
+    current: &ReaderSettings,
+    draft: &ReaderSettings,
+) -> bool {
+    let mut expected = current.clone();
+    expected.highlight_color_slot = draft.highlight_color_slot;
+    current.highlight_color_slot != draft.highlight_color_slot && expected == *draft
+}
+
+#[cfg(test)]
+mod customise_highlight_tests {
+    use super::*;
+
+    #[test]
+    fn appearance_scrolling_cannot_reach_the_chapter_but_reload_still_can() {
+        use makepad_widgets::makepad_platform::event::{ScrollEvent, TouchUpdateEvent};
+        let scroll = Event::Scroll(ScrollEvent {
+            window_id: WindowId(0, 0),
+            scroll: dvec2(0.0, 120.0),
+            abs: dvec2(600.0, 200.0),
+            modifiers: Default::default(),
+            handled_x: Default::default(),
+            handled_y: Default::default(),
+            is_mouse: true,
+            time: 1.0,
+        });
+        let touch = Event::TouchUpdate(TouchUpdateEvent {
+            window_id: WindowId(0, 0),
+            time: 1.0,
+            modifiers: Default::default(),
+            touches: vec![],
+        });
+        for (appearance, customise) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            for event in [&scroll, &touch] {
+                assert_eq!(
+                    reader_colour_panel_blocks_event(appearance, customise, event),
+                    appearance || customise
+                );
+            }
+            for event in [&Event::LiveEdit, &Event::ScriptReapply] {
+                assert!(!reader_colour_panel_blocks_event(
+                    appearance, customise, event
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn choosing_a_marker_needs_no_chapter_or_layout_rebuild() {
+        let current = ReaderSettings::default();
+        for slot in crate::mark_span::MARKER_SLOTS {
+            let mut draft = current.clone();
+            draft.highlight_color_slot = slot;
+            assert_eq!(
+                reader_customise_change_is_highlight_only(&current, &draft),
+                slot != current.highlight_color_slot
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_layout_changes_still_use_the_full_settings_apply_path() {
+        let current = ReaderSettings::default();
+        let mut draft = current.clone();
+        draft.highlight_color_slot = 7;
+        draft.font_size = Some(18.0);
+        assert!(!reader_customise_change_is_highlight_only(&current, &draft));
+        draft.font_size = current.font_size;
+        draft.gloss_enabled = !current.gloss_enabled;
+        assert!(!reader_customise_change_is_highlight_only(&current, &draft));
+    }
+}
+
+fn settings_swatch_rows(settings: &ReaderSettings) -> [([LiveId; 4], LiveId, ColorKind, usize); 6] {
+    [
+        (
+            [id!(gc0), id!(gc1), id!(gc2), id!(gc3)],
+            id!(gloss_color_name),
+            ColorKind::Gloss,
+            settings.gloss_color_slot,
+        ),
+        (
+            [id!(gb0), id!(gb1), id!(gb2), id!(gb3)],
+            id!(gloss_bg_name),
+            ColorKind::Background,
+            settings.gloss_background_slot,
+        ),
+        (
+            [id!(wc0), id!(wc1), id!(wc2), id!(wc3)],
+            id!(word_color_name),
+            ColorKind::Word,
+            settings.word_color_slot,
+        ),
+        (
+            [id!(wb0), id!(wb1), id!(wb2), id!(wb3)],
+            id!(word_bg_name),
+            ColorKind::Background,
+            settings.word_background_slot,
+        ),
+        (
+            [id!(sc0), id!(sc1), id!(sc2), id!(sc3)],
+            id!(selection_color_name),
+            ColorKind::Selection,
+            settings.selection_color_slot,
+        ),
+        (
+            [id!(hc0), id!(hc1), id!(hc2), id!(hc3)],
+            id!(highlight_color_name),
+            ColorKind::Highlight,
+            settings.highlight_color_slot,
+        ),
+    ]
 }
 
 fn current_reader_settings() -> ReaderSettings {
@@ -5847,7 +6039,6 @@ script_mod! {
     }
 
     startup() do #(App::script_component(vm)){
-        swatch_inactive: theme.color_bg_container
         ui: Root{
             main_window := Window{
                 window.title: "ReadWise"
@@ -6213,17 +6404,24 @@ script_mod! {
                                         draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
-                                    reader_chat_list := mod.widgets.ChatList{reader_style: true}
+                                    reader_chat_list := mod.widgets.ChatList{
+                                        reader_style: true
+                                        list +: {
+                                            padding: Inset{left: 4 right: 4 top: 12 bottom: 12}
+                                        }
+                                    }
                                     reader_ai_composer := View{
                                         width: Fill height: Fit
                                         flow: Down spacing: 8
                                         reader_chat_input := TextInput{
-                                            width: Fill height: 42
+                                            width: Fill height: 56
+                                            is_multiline: true
+                                            submit_on_enter: true
                                             empty_text: "继续追问，按回车发送"
                                         }
                                         reader_ai_actions := View{
                                             width: Fill height: Fit
-                                            flow: Right spacing: 6
+                                            flow: Flow.Right{wrap: true} spacing: 6
                                             reader_chat_send := Button{width: 64 text: "发送"}
                                             reader_chat_cancel := ButtonFlat{
                                                 visible: false
@@ -6463,18 +6661,18 @@ script_mod! {
                                         flow: Down spacing: 5
                                         draw_bg.color: theme.color_bg_container
                                         draw_bg.border_radius: 10.0
-                                        selection_actions := ScrollXView{
-                                            width: Fill height: 38
-                                            flow: Right spacing: 6
+                                        selection_actions := View{
+                                            width: Fill height: Fit
+                                            flow: Flow.Right{wrap: true} spacing: 6
                                             align: Align{y: 0.5}
-                                            copy_sel_btn := ButtonFlat{text: "复制"}
-                                            note_from_sel_btn := ButtonFlat{text: "笔记"}
-                                            vocab_from_sel_btn := ButtonFlat{text: "生词"}
-                                            translate_sel_btn := ButtonFlat{text: "翻译"}
-                                            ask_ai_sel_btn := ButtonFlat{text: "问 AI"}
-                                            speak_sel_btn := ButtonFlat{text: "发音"}
-                                            hl_btn := ButtonFlat{text: "高亮"}
-                                            sel_close_btn := ButtonFlatter{text: "关闭"}
+                                            copy_sel_btn := ButtonFlat{height: 32 text: "复制"}
+                                            note_from_sel_btn := ButtonFlat{height: 32 text: "笔记"}
+                                            vocab_from_sel_btn := ButtonFlat{height: 32 text: "生词"}
+                                            translate_sel_btn := ButtonFlat{height: 32 text: "翻译"}
+                                            ask_ai_sel_btn := ButtonFlat{height: 32 text: "问 AI"}
+                                            speak_sel_btn := ButtonFlat{height: 32 text: "发音"}
+                                            hl_btn := ButtonFlat{height: 32 text: "高亮"}
+                                            sel_close_btn := ButtonFlatter{height: 32 text: "关闭"}
                                         }
                                         sel_hint := Label{
                                             visible: false
@@ -6552,7 +6750,7 @@ script_mod! {
                                     }
                                     reader_theme_menu := RoundedShadowView{
                                         visible: false
-                                        width: 316 height: Fit
+                                        width: 316 height: 356
                                         margin: Inset{top: 10}
                                         new_batch: true
                                         flow: Down spacing: 12 padding: 16
@@ -6561,25 +6759,67 @@ script_mod! {
                                         draw_bg.shadow_color: #0003
                                         draw_bg.shadow_radius: 16.0
                                         draw_bg.shadow_offset: vec2(0, 5)
-                                        reader_theme_title_row := View{
-                                            width: Fill height: Fit
-                                            align: HCenter
-                                            reader_theme_title := Label{
-                                                width: Fit height: Fit
-                                                text: "Themes & Settings"
-                                                draw_text.text_style.font_size: 15
+                                        reader_theme_scroll := ScrollYView{
+                                            width: Fill height: Fill
+                                            flow: Down spacing: 12
+                                            reader_theme_title_row := View{
+                                                width: Fill height: Fit
+                                                align: HCenter
+                                                reader_theme_title := Label{
+                                                    width: Fit height: Fit
+                                                    text: "Themes & Settings"
+                                                    draw_text.text_style.font_size: 15
+                                                }
                                             }
-                                        }
-                                        reader_theme_modes := View{
-                                            width: Fill height: Fit
-                                            flow: Flow.Right{wrap: true}
-                                            spacing: 7
-                                            reader_mode_original := ButtonFlat{width: 88 height: 42 text: "Original"}
-                                            reader_mode_quiet := ButtonFlat{width: 88 height: 42 text: "Quiet"}
-                                            reader_mode_paper := ButtonFlat{width: 88 height: 42 text: "Paper"}
-                                            reader_mode_bold := ButtonFlat{width: 88 height: 42 text: "Bold"}
-                                            reader_mode_calm := ButtonFlat{width: 88 height: 42 text: "Calm"}
-                                            reader_mode_focus := ButtonFlat{width: 88 height: 42 text: "Focus"}
+                                            reader_theme_modes := View{
+                                                width: Fill height: Fit
+                                                flow: Flow.Right{wrap: true}
+                                                spacing: 7
+                                                reader_mode_original := ButtonFlat{width: 88 height: 42 text: "Original"}
+                                                reader_mode_quiet := ButtonFlat{width: 88 height: 42 text: "Quiet"}
+                                                reader_mode_paper := ButtonFlat{width: 88 height: 42 text: "Paper"}
+                                                reader_mode_bold := ButtonFlat{width: 88 height: 42 text: "Bold"}
+                                                reader_mode_calm := ButtonFlat{width: 88 height: 42 text: "Calm"}
+                                                reader_mode_focus := ButtonFlat{width: 88 height: 42 text: "Focus"}
+                                            }
+                                            reader_quick_pen_row := View{
+                                                width: Fill height: Fit
+                                                flow: Flow.Right{wrap: true} spacing: 4 align: Align{y: 0.5}
+                                                reader_quick_pen_title := View{
+                                                    width: 56 height: 44 flow: Down align: Align{y: 0.5}
+                                                    reader_quick_pen_label := mod.widgets.SettingsColorTitle{
+                                                        width: Fill height: Fit margin: 0 padding: 0 text: "Pen"
+                                                        draw_text.text_style.font_size: 11
+                                                    }
+                                                }
+                                                reader_quick_pen_options := mod.widgets.SettingsColorPicker{
+                                                    width: 224 spacing: 0
+                                                    reader_quick_pen_vermilion := mod.widgets.SettingsColorSwatch{}
+                                                    reader_quick_pen_cobalt := mod.widgets.SettingsColorSwatch{}
+                                                    reader_quick_pen_moss := mod.widgets.SettingsColorSwatch{}
+                                                    reader_quick_pen_graphite := mod.widgets.SettingsColorSwatch{}
+                                                    reader_quick_pen_name := mod.widgets.SettingsColorName{width: 48 margin: 0 padding: 0}
+                                                }
+                                            }
+                                            reader_quick_highlight_row := View{
+                                                width: Fill height: Fit
+                                                flow: Flow.Right{wrap: true} spacing: 4 align: Align{y: 0.5}
+                                                reader_quick_highlight_title := View{
+                                                    width: 56 height: 44 flow: Down align: Align{y: 0.5}
+                                                    reader_quick_highlight_label := mod.widgets.SettingsColorTitle{
+                                                        width: Fill height: Fit margin: 0 padding: 0 text: "Highlighter"
+                                                        draw_text.text_style.font_size: 11
+                                                    }
+                                                }
+                                                reader_quick_highlight_options := mod.widgets.SettingsColorPicker{
+                                                    width: 224 spacing: 0
+                                                    reader_quick_highlight_yellow := mod.widgets.SettingsColorSwatch{}
+                                                    reader_quick_highlight_green := mod.widgets.SettingsColorSwatch{}
+                                                    reader_quick_highlight_blue := mod.widgets.SettingsColorSwatch{}
+                                                    reader_quick_highlight_pink := mod.widgets.SettingsColorSwatch{}
+                                                    reader_quick_highlight_name := mod.widgets.SettingsColorName{width: 48 margin: 0 padding: 0}
+                                                }
+                                            }
                                         }
                                         reader_customise_btn := ButtonFlat{
                                             width: Fill height: 42
@@ -7214,43 +7454,51 @@ script_mod! {
                             }
                             gloss_color_row := View{
                                 width: Fill height: Fit
-                                spacing: 12
-                                align: Align{ y: 0.5 }
-                                gloss_color_title := Label{ text: "注音字色" }
-                                gc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
-                                gc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
-                                gc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
-                                gc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "灰" } }
+                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                gloss_color_title := mod.widgets.SettingsColorTitle{text: "注音字色"}
+                                gloss_color_picker := mod.widgets.SettingsColorPicker{
+                                    gc0 := mod.widgets.SettingsColorSwatch{}
+                                    gc1 := mod.widgets.SettingsColorSwatch{}
+                                    gc2 := mod.widgets.SettingsColorSwatch{}
+                                    gc3 := mod.widgets.SettingsColorSwatch{}
+                                    gloss_color_name := mod.widgets.SettingsColorName{text: "青"}
+                                }
                             }
                             gloss_bg_row := View{
                                 width: Fill height: Fit
-                                spacing: 12
-                                align: Align{ y: 0.5 }
-                                gloss_bg_title := Label{ text: "注音背景" }
-                                gb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "无" } }
-                                gb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深灰" } }
-                                gb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深青" } }
-                                gb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深蓝" } }
+                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                gloss_bg_title := mod.widgets.SettingsColorTitle{text: "注音背景"}
+                                gloss_bg_picker := mod.widgets.SettingsColorPicker{
+                                    gb0 := mod.widgets.SettingsColorSwatch{}
+                                    gb1 := mod.widgets.SettingsColorSwatch{}
+                                    gb2 := mod.widgets.SettingsColorSwatch{}
+                                    gb3 := mod.widgets.SettingsColorSwatch{}
+                                    gloss_bg_name := mod.widgets.SettingsColorName{text: "无"}
+                                }
                             }
                             word_color_row := View{
                                 width: Fill height: Fit
-                                spacing: 12
-                                align: Align{ y: 0.5 }
-                                word_color_title := Label{ text: "词字色" }
-                                wc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "默认" } }
-                                wc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
-                                wc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
-                                wc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
+                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                word_color_title := mod.widgets.SettingsColorTitle{text: "词字色"}
+                                word_color_picker := mod.widgets.SettingsColorPicker{
+                                    wc0 := mod.widgets.SettingsColorSwatch{}
+                                    wc1 := mod.widgets.SettingsColorSwatch{}
+                                    wc2 := mod.widgets.SettingsColorSwatch{}
+                                    wc3 := mod.widgets.SettingsColorSwatch{}
+                                    word_color_name := mod.widgets.SettingsColorName{text: "默认"}
+                                }
                             }
                             word_bg_row := View{
                                 width: Fill height: Fit
-                                spacing: 12
-                                align: Align{ y: 0.5 }
-                                word_bg_title := Label{ text: "词背景" }
-                                wb0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "无" } }
-                                wb1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深灰" } }
-                                wb2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深青" } }
-                                wb3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "深蓝" } }
+                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                word_bg_title := mod.widgets.SettingsColorTitle{text: "词背景"}
+                                word_bg_picker := mod.widgets.SettingsColorPicker{
+                                    wb0 := mod.widgets.SettingsColorSwatch{}
+                                    wb1 := mod.widgets.SettingsColorSwatch{}
+                                    wb2 := mod.widgets.SettingsColorSwatch{}
+                                    wb3 := mod.widgets.SettingsColorSwatch{}
+                                    word_bg_name := mod.widgets.SettingsColorName{text: "无"}
+                                }
                             }
                             settings_text_heading := Label{
                                 text: "文本"
@@ -7259,23 +7507,27 @@ script_mod! {
                             }
                             sel_color_row := View{
                                 width: Fill height: Fit
-                                spacing: 12
-                                align: Align{ y: 0.5 }
-                                selection_color_title := Label{ text: "选中颜色" }
-                                sc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
-                                sc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
-                                sc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
-                                sc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "黄" } }
+                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                selection_color_title := mod.widgets.SettingsColorTitle{text: "选中颜色"}
+                                selection_color_picker := mod.widgets.SettingsColorPicker{
+                                    sc0 := mod.widgets.SettingsColorSwatch{}
+                                    sc1 := mod.widgets.SettingsColorSwatch{}
+                                    sc2 := mod.widgets.SettingsColorSwatch{}
+                                    sc3 := mod.widgets.SettingsColorSwatch{}
+                                    selection_color_name := mod.widgets.SettingsColorName{text: "青"}
+                                }
                             }
                             hl_color_row := View{
                                 width: Fill height: Fit
-                                spacing: 12
-                                align: Align{ y: 0.5 }
-                                highlight_color_title := Label{ text: "高亮颜色" }
-                                hc0 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "黄" } }
-                                hc1 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "青" } }
-                                hc2 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "蓝" } }
-                                hc3 := RoundedView{ width: Fit height: Fit padding: 2 draw_bg.border_radius: 6.0 draw_bg.color: theme.color_bg_container b := ButtonFlat{ text: "橙" } }
+                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                highlight_color_title := mod.widgets.SettingsColorTitle{text: "高亮颜色"}
+                                highlight_color_picker := mod.widgets.SettingsColorPicker{
+                                    hc0 := mod.widgets.SettingsColorSwatch{}
+                                    hc1 := mod.widgets.SettingsColorSwatch{}
+                                    hc2 := mod.widgets.SettingsColorSwatch{}
+                                    hc3 := mod.widgets.SettingsColorSwatch{}
+                                    highlight_color_name := mod.widgets.SettingsColorName{text: "黄"}
+                                }
                             }
                             settings_hint := Label{
                                 width: Fill
@@ -7601,6 +7853,19 @@ script_mod! {
                                         }
                                     }
                                     reader_customise_bold := CheckBox{text: "Bold Text"}
+                                    reader_customise_highlight_row := View{
+                                        width: Fill height: Fit flow: Right spacing: 8
+                                        align: Align{y: 0.5}
+                                        reader_customise_highlight_label := Label{width: 164 text: "Highlight Color"}
+                                        reader_customise_highlight_options := mod.widgets.SettingsColorPicker{
+                                            height: Fit
+                                            reader_customise_highlight_yellow := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_highlight_green := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_highlight_blue := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_highlight_pink := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_highlight_name := mod.widgets.SettingsColorName{text: "Yellow"}
+                                        }
+                                    }
                                     reader_customise_gloss_title := Label{
                                         text: "Word Annotations"
                                         draw_text.text_style.font_size: 13
@@ -7619,51 +7884,51 @@ script_mod! {
                                         }
                                     }
                                     reader_customise_gloss_color_row := View{
-                                        width: Fill height: Fit flow: Right spacing: 5
-                                        reader_customise_gloss_color_label := Label{width: Fill text: "Annotation Color"}
+                                        width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                        reader_customise_gloss_color_label := mod.widgets.SettingsColorTitle{width: 164 text: "Annotation Color"}
                                         reader_customise_gloss_color_options := View{
-                                            width: Fit height: Fit
-                                            flow: Right spacing: 5
-                                            reader_customise_gloss_color_green := ButtonFlat{text: "Green"}
-                                            reader_customise_gloss_color_blue := ButtonFlat{text: "Blue"}
-                                            reader_customise_gloss_color_orange := ButtonFlat{text: "Orange"}
-                                            reader_customise_gloss_color_gray := ButtonFlat{text: "Gray"}
+                                            width: Fit height: Fit flow: Right spacing: 4 align: Align{y: 0.5}
+                                            reader_customise_gloss_color_green := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_gloss_color_blue := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_gloss_color_orange := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_gloss_color_gray := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_gloss_color_name := mod.widgets.SettingsColorName{}
                                         }
                                     }
                                     reader_customise_gloss_bg_row := View{
-                                        width: Fill height: Fit flow: Right spacing: 5
-                                        reader_customise_gloss_bg_label := Label{width: Fill text: "Annotation Background"}
+                                        width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                        reader_customise_gloss_bg_label := mod.widgets.SettingsColorTitle{width: 164 text: "Annotation Background"}
                                         reader_customise_gloss_bg_options := View{
-                                            width: Fit height: Fit
-                                            flow: Right spacing: 5
-                                            reader_customise_gloss_bg_none := ButtonFlat{text: "None"}
-                                            reader_customise_gloss_bg_gray := ButtonFlat{text: "Gray"}
-                                            reader_customise_gloss_bg_green := ButtonFlat{text: "Green"}
-                                            reader_customise_gloss_bg_blue := ButtonFlat{text: "Blue"}
+                                            width: Fit height: Fit flow: Right spacing: 4 align: Align{y: 0.5}
+                                            reader_customise_gloss_bg_none := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_gloss_bg_gray := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_gloss_bg_green := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_gloss_bg_blue := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_gloss_bg_name := mod.widgets.SettingsColorName{}
                                         }
                                     }
                                     reader_customise_word_color_row := View{
-                                        width: Fill height: Fit flow: Right spacing: 5
-                                        reader_customise_word_color_label := Label{width: Fill text: "Word Color"}
+                                        width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                        reader_customise_word_color_label := mod.widgets.SettingsColorTitle{width: 164 text: "Word Color"}
                                         reader_customise_word_color_options := View{
-                                            width: Fit height: Fit
-                                            flow: Right spacing: 5
-                                            reader_customise_word_color_default := ButtonFlat{text: "Default"}
-                                            reader_customise_word_color_green := ButtonFlat{text: "Green"}
-                                            reader_customise_word_color_blue := ButtonFlat{text: "Blue"}
-                                            reader_customise_word_color_orange := ButtonFlat{text: "Orange"}
+                                            width: Fit height: Fit flow: Right spacing: 4 align: Align{y: 0.5}
+                                            reader_customise_word_color_default := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_word_color_green := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_word_color_blue := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_word_color_orange := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_word_color_name := mod.widgets.SettingsColorName{}
                                         }
                                     }
                                     reader_customise_word_bg_row := View{
-                                        width: Fill height: Fit flow: Right spacing: 5
-                                        reader_customise_word_bg_label := Label{width: Fill text: "Word Background"}
+                                        width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                        reader_customise_word_bg_label := mod.widgets.SettingsColorTitle{width: 164 text: "Word Background"}
                                         reader_customise_word_bg_options := View{
-                                            width: Fit height: Fit
-                                            flow: Right spacing: 5
-                                            reader_customise_word_bg_none := ButtonFlat{text: "None"}
-                                            reader_customise_word_bg_gray := ButtonFlat{text: "Gray"}
-                                            reader_customise_word_bg_green := ButtonFlat{text: "Green"}
-                                            reader_customise_word_bg_blue := ButtonFlat{text: "Blue"}
+                                            width: Fit height: Fit flow: Right spacing: 4 align: Align{y: 0.5}
+                                            reader_customise_word_bg_none := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_word_bg_gray := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_word_bg_green := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_word_bg_blue := mod.widgets.SettingsColorSwatch{}
+                                            reader_customise_word_bg_name := mod.widgets.SettingsColorName{}
                                         }
                                     }
                                     reader_customise_layout_title := Label{
@@ -9791,12 +10056,8 @@ impl ChapterList {
             .read()
             .unwrap()
             .unwrap_or(self.font_default_size);
-        let selection_color = Vec4f::from_u32(match *SELECTION_SLOT.read().unwrap() {
-            1 => 0x4a90_d988,
-            2 => 0xe887_5a88,
-            3 => 0xd9c9_6a88,
-            _ => 0x7fb2_a688,
-        });
+        let selection_color =
+            crate::settings_swatch::selection_color(*SELECTION_SLOT.read().unwrap());
         self.draw_reader_selection.color = selection_color;
         let selection_range = *SEL_RANGE.read().unwrap();
         let chapter_idx = CURRENT_CHAPTER.load(Ordering::Relaxed);
@@ -10369,19 +10630,11 @@ impl Widget for ChapterList {
         ) {
             self.cancel_reader_tap(cx);
         }
-        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
-            && matches!(
-                event,
-                Event::MouseDown(_)
-                    | Event::MouseMove(_)
-                    | Event::MouseUp(_)
-                    | Event::Scroll(_)
-                    | Event::TouchUpdate(_)
-                    | Event::LongPress(_)
-                    | Event::KeyDown(_)
-                    | Event::KeyUp(_)
-            )
-        {
+        if reader_colour_panel_blocks_event(
+            READER_APPEARANCE_OPEN.load(Ordering::Acquire),
+            READER_CUSTOMISE_OPEN.load(Ordering::Acquire),
+            event,
+        ) {
             self.cancel_reader_tap(cx);
             return;
         }
@@ -10875,11 +11128,18 @@ struct ChatList {
     #[rust]
     last_style: Option<(AppLanguage, ReaderBackground, ReaderTheme)>,
     #[rust]
+    last_width: Option<f64>,
+    #[rust]
     alternate_template: bool,
 }
 
 impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let width = cx.peek_walk_turtle(walk).size.x;
+        let width_changed = self.last_width.is_none_or(|old| (old - width).abs() > 0.5);
+        // Reading AI is also a narrow desktop sidebar. Reserve a small,
+        // proportional gutter instead of the main chat's fixed 90px margin.
+        let reader_message_inset = ((width - 8.0).max(0.0) * 0.06).min(24.0);
         let data = CHAT_DATA.read().unwrap();
         let language = *APP_LANGUAGE.read().unwrap();
         let background = *READER_BACKGROUND.read().unwrap();
@@ -10890,10 +11150,10 @@ impl Widget for ChatList {
         let streaming_changed = self.was_streaming != data.is_streaming
             || self.last_streaming_revision != data.streaming_revision;
         let palette = reader_scene_palette(background, theme);
-        if thread_changed || style_changed {
+        if thread_changed || style_changed || width_changed {
             // A script reload may reset a cached row's measured height to a
             // single line. Recreate only the visible rows when the whole
-            // conversation or its layout style changes.
+            // conversation, layout style or available width changes.
             self.alternate_template = !self.alternate_template;
         }
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
@@ -10908,7 +11168,20 @@ impl Widget for ChatList {
                             id!(Assistant)
                         };
                         let (item, existed) = list.item_with_existed(cx, item_id, template);
-                        if !existed || thread_changed || style_changed || streaming_changed {
+                        if !existed
+                            || thread_changed
+                            || style_changed
+                            || width_changed
+                            || streaming_changed
+                        {
+                            if self.reader_style {
+                                if let Some(mut row) = item.borrow_mut::<View>() {
+                                    row.walk.margin = Inset {
+                                        right: reader_message_inset,
+                                        ..Inset::default()
+                                    };
+                                }
+                            }
                             let text = if data.streaming_text.is_empty() {
                                 if language == AppLanguage::English {
                                     "Thinking…"
@@ -10943,7 +11216,26 @@ impl Widget for ChatList {
                     let (item, existed) = list.item_with_existed(cx, item_id, template);
                     let finished_stream_row =
                         self.was_streaming && !data.is_streaming && item_id + 1 == message_count;
-                    if !existed || thread_changed || style_changed || finished_stream_row {
+                    if !existed
+                        || thread_changed
+                        || style_changed
+                        || width_changed
+                        || finished_stream_row
+                    {
+                        if self.reader_style {
+                            if let Some(mut row) = item.borrow_mut::<View>() {
+                                row.walk.margin = match message.role {
+                                    ChatRole::User => Inset {
+                                        left: reader_message_inset,
+                                        ..Inset::default()
+                                    },
+                                    ChatRole::Assistant => Inset {
+                                        right: reader_message_inset,
+                                        ..Inset::default()
+                                    },
+                                };
+                            }
+                        }
                         item.label(cx, ids!(message)).set_text(cx, &message.text);
                         let background = match message.role {
                             ChatRole::User if self.reader_style => palette.field,
@@ -10962,6 +11254,7 @@ impl Widget for ChatList {
         self.last_streaming_revision = data.streaming_revision;
         self.was_streaming = data.is_streaming;
         self.last_style = Some(style);
+        self.last_width = Some(width);
         if style_changed {
             cx.cx.redraw_all();
         }
@@ -11561,8 +11854,6 @@ pub struct App {
     source: ScriptObjectRef,
     #[live]
     ui: WidgetRef,
-    #[live]
-    swatch_inactive: Vec4f,
     #[rust]
     reload_count: usize,
     #[rust]
@@ -11595,6 +11886,8 @@ pub struct App {
     import_picker_frame: Option<NextFrame>,
     #[rust]
     reader_code_refresh_frame: Option<NextFrame>,
+    #[rust]
+    selection_popup_layout_frame: Option<NextFrame>,
     #[rust]
     import_dialog_open: bool,
     #[rust]
@@ -12062,6 +12355,7 @@ impl App {
             id!(reader_customise_font_row),
             id!(reader_customise_size_row),
             id!(reader_customise_gloss_size_row),
+            id!(reader_customise_highlight_row),
             id!(reader_customise_gloss_color_row),
             id!(reader_customise_gloss_bg_row),
             id!(reader_customise_word_color_row),
@@ -12085,6 +12379,7 @@ impl App {
             };
         }
         for id in [
+            id!(reader_customise_highlight_options),
             id!(reader_customise_gloss_color_options),
             id!(reader_customise_gloss_bg_options),
             id!(reader_customise_word_color_options),
@@ -12103,6 +12398,11 @@ impl App {
         for id in [
             id!(reader_customise_size_label),
             id!(reader_customise_gloss_size_label),
+            id!(reader_customise_highlight_label),
+            id!(reader_customise_gloss_color_label),
+            id!(reader_customise_gloss_bg_label),
+            id!(reader_customise_word_color_label),
+            id!(reader_customise_word_bg_label),
             id!(reader_customise_line_label),
             id!(reader_customise_character_label),
             id!(reader_customise_word_label),
@@ -12163,8 +12463,15 @@ impl App {
         self.pending_customise_preview_after_draw = false;
         self.ui.modal(cx, ids!(reader_customise_modal)).close(cx);
         if let Some(settings) = draft {
-            if settings != current_reader_settings() {
-                self.apply_reader_settings(cx, settings);
+            let current = current_reader_settings();
+            if settings != current {
+                if reader_customise_change_is_highlight_only(&current, &settings) {
+                    *crate::mark_span::HL_SLOT.write().unwrap() = settings.highlight_color_slot;
+                    self.refresh_swatches(cx);
+                    self.ui.redraw(cx);
+                } else {
+                    self.apply_reader_settings(cx, settings);
+                }
                 self.persist_reader_settings(cx);
             }
         }
@@ -12518,11 +12825,72 @@ impl App {
         for id in [id!(reader_panel_layer), id!(reader_theme_layer)] {
             let widget = self.ui.widget(cx, &[id]);
             if let Some(mut view) = widget.borrow_mut::<View>() {
-                if view.layout.padding.top != top {
-                    view.layout.padding.top = top;
-                    view.redraw(cx);
+                view.layout.padding.top = top;
+                if id == id!(reader_theme_layer) {
+                    view.layout.padding.left = if self.compact_layout {
+                        self.safe_area_insets.left + 12.0
+                    } else {
+                        0.0
+                    };
+                    view.layout.padding.right = if self.compact_layout {
+                        self.safe_area_insets.right + 12.0
+                    } else {
+                        18.0
+                    };
                 }
+                view.redraw(cx);
             };
+        }
+        // Short landscape windows scroll the theme/colour content, not the fixed
+        // Customise action. Account for the actual overlay origin and safe area.
+        let layer_top = self
+            .ui
+            .widget(cx, ids!(reader_theme_layer))
+            .area()
+            .rect(cx)
+            .pos
+            .y;
+        let popup_top = layer_top.max(self.safe_area_insets.top) + top + 10.0;
+        let available =
+            (self.responsive_window_size.y - self.safe_area_insets.bottom - popup_top - 12.0)
+                .max(1.0);
+        let width = if self.compact_layout {
+            (self.responsive_window_size.x
+                - self.safe_area_insets.left
+                - self.safe_area_insets.right
+                - 24.0)
+                .clamp(1.0, 316.0)
+        } else {
+            316.0
+        };
+        let stacked = width < 316.0;
+        for id in [
+            id!(reader_quick_pen_title),
+            id!(reader_quick_highlight_title),
+        ] {
+            let mut label = self.ui.widget(cx, &[id]);
+            let height = if stacked {
+                Size::fit()
+            } else {
+                Size::Fixed(44.0)
+            };
+            script_apply_eval!(cx, label, {height: #(height)});
+        }
+        let natural_height: f64 = if stacked { 400.0 } else { 356.0 };
+        let height = natural_height.min(available);
+        let mut menu = self.ui.widget(cx, ids!(reader_theme_menu));
+        script_apply_eval!(cx, menu, {width: #(width) height: #(height)});
+        let mode_width = ((width - 32.0 - 14.0) / 3.0).clamp(44.0, 88.0);
+        for id in [
+            id!(reader_mode_original),
+            id!(reader_mode_quiet),
+            id!(reader_mode_paper),
+            id!(reader_mode_bold),
+            id!(reader_mode_calm),
+            id!(reader_mode_focus),
+        ] {
+            let mut button = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, button, {width: #(mode_width)});
         }
     }
 
@@ -12599,7 +12967,7 @@ impl App {
         let mut menu = self.ui.widget(cx, ids!(reader_theme_menu));
         let menu_width = if compact {
             (size.x - self.safe_area_insets.left - self.safe_area_insets.right - 24.0)
-                .clamp(180.0, 316.0)
+                .clamp(1.0, 316.0)
         } else {
             316.0
         };
@@ -13281,33 +13649,143 @@ impl App {
         }
     }
 
-    fn paint_customise_choice(
+    fn paint_color_swatch(
         &self,
         cx: &mut Cx,
         id: LiveId,
+        color: Vec4f,
         selected: bool,
         palette: ReaderScenePalette,
     ) {
-        let fill = if selected {
-            palette.hover
-        } else {
-            palette.field
-        };
-        let border = if selected {
-            palette.accent
-        } else {
-            palette.border
-        };
+        let ring_width = if selected { 1.4 } else { 0.0 };
+        let ring_color = palette.muted;
         let mut button = self.ui.widget(cx, &[id]);
         script_apply_eval!(cx, button, {
             draw_bg +: {
-                color: #(fill)
-                color_focus: #(fill)
-                border_color: #(border)
-                border_color_focus: #(border)
-                border_size: 1.0
+                color: #(color)
+                border_color: #(ring_color)
+                border_size: #(ring_width)
             }
         });
+    }
+
+    fn sync_reader_quick_colors(&self, cx: &mut Cx) {
+        let settings = current_reader_settings();
+        let palette = reader_scene_palette(settings.background, settings.theme);
+        for (cells, name, label, kind, selected, slots) in [
+            (
+                [
+                    id!(reader_quick_pen_vermilion),
+                    id!(reader_quick_pen_cobalt),
+                    id!(reader_quick_pen_moss),
+                    id!(reader_quick_pen_graphite),
+                ],
+                id!(reader_quick_pen_name),
+                id!(reader_quick_pen_label),
+                ColorKind::Selection,
+                settings.selection_color_slot,
+                crate::settings_swatch::PEN_SLOTS,
+            ),
+            (
+                [
+                    id!(reader_quick_highlight_yellow),
+                    id!(reader_quick_highlight_green),
+                    id!(reader_quick_highlight_blue),
+                    id!(reader_quick_highlight_pink),
+                ],
+                id!(reader_quick_highlight_name),
+                id!(reader_quick_highlight_label),
+                ColorKind::Highlight,
+                settings.highlight_color_slot,
+                crate::mark_span::MARKER_SLOTS,
+            ),
+        ] {
+            for (cell, slot) in cells.into_iter().zip(slots) {
+                self.paint_color_swatch(
+                    cx,
+                    cell,
+                    kind.color(slot, palette.text),
+                    selected == slot,
+                    palette,
+                );
+            }
+            self.ui
+                .widget(cx, &[name])
+                .set_text(cx, kind.name(selected, app_language()));
+            for id in [name, label] {
+                apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
+            }
+        }
+    }
+
+    fn sync_reader_customise_annotation_colors(&self, cx: &mut Cx, settings: &ReaderSettings) {
+        let palette = reader_scene_palette(settings.background, settings.theme);
+        for (cells, name, label, kind, selected) in [
+            (
+                [
+                    id!(reader_customise_gloss_color_green),
+                    id!(reader_customise_gloss_color_blue),
+                    id!(reader_customise_gloss_color_orange),
+                    id!(reader_customise_gloss_color_gray),
+                ],
+                id!(reader_customise_gloss_color_name),
+                id!(reader_customise_gloss_color_label),
+                ColorKind::Gloss,
+                settings.gloss_color_slot,
+            ),
+            (
+                [
+                    id!(reader_customise_gloss_bg_none),
+                    id!(reader_customise_gloss_bg_gray),
+                    id!(reader_customise_gloss_bg_green),
+                    id!(reader_customise_gloss_bg_blue),
+                ],
+                id!(reader_customise_gloss_bg_name),
+                id!(reader_customise_gloss_bg_label),
+                ColorKind::Background,
+                settings.gloss_background_slot,
+            ),
+            (
+                [
+                    id!(reader_customise_word_color_default),
+                    id!(reader_customise_word_color_green),
+                    id!(reader_customise_word_color_blue),
+                    id!(reader_customise_word_color_orange),
+                ],
+                id!(reader_customise_word_color_name),
+                id!(reader_customise_word_color_label),
+                ColorKind::Word,
+                settings.word_color_slot,
+            ),
+            (
+                [
+                    id!(reader_customise_word_bg_none),
+                    id!(reader_customise_word_bg_gray),
+                    id!(reader_customise_word_bg_green),
+                    id!(reader_customise_word_bg_blue),
+                ],
+                id!(reader_customise_word_bg_name),
+                id!(reader_customise_word_bg_label),
+                ColorKind::Background,
+                settings.word_background_slot,
+            ),
+        ] {
+            for (slot, cell) in cells.into_iter().enumerate() {
+                self.paint_color_swatch(
+                    cx,
+                    cell,
+                    kind.color(slot, palette.text),
+                    selected == slot,
+                    palette,
+                );
+            }
+            self.ui
+                .widget(cx, &[name])
+                .set_text(cx, kind.name(selected, app_language()));
+            for id in [name, label] {
+                apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
+            }
+        }
     }
 
     fn sync_reader_customise_font_labels(
@@ -13327,6 +13805,37 @@ impl App {
         choice.set_selected_item(cx, font.index());
     }
 
+    fn sync_reader_customise_highlighter(&self, cx: &mut Cx, settings: &ReaderSettings) {
+        let palette = reader_scene_palette(settings.background, settings.theme);
+        let cells = [
+            id!(reader_customise_highlight_yellow),
+            id!(reader_customise_highlight_green),
+            id!(reader_customise_highlight_blue),
+            id!(reader_customise_highlight_pink),
+        ];
+        for (id, slot) in cells.into_iter().zip(crate::mark_span::MARKER_SLOTS) {
+            self.paint_color_swatch(
+                cx,
+                id,
+                ColorKind::Highlight.color(slot, palette.text),
+                settings.highlight_color_slot == slot,
+                palette,
+            );
+        }
+        self.ui
+            .widget(cx, ids!(reader_customise_highlight_name))
+            .set_text(
+                cx,
+                ColorKind::Highlight.name(settings.highlight_color_slot, app_language()),
+            );
+        for id in [
+            id!(reader_customise_highlight_label),
+            id!(reader_customise_highlight_name),
+        ] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
+        }
+    }
+
     fn sync_reader_customise_controls(&self, cx: &mut Cx) {
         let settings = self
             .reader_customise_draft
@@ -13334,6 +13843,8 @@ impl App {
             .unwrap_or_else(current_reader_settings);
         let background = settings.background;
         let palette = reader_scene_palette(background, settings.theme);
+        self.sync_reader_customise_highlighter(cx, &settings);
+        self.sync_reader_customise_annotation_colors(cx, &settings);
         let font = settings.font;
         let columns = settings.columns;
         let spacing = settings.spacing;
@@ -13408,74 +13919,6 @@ impl App {
                     ReaderColumns::Auto => 2,
                 },
             );
-        for (id, selected) in [
-            (
-                id!(reader_customise_gloss_color_green),
-                settings.gloss_color_slot == 0,
-            ),
-            (
-                id!(reader_customise_gloss_color_blue),
-                settings.gloss_color_slot == 1,
-            ),
-            (
-                id!(reader_customise_gloss_color_orange),
-                settings.gloss_color_slot == 2,
-            ),
-            (
-                id!(reader_customise_gloss_color_gray),
-                settings.gloss_color_slot == 3,
-            ),
-            (
-                id!(reader_customise_gloss_bg_none),
-                settings.gloss_background_slot == 0,
-            ),
-            (
-                id!(reader_customise_gloss_bg_gray),
-                settings.gloss_background_slot == 1,
-            ),
-            (
-                id!(reader_customise_gloss_bg_green),
-                settings.gloss_background_slot == 2,
-            ),
-            (
-                id!(reader_customise_gloss_bg_blue),
-                settings.gloss_background_slot == 3,
-            ),
-            (
-                id!(reader_customise_word_color_default),
-                settings.word_color_slot == 0,
-            ),
-            (
-                id!(reader_customise_word_color_green),
-                settings.word_color_slot == 1,
-            ),
-            (
-                id!(reader_customise_word_color_blue),
-                settings.word_color_slot == 2,
-            ),
-            (
-                id!(reader_customise_word_color_orange),
-                settings.word_color_slot == 3,
-            ),
-            (
-                id!(reader_customise_word_bg_none),
-                settings.word_background_slot == 0,
-            ),
-            (
-                id!(reader_customise_word_bg_gray),
-                settings.word_background_slot == 1,
-            ),
-            (
-                id!(reader_customise_word_bg_green),
-                settings.word_background_slot == 2,
-            ),
-            (
-                id!(reader_customise_word_bg_blue),
-                settings.word_background_slot == 3,
-            ),
-        ] {
-            self.paint_customise_choice(cx, id, selected, palette);
-        }
         apply_reader_surface_palette(
             cx,
             self.ui.widget(cx, ids!(reader_preview)),
@@ -13762,39 +14205,6 @@ impl App {
         }
 
         for id in [
-            id!(gc0),
-            id!(gc1),
-            id!(gc2),
-            id!(gc3),
-            id!(gb0),
-            id!(gb1),
-            id!(gb2),
-            id!(gb3),
-            id!(wc0),
-            id!(wc1),
-            id!(wc2),
-            id!(wc3),
-            id!(wb0),
-            id!(wb1),
-            id!(wb2),
-            id!(wb3),
-            id!(sc0),
-            id!(sc1),
-            id!(sc2),
-            id!(sc3),
-            id!(hc0),
-            id!(hc1),
-            id!(hc2),
-            id!(hc3),
-        ] {
-            apply_reader_surface_palette(
-                cx,
-                self.ui.widget(cx, &[id]),
-                palette.surface,
-                palette.border,
-            );
-        }
-        for id in [
             id!(font_dec),
             id!(font_inc),
             id!(gloss_dec),
@@ -13929,6 +14339,18 @@ impl App {
             id!(card_hint),
             id!(library_rename_status),
             id!(reader_scroll_hint),
+            id!(gloss_color_title),
+            id!(gloss_color_name),
+            id!(gloss_bg_title),
+            id!(gloss_bg_name),
+            id!(word_color_title),
+            id!(word_color_name),
+            id!(word_bg_title),
+            id!(word_bg_name),
+            id!(selection_color_title),
+            id!(selection_color_name),
+            id!(highlight_color_title),
+            id!(highlight_color_name),
             id!(reader_customise_font_label),
             id!(reader_customise_size_label),
             id!(reader_customise_gloss_size_label),
@@ -13980,22 +14402,6 @@ impl App {
             id!(reader_customise_save),
             id!(reader_customise_font_choice),
             id!(reader_customise_columns_choice),
-            id!(reader_customise_gloss_color_green),
-            id!(reader_customise_gloss_color_blue),
-            id!(reader_customise_gloss_color_orange),
-            id!(reader_customise_gloss_color_gray),
-            id!(reader_customise_gloss_bg_none),
-            id!(reader_customise_gloss_bg_gray),
-            id!(reader_customise_gloss_bg_green),
-            id!(reader_customise_gloss_bg_blue),
-            id!(reader_customise_word_color_default),
-            id!(reader_customise_word_color_green),
-            id!(reader_customise_word_color_blue),
-            id!(reader_customise_word_color_orange),
-            id!(reader_customise_word_bg_none),
-            id!(reader_customise_word_bg_gray),
-            id!(reader_customise_word_bg_green),
-            id!(reader_customise_word_bg_blue),
             id!(reader_customise_reset),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
@@ -14045,6 +14451,7 @@ impl App {
             apply_reader_icon_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
         self.sync_reader_mode_controls(cx, background);
+        self.sync_reader_quick_colors(cx);
         self.sync_reader_customise_controls(cx);
         let popup_button_palette = ReaderScenePalette {
             field: palette.surface,
@@ -14320,12 +14727,15 @@ impl App {
         set_text!(reader_mode_calm, "reader_mode_calm");
         set_text!(reader_mode_focus, "reader_mode_focus");
         set_text!(reader_customise_btn, "reader_customise");
+        set_text!(reader_quick_pen_label, "reader_pen");
+        set_text!(reader_quick_highlight_label, "reader_highlighter");
         set_text!(reader_customise_title, "reader_customise");
         set_text!(reader_preview_heading, "reader_preview");
         set_text!(reader_customise_text_title, "text_section");
         set_text!(reader_customise_font_label, "reader_font");
         set_text!(reader_customise_size_label, "reader_text_size");
         set_text!(reader_customise_bold, "reader_bold_text");
+        set_text!(reader_customise_highlight_label, "highlight_color");
         set_text!(reader_customise_gloss_title, "reader_annotations");
         set_text!(reader_customise_gloss_enable, "reader_show_annotations");
         set_text!(reader_customise_gloss_size_label, "reader_annotation_size");
@@ -14349,40 +14759,6 @@ impl App {
         set_text!(reader_customise_reset, "reader_reset_theme");
         set_text!(reader_customise_cancel, "cancel");
         set_text!(reader_customise_save, "reader_save_apply");
-        for (id, key) in [
-            (
-                id!(reader_customise_gloss_color_green),
-                "reader_color_green",
-            ),
-            (id!(reader_customise_gloss_color_blue), "reader_color_blue"),
-            (
-                id!(reader_customise_gloss_color_orange),
-                "reader_color_orange",
-            ),
-            (id!(reader_customise_gloss_color_gray), "reader_color_gray"),
-            (id!(reader_customise_gloss_bg_none), "reader_color_none"),
-            (id!(reader_customise_gloss_bg_gray), "reader_color_gray"),
-            (id!(reader_customise_gloss_bg_green), "reader_color_green"),
-            (id!(reader_customise_gloss_bg_blue), "reader_color_blue"),
-            (
-                id!(reader_customise_word_color_default),
-                "reader_color_default",
-            ),
-            (id!(reader_customise_word_color_green), "reader_color_green"),
-            (id!(reader_customise_word_color_blue), "reader_color_blue"),
-            (
-                id!(reader_customise_word_color_orange),
-                "reader_color_orange",
-            ),
-            (id!(reader_customise_word_bg_none), "reader_color_none"),
-            (id!(reader_customise_word_bg_gray), "reader_color_gray"),
-            (id!(reader_customise_word_bg_green), "reader_color_green"),
-            (id!(reader_customise_word_bg_blue), "reader_color_blue"),
-        ] {
-            self.ui
-                .widget(cx, &[id])
-                .set_text(cx, crate::i18n::text(language, key));
-        }
         let columns = self.ui.drop_down(cx, ids!(reader_customise_columns_choice));
         columns.set_labels(
             cx,
@@ -14539,36 +14915,7 @@ impl App {
             set_text!(font_size_label, "default");
         }
 
-        for (id, key) in [
-            (id!(gc0), "cyan"),
-            (id!(gc1), "blue"),
-            (id!(gc2), "orange"),
-            (id!(gc3), "gray"),
-            (id!(gb0), "none"),
-            (id!(gb1), "dark_gray"),
-            (id!(gb2), "dark_cyan"),
-            (id!(gb3), "dark_blue"),
-            (id!(wc0), "default"),
-            (id!(wc1), "cyan"),
-            (id!(wc2), "blue"),
-            (id!(wc3), "orange"),
-            (id!(wb0), "none"),
-            (id!(wb1), "dark_gray"),
-            (id!(wb2), "dark_cyan"),
-            (id!(wb3), "dark_blue"),
-            (id!(sc0), "cyan"),
-            (id!(sc1), "blue"),
-            (id!(sc2), "orange"),
-            (id!(sc3), "yellow"),
-            (id!(hc0), "yellow"),
-            (id!(hc1), "cyan"),
-            (id!(hc2), "blue"),
-            (id!(hc3), "orange"),
-        ] {
-            self.ui
-                .widget(cx, &[id, id!(b)])
-                .set_text(cx, crate::i18n::text(language, key));
-        }
+        self.refresh_swatch_names(cx, language);
         self.ui
             .label(cx, ids!(settings_hint))
             .set_text(cx, crate::i18n::text(language, "reader_settings_saved"));
@@ -14734,7 +15081,7 @@ impl App {
     }
 
     fn track_reader_swipe(&mut self, cx: &mut Cx, event: &Event) -> Option<ReaderSwipeDirection> {
-        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
+        if self.reader_theme_open || READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
             self.reader_swipe.cancel();
             return None;
         }
@@ -14903,7 +15250,7 @@ impl App {
             .set_visible(cx, self.reader_ai_open);
 
         let widths = if self.compact_layout {
-            [Size::fill(); 6]
+            [Size::fill(); 5]
         } else {
             [
                 Size::Fixed(320.0),
@@ -14911,7 +15258,6 @@ impl App {
                 Size::Fixed(380.0),
                 Size::Fixed(340.0),
                 Size::Fixed(360.0),
-                Size::Fixed(520.0),
             ]
         };
         for (widget, width) in [
@@ -14920,7 +15266,6 @@ impl App {
             self.ui.widget(cx, ids!(note_popup)),
             self.ui.widget(cx, ids!(reader_search_panel)),
             self.ui.widget(cx, ids!(reader_ai_panel)),
-            self.ui.widget(cx, ids!(selection_popup)),
         ]
         .into_iter()
         .zip(widths)
@@ -14928,6 +15273,25 @@ impl App {
             if let Some(mut inner) = widget.borrow_mut::<View>() {
                 inner.walk.width = width;
             }
+        }
+        if let Some(mut panel) = self
+            .ui
+            .widget(cx, ids!(reader_ai_panel))
+            .borrow_mut::<View>()
+        {
+            let safe = if self.compact_layout {
+                self.safe_area_insets
+            } else {
+                SafeAreaInsets::default()
+            };
+            // The parent already reserves the top safe area. The full-width
+            // AI panel must reserve the side and bottom areas itself.
+            panel.layout.padding = Inset {
+                left: 12.0 + safe.left,
+                right: 12.0 + safe.right,
+                top: 12.0,
+                bottom: 12.0 + safe.bottom,
+            };
         }
         self.ui.widget(cx, ids!(reader_panel_layer)).redraw(cx);
         // Floating contents, bookmarks, notes and search leave the reader's
@@ -16659,7 +17023,7 @@ impl App {
 
     /// 视口翻屏；到底/到顶时跨章。
     fn page_scroll(&mut self, cx: &mut Cx, down: bool) {
-        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
+        if self.reader_theme_open || READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
             return;
         }
         if self.compact_layout {
@@ -16725,6 +17089,7 @@ impl App {
     /// 阅读页快捷键：空格/PgDn/→ 下一屏，PgUp/← 上一屏，Shift+←/→ 跨章，Home 回章首。
     fn handle_reader_key(&mut self, cx: &mut Cx, ke: &KeyEvent) {
         if !self.on_reader_page
+            || self.reader_theme_open
             || READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
             || self.text_input_has_focus(cx)
         {
@@ -16786,92 +17151,49 @@ impl App {
         self.persist_reader_settings(cx);
     }
 
-    /// 把一个色板格子的底色刷成预设色（apply 片段只认字面量，逐色枚举）。
-    fn paint_swatch(&mut self, cx: &mut Cx, cell: &[LiveId], slot: usize) {
-        let mut w = self.ui.widget(cx, cell);
-        match slot {
-            1 => script_apply_eval!(cx, w, { draw_bg.color: #x7fb2a6 }),
-            2 => script_apply_eval!(cx, w, { draw_bg.color: #x62b6ff }),
-            3 => script_apply_eval!(cx, w, { draw_bg.color: #xe8875a }),
-            4 => script_apply_eval!(cx, w, { draw_bg.color: #x9a9a9a }),
-            5 => script_apply_eval!(cx, w, { draw_bg.color: #x5c5c5c }),
-            6 => script_apply_eval!(cx, w, { draw_bg.color: #x4d4d4d }),
-            7 => script_apply_eval!(cx, w, { draw_bg.color: #x294f45 }),
-            8 => script_apply_eval!(cx, w, { draw_bg.color: #x293d61 }),
-            9 => script_apply_eval!(cx, w, { draw_bg.color: #xd9c96a }),
-            _ => {
-                let color = self.swatch_inactive;
-                script_apply_eval!(cx, w, { draw_bg.color: #(color) });
-            }
+    fn refresh_swatch_names(&self, cx: &mut Cx, language: AppLanguage) {
+        for (_, name, kind, slot) in settings_swatch_rows(&current_reader_settings()) {
+            self.ui
+                .widget(cx, &[name])
+                .set_text(cx, kind.name(slot, language));
         }
+        self.sync_reader_quick_colors(cx);
     }
 
-    /// 按当前配置刷新四行色板的选中态。
-    /// slot 约定：0=未选底灰 1=青 2=蓝 3=橙 4=灰 5=中性选中 6=深灰 7=深青 8=深蓝
-    fn refresh_swatches(&mut self, cx: &mut Cx) {
-        use crate::ruby_word::*;
-        let color_slot = [1usize, 2, 3, 4];
-        let bg_slot = [5usize, 6, 7, 8];
-
-        let gloss = *GLOSS_COLOR.read().unwrap();
-        let cells = [ids!(gc0), ids!(gc1), ids!(gc2), ids!(gc3)];
-        for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if GLOSS_PRESETS[i].1 == gloss {
-                color_slot[i]
-            } else {
-                0
-            };
-            self.paint_swatch(cx, cell, slot);
+    /// Only project the saved colours and selected slots; never reflow a chapter.
+    fn refresh_swatches(&self, cx: &mut Cx) {
+        let palette = reader_scene_palette(
+            *READER_BACKGROUND.read().unwrap(),
+            *READER_THEME.read().unwrap(),
+        );
+        for (cells, name, kind, slot) in settings_swatch_rows(&current_reader_settings()) {
+            for (index, cell) in cells.into_iter().enumerate() {
+                let option_slot = kind.option_slot(index, slot);
+                self.paint_color_swatch(
+                    cx,
+                    cell,
+                    kind.color(option_slot, palette.text),
+                    option_slot == slot,
+                    palette,
+                );
+            }
+            self.ui
+                .widget(cx, &[name])
+                .set_text(cx, kind.name(slot, app_language()));
         }
-
-        let gbg = *GLOSS_BG.read().unwrap();
-        let cells = [ids!(gb0), ids!(gb1), ids!(gb2), ids!(gb3)];
-        for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if BG_PRESETS[i].1 == gbg {
-                bg_slot[i]
-            } else {
-                0
-            };
-            self.paint_swatch(cx, cell, slot);
-        }
-
-        let wcol = *WORD_COLOR.read().unwrap();
-        let cells = [ids!(wc0), ids!(wc1), ids!(wc2), ids!(wc3)];
-        let wc_slot = [5usize, 1, 2, 3];
-        for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if WORD_COLOR_PRESETS[i].1 == wcol {
-                wc_slot[i]
-            } else {
-                0
-            };
-            self.paint_swatch(cx, cell, slot);
-        }
-
-        let wbg = *WORD_BG.read().unwrap();
-        let cells = [ids!(wb0), ids!(wb1), ids!(wb2), ids!(wb3)];
-        for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if BG_PRESETS[i].1 == wbg {
-                bg_slot[i]
-            } else {
-                0
-            };
-            self.paint_swatch(cx, cell, slot);
-        }
-
-        let sel = *SELECTION_SLOT.read().unwrap();
-        let cells = [ids!(sc0), ids!(sc1), ids!(sc2), ids!(sc3)];
-        let sel_slot = [1usize, 2, 3, 9];
-        for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if i == sel { sel_slot[i] } else { 0 };
-            self.paint_swatch(cx, cell, slot);
-        }
-
-        let hl = *crate::mark_span::HL_SLOT.read().unwrap();
-        let cells = [ids!(hc0), ids!(hc1), ids!(hc2), ids!(hc3)];
-        let hl_slot = [9usize, 1, 2, 3];
-        for (i, cell) in cells.into_iter().enumerate() {
-            let slot = if i == hl { hl_slot[i] } else { 0 };
-            self.paint_swatch(cx, cell, slot);
+        self.sync_reader_quick_colors(cx);
+        if SEL_RANGE.read().unwrap().is_some() {
+            if let Some(mut reader) = self
+                .ui
+                .widget(cx, ids!(chapter_list))
+                .borrow_mut::<ChapterList>()
+            {
+                // Repaint an already-visible selection in its existing geometry.
+                // The aA input shield prevents incidental text events from doing
+                // this for us; do not invalidate page metrics or reload content.
+                reader.page_turn.cancel();
+                reader.apply_visible_selection(cx);
+            }
         }
     }
 
@@ -17057,15 +17379,22 @@ impl App {
 
     /// 将工具条锚定在选区手势结束处，并严格限制在正文视口内。
     /// 第一次使用估算高度立即显示；完成一帧布局后再用真实高度校正一次。
-    fn position_selection_popup(&self, cx: &mut Cx, use_measured_height: bool) -> bool {
+    fn position_selection_popup(&mut self, cx: &mut Cx, use_measured_height: bool) -> bool {
         let Some(anchor) = self.selection_popup_anchor else {
             return false;
         };
-        let viewport = self
+        let mut viewport = self
             .ui
             .widget(cx, ids!(chapter_list))
             .area()
             .clipped_rect(cx);
+        if self.compact_layout {
+            viewport = reader_overlay_viewport(
+                viewport,
+                self.responsive_window_size,
+                self.safe_area_insets,
+            );
+        }
         if viewport.size.x <= 0.0 || viewport.size.y <= 0.0 {
             return false;
         }
@@ -17091,6 +17420,15 @@ impl App {
             || (old_width - width).abs() > 0.5;
         inner.walk.abs_pos = Some(position);
         inner.walk.width = Size::Fixed(width);
+        // A rotation can change the number of wrapped action rows. Measure
+        // again after drawing at the new width before finalizing its position.
+        if (old_width - width).abs() > 0.5 {
+            self.pending_selection_popup_layout = true;
+        }
+        drop(inner);
+        if changed {
+            popup.redraw(cx);
+        }
         changed
     }
 
@@ -17268,45 +17606,48 @@ impl App {
     fn handle_swatch_rows(&mut self, cx: &mut Cx, actions: &Actions) {
         use crate::ruby_word::*;
         let mut changed = false;
-        let gc = [ids!(gc0.b), ids!(gc1.b), ids!(gc2.b), ids!(gc3.b)];
+        let gc = [ids!(gc0), ids!(gc1), ids!(gc2), ids!(gc3)];
         for (i, cell) in gc.into_iter().enumerate() {
             if self.ui.button(cx, cell).clicked(actions) {
                 *GLOSS_COLOR.write().unwrap() = GLOSS_PRESETS[i].1;
                 changed = true;
             }
         }
-        let gb = [ids!(gb0.b), ids!(gb1.b), ids!(gb2.b), ids!(gb3.b)];
+        let gb = [ids!(gb0), ids!(gb1), ids!(gb2), ids!(gb3)];
         for (i, cell) in gb.into_iter().enumerate() {
             if self.ui.button(cx, cell).clicked(actions) {
                 *GLOSS_BG.write().unwrap() = BG_PRESETS[i].1;
                 changed = true;
             }
         }
-        let wc = [ids!(wc0.b), ids!(wc1.b), ids!(wc2.b), ids!(wc3.b)];
+        let wc = [ids!(wc0), ids!(wc1), ids!(wc2), ids!(wc3)];
         for (i, cell) in wc.into_iter().enumerate() {
             if self.ui.button(cx, cell).clicked(actions) {
                 *WORD_COLOR.write().unwrap() = WORD_COLOR_PRESETS[i].1;
                 changed = true;
             }
         }
-        let wb = [ids!(wb0.b), ids!(wb1.b), ids!(wb2.b), ids!(wb3.b)];
+        let wb = [ids!(wb0), ids!(wb1), ids!(wb2), ids!(wb3)];
         for (i, cell) in wb.into_iter().enumerate() {
             if self.ui.button(cx, cell).clicked(actions) {
                 *WORD_BG.write().unwrap() = BG_PRESETS[i].1;
                 changed = true;
             }
         }
-        let sc = [ids!(sc0.b), ids!(sc1.b), ids!(sc2.b), ids!(sc3.b)];
+        let sc = [ids!(sc0), ids!(sc1), ids!(sc2), ids!(sc3)];
         for (i, cell) in sc.into_iter().enumerate() {
             if self.ui.button(cx, cell).clicked(actions) {
-                *SELECTION_SLOT.write().unwrap() = i;
+                let selected = *SELECTION_SLOT.read().unwrap();
+                *SELECTION_SLOT.write().unwrap() = ColorKind::Selection.option_slot(i, selected);
                 changed = true;
             }
         }
-        let hc = [ids!(hc0.b), ids!(hc1.b), ids!(hc2.b), ids!(hc3.b)];
+        let hc = [ids!(hc0), ids!(hc1), ids!(hc2), ids!(hc3)];
         for (i, cell) in hc.into_iter().enumerate() {
             if self.ui.button(cx, cell).clicked(actions) {
-                *crate::mark_span::HL_SLOT.write().unwrap() = i;
+                let selected = *crate::mark_span::HL_SLOT.read().unwrap();
+                *crate::mark_span::HL_SLOT.write().unwrap() =
+                    ColorKind::Highlight.option_slot(i, selected);
                 changed = true;
             }
         }
@@ -19285,6 +19626,48 @@ impl MatchEvent for App {
                 self.apply_reader_mode(cx, background);
             }
         }
+        // Quick choices are committed preferences, never a layout edit or a
+        // draft preview. Preserve the current page, caches and turn history.
+        let mut quick_color_changed = false;
+        for (ids, kind, slots) in [
+            (
+                [
+                    id!(reader_quick_pen_vermilion),
+                    id!(reader_quick_pen_cobalt),
+                    id!(reader_quick_pen_moss),
+                    id!(reader_quick_pen_graphite),
+                ],
+                ColorKind::Selection,
+                crate::settings_swatch::PEN_SLOTS,
+            ),
+            (
+                [
+                    id!(reader_quick_highlight_yellow),
+                    id!(reader_quick_highlight_green),
+                    id!(reader_quick_highlight_blue),
+                    id!(reader_quick_highlight_pink),
+                ],
+                ColorKind::Highlight,
+                crate::mark_span::MARKER_SLOTS,
+            ),
+        ] {
+            for (id, slot) in ids.into_iter().zip(slots) {
+                if self.ui.button(cx, &[id]).clicked(actions) {
+                    let lock = match kind {
+                        ColorKind::Selection => &SELECTION_SLOT,
+                        _ => &crate::mark_span::HL_SLOT,
+                    };
+                    let mut selected = lock.write().unwrap();
+                    quick_color_changed |= *selected != slot;
+                    *selected = slot;
+                }
+            }
+        }
+        if quick_color_changed {
+            self.refresh_swatches(cx);
+            self.ui.redraw(cx);
+            self.persist_reader_settings(cx);
+        }
         if self
             .ui
             .button(cx, ids!(reader_customise_btn))
@@ -19344,6 +19727,28 @@ impl MatchEvent for App {
             if let Some(draft) = self.reader_customise_draft.as_mut() {
                 draft.bold_text = bold;
                 self.sync_reader_customise_controls(cx);
+            }
+        }
+        let mut highlight_changed = false;
+        for (id, slot) in [
+            id!(reader_customise_highlight_yellow),
+            id!(reader_customise_highlight_green),
+            id!(reader_customise_highlight_blue),
+            id!(reader_customise_highlight_pink),
+        ]
+        .into_iter()
+        .zip(crate::mark_span::MARKER_SLOTS)
+        {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.highlight_color_slot = slot;
+                    highlight_changed = true;
+                }
+            }
+        }
+        if highlight_changed {
+            if let Some(draft) = self.reader_customise_draft.as_ref() {
+                self.sync_reader_customise_highlighter(cx, draft);
             }
         }
         let mut gloss_preview_changed = false;
@@ -19549,6 +19954,7 @@ impl MatchEvent for App {
                 draft.gloss_background_slot = default.gloss_background_slot;
                 draft.word_color_slot = default.word_color_slot;
                 draft.word_background_slot = default.word_background_slot;
+                draft.highlight_color_slot = default.highlight_color_slot;
                 self.sync_reader_customise_controls(cx);
             }
         }
@@ -20666,10 +21072,20 @@ impl AppMain for App {
         crate::chapter_image::script_mod(vm);
         crate::reader_page_turn::script_mod(vm);
         crate::mark_span::script_mod(vm);
+        crate::settings_swatch::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self
+            .selection_popup_layout_frame
+            .as_ref()
+            .and_then(|frame| frame.is_event(event))
+            .is_some()
+        {
+            self.selection_popup_layout_frame = None;
+            self.ui.widget(cx, ids!(sel_bar)).redraw(cx);
+        }
         if self
             .reader_code_refresh_frame
             .as_ref()
@@ -21097,6 +21513,13 @@ impl AppMain for App {
             _ => {}
         }
         self.match_event(cx, event);
+        // ChapterList is drawn underneath the non-modal aA overlay. Mirror the
+        // owner state before dispatch so its wheel/touch/key handlers cannot
+        // turn pages or begin selection while the colour panel is scrolling.
+        READER_APPEARANCE_OPEN.store(
+            self.on_reader_page && self.reader_theme_open,
+            Ordering::Release,
+        );
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if matches!(event, Event::Draw(_) | Event::WindowGeomChange(_)) {
             self.sync_reader_toolbar_placement(cx);
@@ -21142,7 +21565,9 @@ impl AppMain for App {
             if self.pending_selection_popup_layout {
                 self.pending_selection_popup_layout = false;
                 if self.position_selection_popup(cx, true) {
-                    self.ui.redraw(cx);
+                    // Apply the measured position in a fresh frame. Updating
+                    // a cached draw list after Draw leaves its pixels behind.
+                    self.selection_popup_layout_frame = Some(cx.new_next_frame());
                 }
             }
             if self.pending_word_card_layout {

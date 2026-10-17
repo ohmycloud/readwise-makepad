@@ -1,5 +1,7 @@
 # ReadWise (Makepad 重写版)
 
+![ReadWise 陶土蜜桃长颈鹿图标](app/resources/icon_128.png)
+
 用 [Makepad 2.0](https://zhanghandong.github.io/makepad-2.0-book/)（Splash DSL + 纯 Rust）重写的 ReadWise 阅读器。
 原 Tauri + React 版本保留在 `../readwise`；当前项目的阅读、词汇、AI、统计和本地数据主链路均已迁移到 Rust + Makepad。
 
@@ -17,6 +19,19 @@ readwise-makepad/
 └── docs/         # 里程碑、部署指南与开发日志
 ```
 
+## 应用图标
+
+应用使用「陶土蜜桃」长颈鹿图标，矢量母版为 `app/resources/icon.svg`，16–32px 专用版为 `app/resources/icon-small.svg`。桌面 PNG、Windows ICO、macOS ICNS、iOS 图标目录和 Android 自适应图标均由同一脚本生成，已提交的资源可直接用于打包，不需要在发布环境安装绘图工具。
+
+```bash
+# 修改母版后重建资源（需要 librsvg 的 rsvg-convert 和 ImageMagick 7 的 magick）
+python3 scripts/generate_app_icons.py
+python3 scripts/generate_app_icons.py --check
+python3 -m unittest discover -s scripts -p test_app_icons.py
+```
+
+定稿、平台导出规范和验收记录见 [图标说明](docs/design/giraffe-icon/FINAL.md)。
+
 ## 运行（桌面）
 
 ```bash
@@ -26,6 +41,10 @@ cargo run -p readwise-app --release  # 发布构建
 ```
 
 依赖 makepad dev 分支（git 依赖），首次构建会拉取并编译 makepad，耗时较长属正常。
+
+## GitHub Release
+
+支持 Windows、Linux、macOS（arm64 / x86_64）、Android 和 iOS 的自动打包、校验和及 Release 草稿，详见 [发布指南](docs/github-release.md)。iOS 默认生成需重新签名的真机 IPA。
 
 ## macOS 应用包
 
@@ -39,7 +58,7 @@ scripts/package_macos.sh
 
 ```text
 target/dist/ReadWise.app
-target/dist/ReadWise-macOS-<version>.zip
+target/dist/ReadWise-macOS-<架构>-<version>.zip
 ```
 
 默认使用 ad-hoc 签名，只适合本机测试。对外分发需使用 Apple Developer 的 Developer ID Application 证书：

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">ReadWise — Terracotta giraffe, small-size cut</title>
+  <rect id="background" width="256" height="256" fill="#F8DDD2"/>
+  <g id="giraffe">
+    <path fill="#57332D" d="M36 74 C62 68 86 76 99 100 C72 115 46 105 36 74 Z M220 74 C194 68 170 76 157 100 C184 115 210 105 220 74 Z"/>
+    <path fill="#DF8267" d="M51 84 C66 83 77 86 84 95 C70 98 58 95 51 84 Z M205 84 C190 83 179 86 172 95 C186 98 198 95 205 84 Z"/>
+    <path fill="#57332D" d="M96 48 H118 V85 H96 Z M138 48 H160 V85 H138 Z"/>
+    <circle cx="107" cy="48" r="14" fill="#57332D"/>
+    <circle cx="149" cy="48" r="14" fill="#57332D"/>
+    <path fill="#57332D" d="M102 71 H154 C171 71 180 84 178 101 L166 201 H90 L78 101 C76 84 85 71 102 71 Z"/>
+    <path fill="#DF8267" d="M102 81 H154 C165 81 170 89 168 100 L158 196 H98 L88 100 C86 89 91 81 102 81 Z"/>
+    <path fill="#DF8267" d="M103 48 H111 V85 H103 Z M145 48 H153 V85 H145 Z"/>
+    <circle cx="107" cy="48" r="6" fill="#DF8267"/>
+    <circle cx="149" cy="48" r="6" fill="#DF8267"/>
+    <circle cx="108" cy="122" r="8" fill="#57332D"/>
+    <circle cx="148" cy="122" r="8" fill="#57332D"/>
+    <rect x="69" y="153" width="118" height="60" rx="30" fill="#57332D"/>
+    <rect x="79" y="163" width="98" height="40" rx="20" fill="#F8DDD2"/>
+    <circle cx="96" cy="183" r="7" fill="#57332D"/>
+    <circle cx="160" cy="183" r="7" fill="#57332D"/>
+  </g>
+</svg>
