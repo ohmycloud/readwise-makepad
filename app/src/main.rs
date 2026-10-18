@@ -3,6 +3,7 @@ mod android_import;
 #[cfg(target_os = "android")]
 mod android_lan_transfer;
 mod app;
+mod app_ui_index;
 mod chapter_image;
 #[cfg(target_os = "macos")]
 mod desktop_import;
@@ -22,7 +23,9 @@ mod reader_inline_code;
 mod reader_link;
 mod reader_lists;
 mod reader_page_turn;
+mod reader_paint;
 mod reader_scroll;
+mod reader_settings_panel;
 mod reader_text;
 mod reader_touch;
 mod reader_word;

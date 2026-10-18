@@ -1,6 +1,9 @@
+use crate::app_ui_index::AppUiIndex;
 use crate::chapter_image::ChapterImageAction;
 use crate::reader_book_pages::BookPages;
 use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
+use crate::reader_paint::apply_widget_paint;
+use crate::reader_settings_panel::{FontMenuTap, ReaderSettingsTab};
 use crate::reader_touch::{DoubleTap, ListTap, TapOutcome, ToolbarTap};
 use crate::reader_word::word_range_at;
 use crate::ruby_word::RubyWordAction;
@@ -69,6 +72,13 @@ fn app_action_batch_is_passive(actions: &Actions, on_reader_page: bool) -> bool 
     })
 }
 
+fn reader_settings_notices_only(actions: &Actions) -> bool {
+    !actions.is_empty()
+        && actions
+            .iter()
+            .all(|action| action.downcast_ref::<ReaderSettingsAction>().is_some())
+}
+
 #[cfg(test)]
 mod passive_action_tests {
     use super::*;
@@ -80,6 +90,18 @@ mod passive_action_tests {
             widget_uid: WidgetUid(1),
             group: None,
         })
+    }
+
+    #[test]
+    fn save_notice_shortcut_keeps_errors_and_rejects_mixed_clicks() {
+        let mut actions: Vec<Action> = vec![
+            Box::new(ReaderSettingsAction::Saved),
+            Box::new(ReaderSettingsAction::Error("disk".to_string())),
+        ];
+        assert!(reader_settings_notices_only(&actions));
+        actions.push(widget_action(ButtonAction::Clicked(Default::default())));
+        assert!(!reader_settings_notices_only(&actions));
+        assert!(!reader_settings_notices_only(&vec![]));
     }
 
     #[test]
@@ -113,6 +135,13 @@ mod passive_action_tests {
         )));
         let toolbar: Action = Box::new(ReaderToolbarTap);
         assert!(!reader_tap_opens_inline(&toolbar));
+    }
+
+    #[test]
+    fn modal_dismissals_always_reach_the_draft_owner() {
+        let actions = vec![widget_action(ModalAction::Dismissed)];
+        assert!(!app_action_batch_is_passive(&actions, false));
+        assert!(!app_action_batch_is_passive(&actions, true));
     }
 
     #[test]
@@ -243,18 +272,7 @@ fn mobile_reader_button_size(width: f64, insets: SafeAreaInsets) -> f64 {
 }
 
 fn reader_customise_rect(size: DVec2, insets: SafeAreaInsets) -> Rect {
-    let available = dvec2(
-        (size.x - insets.left - insets.right).max(1.0),
-        (size.y - insets.top - insets.bottom).max(1.0),
-    );
-    let card = dvec2(
-        (available.x - 24.0).clamp(1.0, 560.0),
-        (available.y - 24.0).clamp(1.0, 620.0),
-    );
-    Rect {
-        pos: dvec2(insets.left, insets.top) + (available - card) * 0.5,
-        size: card,
-    }
+    crate::reader_settings_panel::popover_layout(size, insets, None, ReaderSettingsTab::Theme).0
 }
 
 fn reader_font_display_label(language: AppLanguage, font: ReaderFont) -> &'static str {
@@ -1854,7 +1872,9 @@ mod responsive_layout_tests {
             assert!(rect.pos.x + rect.size.x <= size.x - insets.right - 12.0);
             assert!(rect.pos.y + rect.size.y <= size.y - insets.bottom - 12.0);
             assert!(rect.size.x >= 296.0);
-            assert!(rect.size.y >= 300.0);
+            assert!(
+                rect.size.y <= crate::reader_settings_panel::POPOVER_HEIGHT && rect.size.y >= 200.0
+            );
         }
     }
 
@@ -2515,7 +2535,6 @@ static READER_WORD_SPACING: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new
 static READER_MARGIN: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(0.0));
 static READER_JUSTIFY_TEXT: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
 static READER_CUSTOMISE_OPEN: AtomicBool = AtomicBool::new(false);
-static READER_APPEARANCE_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// 选中文字的高亮色槽位：0=青 1=蓝 2=橙 3=黄。
 static SELECTION_SLOT: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(0));
@@ -2715,7 +2734,7 @@ fn navigation_palette_for_page(
 
 fn apply_reader_button_palette_with_focus(
     cx: &mut Cx,
-    mut widget: WidgetRef,
+    widget: WidgetRef,
     palette: ReaderScenePalette,
     focus_background: Vec4f,
 ) {
@@ -2724,24 +2743,25 @@ fn apply_reader_button_palette_with_focus(
     let border = palette.border;
     let hover = palette.hover;
     let pressed = palette.pressed;
-    script_apply_eval!(cx, widget, {
-        draw_text +: {
-            color: #(text)
-            color_hover: #(text)
-            color_down: #(text)
-            color_focus: #(text)
-        }
-        draw_bg +: {
-            color: #(field)
-            color_hover: #(hover)
-            color_down: #(pressed)
-            color_focus: #(focus_background)
-            border_color: #(border)
-            border_color_hover: #(border)
-            border_color_down: #(border)
-            border_color_focus: #(border)
-        }
-    });
+    apply_widget_paint(
+        cx,
+        widget,
+        &[
+            (ids!(draw_text.color), text),
+            (ids!(draw_text.color_hover), text),
+            (ids!(draw_text.color_down), text),
+            (ids!(draw_text.color_focus), text),
+            (ids!(draw_bg.color), field),
+            (ids!(draw_bg.color_hover), hover),
+            (ids!(draw_bg.color_down), pressed),
+            (ids!(draw_bg.color_focus), focus_background),
+            (ids!(draw_bg.border_color), border),
+            (ids!(draw_bg.border_color_hover), border),
+            (ids!(draw_bg.border_color_down), border),
+            (ids!(draw_bg.border_color_focus), border),
+        ],
+        &[],
+    );
 }
 
 fn apply_reader_button_palette(cx: &mut Cx, widget: WidgetRef, palette: ReaderScenePalette) {
@@ -2749,52 +2769,64 @@ fn apply_reader_button_palette(cx: &mut Cx, widget: WidgetRef, palette: ReaderSc
 }
 
 // Flat navigation/entry rows should not inherit the input-field border and fill.
-fn apply_flat_entry_background(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
+fn apply_flat_entry_background(cx: &mut Cx, widget: WidgetRef, palette: ReaderScenePalette) {
     let clear = vec4(0.0, 0.0, 0.0, 0.0);
     let hover = palette.hover;
     let pressed = palette.pressed;
-    script_apply_eval!(cx, widget, {draw_bg +: {
-        color: #(clear) color_hover: #(hover) color_down: #(pressed) color_focus: #(clear)
-        border_color: #(clear) border_color_hover: #(clear) border_color_down: #(clear) border_color_focus: #(clear)
-    }});
+    apply_widget_paint(
+        cx,
+        widget,
+        &[
+            (ids!(draw_bg.color), clear),
+            (ids!(draw_bg.color_hover), hover),
+            (ids!(draw_bg.color_down), pressed),
+            (ids!(draw_bg.color_focus), clear),
+            (ids!(draw_bg.border_color), clear),
+            (ids!(draw_bg.border_color_hover), clear),
+            (ids!(draw_bg.border_color_down), clear),
+            (ids!(draw_bg.border_color_focus), clear),
+        ],
+        &[],
+    );
 }
 
-fn apply_reader_icon_palette(cx: &mut Cx, mut widget: WidgetRef, color: Vec4f) {
-    script_apply_eval!(cx, widget, { draw_icon +: { color: #(color) } });
+fn apply_reader_icon_palette(cx: &mut Cx, widget: WidgetRef, color: Vec4f) {
+    apply_widget_paint(cx, widget, &[(ids!(draw_icon.color), color)], &[]);
 }
 
-fn apply_reader_input_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
+fn apply_reader_input_palette(cx: &mut Cx, widget: WidgetRef, palette: ReaderScenePalette) {
     let text = palette.text;
     let muted = palette.muted;
     let field = palette.field;
     let surface = palette.surface;
     let border = palette.border;
-    script_apply_eval!(cx, widget, {
-        draw_bg +: {
-            color: #(field)
-            color_hover: #(field)
-            color_focus: #(surface)
-            color_down: #(field)
-            color_empty: #(field)
-            border_color: #(border)
-            border_color_hover: #(border)
-            border_color_focus: #(border)
-            border_color_down: #(border)
-            border_color_empty: #(border)
-        }
-        draw_text +: {
-            color: #(text)
-            color_hover: #(text)
-            color_focus: #(text)
-            color_down: #(text)
-            color_empty: #(muted)
-            color_empty_hover: #(muted)
-            color_empty_focus: #(muted)
-        }
-    });
+    apply_widget_paint(
+        cx,
+        widget,
+        &[
+            (ids!(draw_bg.color), field),
+            (ids!(draw_bg.color_hover), field),
+            (ids!(draw_bg.color_focus), surface),
+            (ids!(draw_bg.color_down), field),
+            (ids!(draw_bg.color_empty), field),
+            (ids!(draw_bg.border_color), border),
+            (ids!(draw_bg.border_color_hover), border),
+            (ids!(draw_bg.border_color_focus), border),
+            (ids!(draw_bg.border_color_down), border),
+            (ids!(draw_bg.border_color_empty), border),
+            (ids!(draw_text.color), text),
+            (ids!(draw_text.color_hover), text),
+            (ids!(draw_text.color_focus), text),
+            (ids!(draw_text.color_down), text),
+            (ids!(draw_text.color_empty), muted),
+            (ids!(draw_text.color_empty_hover), muted),
+            (ids!(draw_text.color_empty_focus), muted),
+        ],
+        &[],
+    );
 }
 
-fn apply_library_control_palette(cx: &mut Cx, mut widget: WidgetRef, palette: ReaderScenePalette) {
+fn apply_library_control_palette(cx: &mut Cx, widget: WidgetRef, palette: ReaderScenePalette) {
     let surface = palette.surface;
     let text = palette.text;
     let muted = palette.muted;
@@ -2805,55 +2837,57 @@ fn apply_library_control_palette(cx: &mut Cx, mut widget: WidgetRef, palette: Re
     // All library header controls belong to the page, not the popup layer.
     // Apply every state after settings load/reapply; the initial template can
     // otherwise retain the startup paper palette instead of the saved one.
-    script_apply_eval!(cx, widget, {
-        draw_bg +: {
-            color: #(surface)
-            color_active: #(surface)
-            color_focus: #(surface)
-            color_disabled: #(surface)
-            color_hover: #(hover)
-            color_down: #(pressed)
-            border_color: #(border)
-            border_color_active: #(accent)
-            border_color_2: #(border)
-            border_color_hover: #(accent)
-            border_color_2_hover: #(accent)
-            border_color_focus: #(accent)
-            border_color_2_focus: #(accent)
-            border_color_down: #(accent)
-            border_color_2_down: #(accent)
-            border_color_disabled: #(border)
-            border_color_2_disabled: #(border)
-            arrow_color: #(text)
-            arrow_color_hover: #(text)
-            arrow_color_focus: #(text)
-            arrow_color_down: #(text)
-            arrow_color_disabled: #(muted)
-        }
-        draw_text +: {
-            color: #(text)
-            color_active: #(accent)
-            color_hover: #(text)
-            color_focus: #(text)
-            color_down: #(text)
-            color_disabled: #(muted)
-        }
-    });
+    apply_widget_paint(
+        cx,
+        widget,
+        &[
+            (ids!(draw_bg.color), surface),
+            (ids!(draw_bg.color_active), surface),
+            (ids!(draw_bg.color_focus), surface),
+            (ids!(draw_bg.color_disabled), surface),
+            (ids!(draw_bg.color_hover), hover),
+            (ids!(draw_bg.color_down), pressed),
+            (ids!(draw_bg.border_color), border),
+            (ids!(draw_bg.border_color_active), accent),
+            (ids!(draw_bg.border_color_2), border),
+            (ids!(draw_bg.border_color_hover), accent),
+            (ids!(draw_bg.border_color_2_hover), accent),
+            (ids!(draw_bg.border_color_focus), accent),
+            (ids!(draw_bg.border_color_2_focus), accent),
+            (ids!(draw_bg.border_color_down), accent),
+            (ids!(draw_bg.border_color_2_down), accent),
+            (ids!(draw_bg.border_color_disabled), border),
+            (ids!(draw_bg.border_color_2_disabled), border),
+            (ids!(draw_bg.arrow_color), text),
+            (ids!(draw_bg.arrow_color_hover), text),
+            (ids!(draw_bg.arrow_color_focus), text),
+            (ids!(draw_bg.arrow_color_down), text),
+            (ids!(draw_bg.arrow_color_disabled), muted),
+            (ids!(draw_text.color), text),
+            (ids!(draw_text.color_active), accent),
+            (ids!(draw_text.color_hover), text),
+            (ids!(draw_text.color_focus), text),
+            (ids!(draw_text.color_down), text),
+            (ids!(draw_text.color_disabled), muted),
+        ],
+        &[],
+    );
 }
 
-fn apply_reader_surface_palette(cx: &mut Cx, mut widget: WidgetRef, color: Vec4f, border: Vec4f) {
-    script_apply_eval!(cx, widget, {
-        draw_bg +: {
-            color: #(color)
-            border_color: #(border)
-        }
-    });
+fn apply_reader_surface_palette(cx: &mut Cx, widget: WidgetRef, color: Vec4f, border: Vec4f) {
+    apply_widget_paint(
+        cx,
+        widget,
+        &[
+            (ids!(draw_bg.color), color),
+            (ids!(draw_bg.border_color), border),
+        ],
+        &[],
+    );
 }
 
-fn apply_reader_label_palette(cx: &mut Cx, mut widget: WidgetRef, color: Vec4f) {
-    script_apply_eval!(cx, widget, {
-        draw_text.color: #(color)
-    });
+fn apply_reader_label_palette(cx: &mut Cx, widget: WidgetRef, color: Vec4f) {
+    apply_widget_paint(cx, widget, &[(ids!(draw_text.color), color)], &[]);
 }
 
 #[cfg(test)]
@@ -4804,14 +4838,10 @@ enum ReaderSettingsAction {
     Error(String),
 }
 
-/// Non-modal aA content and the modal draft editor both own user input, while
-/// draw/measure/reload events must still reach the chapter underneath them.
-fn reader_colour_panel_blocks_event(
-    appearance_open: bool,
-    customise_open: bool,
-    event: &Event,
-) -> bool {
-    (appearance_open || customise_open)
+/// The segmented settings editor owns input; draw/measure/reload events still
+/// reach the chapter underneath it without changing the reading viewport.
+fn reader_colour_panel_blocks_event(panel_open: bool, event: &Event) -> bool {
+    panel_open
         && matches!(
             event,
             Event::MouseDown(_)
@@ -4825,14 +4855,28 @@ fn reader_colour_panel_blocks_event(
         )
 }
 
-/// A future highlighter choice has no effect on the geometry or existing marks.
-fn reader_customise_change_is_highlight_only(
-    current: &ReaderSettings,
-    draft: &ReaderSettings,
-) -> bool {
+/// Page geometry is independent of scene/annotation paints and UI preferences.
+fn reader_settings_change_requires_layout(current: &ReaderSettings, next: &ReaderSettings) -> bool {
+    current.font != next.font
+        || current.font_size != next.font_size
+        || current.bold_text != next.bold_text
+        || current.spacing != next.spacing
+        || current.character_spacing != next.character_spacing
+        || current.word_spacing != next.word_spacing
+        || current.margin != next.margin
+        || current.justify_text != next.justify_text
+        || current.columns != next.columns
+        || current.turn_mode != next.turn_mode
+        || current.gloss_enabled != next.gloss_enabled
+        || current.gloss_font_size != next.gloss_font_size
+}
+
+/// Selection/highlighter paint has no effect on page geometry or existing marks.
+fn reader_customise_change_is_paint_only(current: &ReaderSettings, draft: &ReaderSettings) -> bool {
     let mut expected = current.clone();
     expected.highlight_color_slot = draft.highlight_color_slot;
-    current.highlight_color_slot != draft.highlight_color_slot && expected == *draft
+    expected.selection_color_slot = draft.selection_color_slot;
+    expected != *current && expected == *draft
 }
 
 #[cfg(test)]
@@ -4858,20 +4902,84 @@ mod customise_highlight_tests {
             modifiers: Default::default(),
             touches: vec![],
         });
-        for (appearance, customise) in [(false, false), (true, false), (false, true), (true, true)]
-        {
+        for open in [false, true] {
             for event in [&scroll, &touch] {
-                assert_eq!(
-                    reader_colour_panel_blocks_event(appearance, customise, event),
-                    appearance || customise
-                );
+                assert_eq!(reader_colour_panel_blocks_event(open, event), open);
             }
             for event in [&Event::LiveEdit, &Event::ScriptReapply] {
-                assert!(!reader_colour_panel_blocks_event(
-                    appearance, customise, event
-                ));
+                assert!(!reader_colour_panel_blocks_event(open, event));
             }
         }
+    }
+
+    #[test]
+    fn scene_and_annotation_paints_never_invalidate_page_geometry() {
+        let current = ReaderSettings::default();
+        assert!(!reader_settings_change_requires_layout(&current, &current));
+        for background in [
+            ReaderBackground::Original,
+            ReaderBackground::Paper,
+            ReaderBackground::Sepia,
+            ReaderBackground::Sage,
+            ReaderBackground::Night,
+            ReaderBackground::Bold,
+            ReaderBackground::FollowTheme,
+        ] {
+            let mut next = current.clone();
+            next.background = background;
+            next.theme = ReaderTheme::Dark;
+            next.gloss_color_slot = 3;
+            next.gloss_background_slot = 3;
+            next.word_color_slot = 3;
+            next.word_background_slot = 3;
+            next.selection_color_slot = 6;
+            next.highlight_color_slot = 7;
+            next.language = AppLanguage::English;
+            next.library_view_mode = LibraryViewMode::Grid;
+            assert!(!reader_settings_change_requires_layout(&current, &next));
+        }
+    }
+
+    #[test]
+    fn every_real_typography_change_still_invalidates_layout() {
+        let current = ReaderSettings::default();
+        let changes: [fn(&mut ReaderSettings); 12] = [
+            |s| s.font = ReaderFont::Athelas,
+            |s| s.font_size = Some(18.0),
+            |s| s.bold_text = true,
+            |s| s.spacing = ReaderSpacing::Relaxed,
+            |s| s.character_spacing = 0.1,
+            |s| s.word_spacing = 0.1,
+            |s| s.margin = 0.5,
+            |s| s.justify_text = true,
+            |s| s.columns = ReaderColumns::Two,
+            |s| s.turn_mode = ReaderTurnMode::Slide,
+            |s| s.gloss_enabled = false,
+            |s| s.gloss_font_size = 10.0,
+        ];
+        for change in changes {
+            let mut next = current.clone();
+            change(&mut next);
+            assert!(
+                reader_settings_change_requires_layout(&current, &next),
+                "{next:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_click_repaints_without_requesting_whole_app_script_reload() {
+        let source = include_str!("app.rs");
+        let method = source
+            .split("\n    fn apply_runtime_theme(")
+            .nth(1)
+            .unwrap()
+            .split("    fn restore_after_script_reload(")
+            .next()
+            .unwrap();
+        assert!(!method.contains("request_script_reapply"));
+        assert!(method.contains("cx.redraw_all()"));
+        assert!(method.contains("self.redraw_reader_annotations(cx)"));
     }
 
     #[test]
@@ -4881,10 +4989,24 @@ mod customise_highlight_tests {
             let mut draft = current.clone();
             draft.highlight_color_slot = slot;
             assert_eq!(
-                reader_customise_change_is_highlight_only(&current, &draft),
+                reader_customise_change_is_paint_only(&current, &draft),
                 slot != current.highlight_color_slot
             );
         }
+    }
+
+    #[test]
+    fn pen_and_marker_drafts_use_paint_only_apply_without_repagination() {
+        let current = ReaderSettings::default();
+        for selection in crate::settings_swatch::PEN_SLOTS {
+            let mut draft = current.clone();
+            draft.selection_color_slot = selection;
+            assert!(reader_customise_change_is_paint_only(&current, &draft));
+            draft.highlight_color_slot = 7;
+            assert!(reader_customise_change_is_paint_only(&current, &draft));
+            assert_eq!(current.selection_color_slot, 0);
+        }
+        assert!(!reader_customise_change_is_paint_only(&current, &current));
     }
 
     #[test]
@@ -4893,10 +5015,10 @@ mod customise_highlight_tests {
         let mut draft = current.clone();
         draft.highlight_color_slot = 7;
         draft.font_size = Some(18.0);
-        assert!(!reader_customise_change_is_highlight_only(&current, &draft));
+        assert!(!reader_customise_change_is_paint_only(&current, &draft));
         draft.font_size = current.font_size;
         draft.gloss_enabled = !current.gloss_enabled;
-        assert!(!reader_customise_change_is_highlight_only(&current, &draft));
+        assert!(!reader_customise_change_is_paint_only(&current, &draft));
     }
 }
 
@@ -5942,6 +6064,10 @@ script_mod! {
         list := PortalList{
             width: Fill height: Fill
             selectable: true
+            // Paragraph/ruby/mark items are resolved from their owning list item,
+            // never by global control IDs. Keep measured/offscreen paragraphs out
+            // of every app-wide button/palette lookup as the book cache grows.
+            skip_widget_tree_search: true
             // Desktop text selection owns pointer drags. Wheel/scrollbar
             // scrolling remains available; mobile devices enable touch drag.
             drag_scrolling: #(cfg!(any(target_os = "android", target_os = "ios")))
@@ -6730,102 +6856,6 @@ script_mod! {
                                                 draw_text.color: theme.color_label_inner_inactive
                                                 draw_text.text_style.font_size: 9
                                             }
-                                        }
-                                    }
-                                }
-                                reader_theme_layer := View{
-                                    // Keep the overlay owner mounted so its first popup
-                                    // frame has an Area that can be redrawn.
-                                    width: Fill height: Fill
-                                    flow: Overlay
-                                    align: Align{x: 1.0 y: 0.0}
-                                    padding: Inset{right: 18 top: 0}
-                                    reader_theme_arrow_row := View{
-                                        visible: false
-                                        width: 316 height: 10
-                                        flow: Right
-                                        align: Align{x: 1.0}
-                                        padding: Inset{right: 70}
-                                        reader_theme_arrow := ReaderPopoverArrow{}
-                                    }
-                                    reader_theme_menu := RoundedShadowView{
-                                        visible: false
-                                        width: 316 height: 356
-                                        margin: Inset{top: 10}
-                                        new_batch: true
-                                        flow: Down spacing: 12 padding: 16
-                                        draw_bg.color: theme.color_bg_container
-                                        draw_bg.border_radius: 14.0
-                                        draw_bg.shadow_color: #0003
-                                        draw_bg.shadow_radius: 16.0
-                                        draw_bg.shadow_offset: vec2(0, 5)
-                                        reader_theme_scroll := ScrollYView{
-                                            width: Fill height: Fill
-                                            flow: Down spacing: 12
-                                            reader_theme_title_row := View{
-                                                width: Fill height: Fit
-                                                align: HCenter
-                                                reader_theme_title := Label{
-                                                    width: Fit height: Fit
-                                                    text: "Themes & Settings"
-                                                    draw_text.text_style.font_size: 15
-                                                }
-                                            }
-                                            reader_theme_modes := View{
-                                                width: Fill height: Fit
-                                                flow: Flow.Right{wrap: true}
-                                                spacing: 7
-                                                reader_mode_original := ButtonFlat{width: 88 height: 42 text: "Original"}
-                                                reader_mode_quiet := ButtonFlat{width: 88 height: 42 text: "Quiet"}
-                                                reader_mode_paper := ButtonFlat{width: 88 height: 42 text: "Paper"}
-                                                reader_mode_bold := ButtonFlat{width: 88 height: 42 text: "Bold"}
-                                                reader_mode_calm := ButtonFlat{width: 88 height: 42 text: "Calm"}
-                                                reader_mode_focus := ButtonFlat{width: 88 height: 42 text: "Focus"}
-                                            }
-                                            reader_quick_pen_row := View{
-                                                width: Fill height: Fit
-                                                flow: Flow.Right{wrap: true} spacing: 4 align: Align{y: 0.5}
-                                                reader_quick_pen_title := View{
-                                                    width: 56 height: 44 flow: Down align: Align{y: 0.5}
-                                                    reader_quick_pen_label := mod.widgets.SettingsColorTitle{
-                                                        width: Fill height: Fit margin: 0 padding: 0 text: "Pen"
-                                                        draw_text.text_style.font_size: 11
-                                                    }
-                                                }
-                                                reader_quick_pen_options := mod.widgets.SettingsColorPicker{
-                                                    width: 224 spacing: 0
-                                                    reader_quick_pen_vermilion := mod.widgets.SettingsColorSwatch{}
-                                                    reader_quick_pen_cobalt := mod.widgets.SettingsColorSwatch{}
-                                                    reader_quick_pen_moss := mod.widgets.SettingsColorSwatch{}
-                                                    reader_quick_pen_graphite := mod.widgets.SettingsColorSwatch{}
-                                                    reader_quick_pen_name := mod.widgets.SettingsColorName{width: 48 margin: 0 padding: 0}
-                                                }
-                                            }
-                                            reader_quick_highlight_row := View{
-                                                width: Fill height: Fit
-                                                flow: Flow.Right{wrap: true} spacing: 4 align: Align{y: 0.5}
-                                                reader_quick_highlight_title := View{
-                                                    width: 56 height: 44 flow: Down align: Align{y: 0.5}
-                                                    reader_quick_highlight_label := mod.widgets.SettingsColorTitle{
-                                                        width: Fill height: Fit margin: 0 padding: 0 text: "Highlighter"
-                                                        draw_text.text_style.font_size: 11
-                                                    }
-                                                }
-                                                reader_quick_highlight_options := mod.widgets.SettingsColorPicker{
-                                                    width: 224 spacing: 0
-                                                    reader_quick_highlight_yellow := mod.widgets.SettingsColorSwatch{}
-                                                    reader_quick_highlight_green := mod.widgets.SettingsColorSwatch{}
-                                                    reader_quick_highlight_blue := mod.widgets.SettingsColorSwatch{}
-                                                    reader_quick_highlight_pink := mod.widgets.SettingsColorSwatch{}
-                                                    reader_quick_highlight_name := mod.widgets.SettingsColorName{width: 48 margin: 0 padding: 0}
-                                                }
-                                            }
-                                        }
-                                        reader_customise_btn := ButtonFlat{
-                                            width: Fill height: 42
-                                            text: "Customise"
-                                            icon_walk: Walk{width: 15 height: 15}
-                                            draw_icon +: {svg: crate_resource("self:resources/icons/reader_settings.svg")}
                                         }
                                     }
                                 }
@@ -7746,33 +7776,85 @@ script_mod! {
                     }
                     reader_customise_modal := Modal{
                         align: TopLeft
+                        bg_view +: {draw_bg.color: #0000}
                         content +: {
-                            width: 560 height: 620
-                            reader_customise_card := RoundedView{
-                                width: Fill height: Fill
+                            width: 316 height: 410 flow: Down spacing: 0
+                            clip_x: false clip_y: false
+                            reader_settings_arrow_row := View{
+                                width: Fill height: 10 flow: Right
+                                reader_settings_arrow := ReaderPopoverArrow{}
+                            }
+                            reader_customise_card := RoundedShadowView{
+                                width: Fill height: 400
+                                // Fixed segments take hits before scrolled-out
+                                // children whose retained areas may overlap them.
+                                event_order: #(EventOrder::Down)
                                 new_batch: true
-                                flow: Down spacing: 16 padding: 20
+                                flow: Down spacing: 8 padding: 16
                                 draw_bg.color: theme.color_bg_container
-                                draw_bg.border_radius: 16.0
-                                reader_customise_header := View{
-                                    width: Fill height: Fit
-                                    flow: Right
-                                    align: Align{y: 0.5}
-                                    reader_customise_title := Label{
-                                        width: Fill
-                                        text: "Customise"
-                                        draw_text.text_style.font_size: 17
-                                    }
-                                    reader_customise_close := ButtonFlatter{width: 40 height: 40 margin: 0 text: "X"}
+                                draw_bg.border_radius: 14.0
+                                draw_bg.shadow_color: #0003
+                                draw_bg.shadow_radius: 16.0
+                                draw_bg.shadow_offset: vec2(0, 5)
+                                reader_settings_segments := RoundedView{
+                                    width: Fill height: 52 flow: Right spacing: 0 padding: 4
+                                    draw_bg.color: #xf0f0ee
+                                    draw_bg.border_radius: 13.0
+                                    reader_settings_tab_theme := mod.widgets.ReaderSettingsSegment{text: "Theme"}
+                                    reader_settings_tab_text := mod.widgets.ReaderSettingsSegment{text: "Text"}
+                                    reader_settings_tab_annotations := mod.widgets.ReaderSettingsSegment{text: "Annotations"}
                                 }
                                 reader_customise_scroll := ScrollYView{
                                     width: Fill height: Fill
-                                    flow: Down spacing: 14
+                                    flow: Down spacing: 5
                                     scroll_bars +: {scroll_bar_y +: {draw_bg +: {
                                         color: #0000 color_hover: #0000 color_drag: #0000
                                         border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
                                         border_size: 0.0
                                     }}}
+                                    reader_customise_theme_section := View{
+                                        width: Fill height: Fit flow: Down spacing: 8
+                                        reader_theme_modes := View{
+                                            width: Fill height: Fit flow: Down spacing: 8
+                                            View{
+                                                width: Fill height: 42 flow: Right spacing: 8
+                                                reader_mode_original := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Original"}
+                                                reader_mode_quiet := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Quiet"}
+                                                reader_mode_paper := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Paper"}
+                                            }
+                                            View{
+                                                width: Fill height: 42 flow: Right spacing: 8
+                                                reader_mode_bold := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Bold"}
+                                                reader_mode_calm := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Calm"}
+                                                reader_mode_focus := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Focus"}
+                                            }
+                                        }
+                                        reader_quick_pen_row := View{
+                                            width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                            reader_quick_pen_label := mod.widgets.SettingsColorTitle{width: 164 text: "Pen"}
+                                            reader_quick_pen_options := mod.widgets.SettingsColorPicker{
+                                                height: Fit
+                                                reader_quick_pen_vermilion := mod.widgets.SettingsColorSwatch{}
+                                                reader_quick_pen_cobalt := mod.widgets.SettingsColorSwatch{}
+                                                reader_quick_pen_moss := mod.widgets.SettingsColorSwatch{}
+                                                reader_quick_pen_graphite := mod.widgets.SettingsColorSwatch{}
+                                                reader_quick_pen_name := mod.widgets.SettingsColorName{}
+                                            }
+                                        }
+                                        reader_customise_highlight_row := View{
+                                            width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                            reader_customise_highlight_label := Label{width: 164 text: "Highlight Color"}
+                                            reader_customise_highlight_options := mod.widgets.SettingsColorPicker{
+                                                height: Fit
+                                                reader_customise_highlight_yellow := mod.widgets.SettingsColorSwatch{}
+                                                reader_customise_highlight_green := mod.widgets.SettingsColorSwatch{}
+                                                reader_customise_highlight_blue := mod.widgets.SettingsColorSwatch{}
+                                                reader_customise_highlight_pink := mod.widgets.SettingsColorSwatch{}
+                                                reader_customise_highlight_name := mod.widgets.SettingsColorName{}
+                                            }
+                                        }
+                                        reader_customise_reset := ButtonFlatter{width: Fill height: 42 margin: 0 text: "Reset Theme"}
+                                    }
                                     reader_preview := RoundedView{
                                         width: Fill height: 180
                                         new_batch: true
@@ -7815,28 +7897,25 @@ script_mod! {
                                             }
                                         }
                                     }
-                                    reader_customise_text_title := Label{
-                                        text: "Text"
-                                        draw_text.text_style.font_size: 13
-                                    }
                                     reader_customise_font_row := View{
                                         width: Fill height: Fit
                                         flow: Right spacing: 8
                                         align: Align{y: 0.5}
                                         reader_customise_font_label := Label{width: Fill text: "Font"}
-                                        reader_customise_font_choice := DropDown{
-                                            width: 180 height: 32
-                                            align: Align{x: 0.0 y: 0.5}
-                                            padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
-                                            popup_menu_position: mod.widgets.PopupMenuPosition.BelowInput
-                                            popup_menu: mod.widgets.PopupMenuFlat{
-                                                width: 180
-                                                menu_item: mod.widgets.PopupMenuItem{
-                                                    height: 14
-                                                    padding: Inset{left: 12 right: 8 top: 0 bottom: 0}
-                                                }
+                                        reader_customise_font_field := View{
+                                            width: 180 height: 32 flow: Overlay
+                                            reader_customise_font_choice := ButtonFlat{
+                                                width: Fill height: Fill margin: 0
+                                                enable_long_press: true
+                                                align: Align{x: 0.0 y: 0.5}
+                                                padding: Inset{left: 12 right: 26 top: 0 bottom: 0}
+                                                text: "Original"
                                             }
-                                            labels: ["Original"]
+                                            View{
+                                                width: Fill height: Fill align: Align{x: 1.0 y: 0.5}
+                                                padding: Inset{right: 10}
+                                                reader_customise_font_caret := ReaderFontCaret{}
+                                            }
                                         }
                                     }
                                     reader_customise_size_row := View{
@@ -7853,19 +7932,6 @@ script_mod! {
                                         }
                                     }
                                     reader_customise_bold := CheckBox{text: "Bold Text"}
-                                    reader_customise_highlight_row := View{
-                                        width: Fill height: Fit flow: Right spacing: 8
-                                        align: Align{y: 0.5}
-                                        reader_customise_highlight_label := Label{width: 164 text: "Highlight Color"}
-                                        reader_customise_highlight_options := mod.widgets.SettingsColorPicker{
-                                            height: Fit
-                                            reader_customise_highlight_yellow := mod.widgets.SettingsColorSwatch{}
-                                            reader_customise_highlight_green := mod.widgets.SettingsColorSwatch{}
-                                            reader_customise_highlight_blue := mod.widgets.SettingsColorSwatch{}
-                                            reader_customise_highlight_pink := mod.widgets.SettingsColorSwatch{}
-                                            reader_customise_highlight_name := mod.widgets.SettingsColorName{text: "Yellow"}
-                                        }
-                                    }
                                     reader_customise_gloss_title := Label{
                                         text: "Word Annotations"
                                         draw_text.text_style.font_size: 13
@@ -8012,21 +8078,33 @@ script_mod! {
                                         }
                                     }
                                     reader_customise_justify := CheckBox{text: "Justify Text"}
-                                    reader_customise_reset := ButtonFlatter{
-                                        width: Fill height: 42
-                                        text: "Reset Theme"
-                                    }
                                 }
-                                reader_customise_actions := View{
-                                    width: Fill height: Fit
-                                    flow: Right spacing: 10
-                                    align: Align{x: 1.0 y: 0.5}
-                                    reader_customise_cancel := ButtonFlatter{
-                                        width: 100 height: 44 margin: 0 text: "Cancel"
-                                    }
-                                    reader_customise_save := ButtonFlat{
-                                        width: 148 height: 44 margin: 0 text: "Save & Apply"
-                                    }
+                            }
+                            // Its own scroll viewport keeps all 14 options reachable
+                            // without resizing any settings section or shrinking text.
+                            reader_customise_font_menu := RoundedShadowView{
+                                visible: false width: 180 height: 264
+                                new_batch: true flow: Down padding: 4
+                                draw_bg.color: theme.color_bg_container
+                                draw_bg.border_radius: 6.0
+                                draw_bg.shadow_color: #0003
+                                draw_bg.shadow_radius: 12.0
+                                reader_customise_font_scroll := ScrollYView{
+                                    width: Fill height: Fill flow: Down spacing: 0
+                                    reader_font_canela := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Canela"}
+                                    reader_font_original := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Original"}
+                                    reader_font_athelas := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Athelas"}
+                                    reader_font_avenir := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Avenir Next"}
+                                    reader_font_charter := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Charter"}
+                                    reader_font_georgia := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Georgia"}
+                                    reader_font_iowan := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Iowan"}
+                                    reader_font_palatino := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Palatino"}
+                                    reader_font_proxima := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Proxima Nova"}
+                                    reader_font_publico := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Publico"}
+                                    reader_font_san_francisco := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "San Francisco"}
+                                    reader_font_new_york := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "New York"}
+                                    reader_font_seravek := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Seravek"}
+                                    reader_font_times := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Times New Roman"}
                                 }
                             }
                         }
@@ -10231,6 +10309,11 @@ impl ChapterList {
                 inner.text_flow.draw_selection.color = Vec4f::default();
                 inner.text_flow.draw_block.table_header_bg_color = reader_scene.field;
                 inner.text_flow.draw_block.table_border_color = reader_scene.border;
+                inner.text_flow.draw_block.code_color = reader_scene.hover;
+                inner.text_flow.draw_block.quote_bg_color = reader_scene.hover;
+                inner.text_flow.draw_block.quote_fg_color = reader_scene.text;
+                inner.text_flow.draw_block.sep_color = reader_scene.border;
+                inner.text_flow.draw_block.line_color = reader_scene.text;
                 inner.text_flow.text_style_normal.font_family = normal_family.clone();
                 inner.text_flow.text_style_italic.font_family = italic_family.clone();
                 inner.text_flow.text_style_bold.font_family = bold_family.clone();
@@ -10630,11 +10713,7 @@ impl Widget for ChapterList {
         ) {
             self.cancel_reader_tap(cx);
         }
-        if reader_colour_panel_blocks_event(
-            READER_APPEARANCE_OPEN.load(Ordering::Acquire),
-            READER_CUSTOMISE_OPEN.load(Ordering::Acquire),
-            event,
-        ) {
+        if reader_colour_panel_blocks_event(READER_CUSTOMISE_OPEN.load(Ordering::Acquire), event) {
             self.cancel_reader_tap(cx);
             return;
         }
@@ -11963,11 +12042,13 @@ pub struct App {
     #[rust]
     reader_arrow_caption_layout: Option<bool>,
     #[rust]
-    reader_theme_open: bool,
-    #[rust]
     reader_customise_draft: Option<ReaderSettings>,
     #[rust]
+    reader_customise_tab: ReaderSettingsTab,
+    #[rust]
     reader_customise_open_dropdown: Option<LiveId>,
+    #[rust]
+    reader_customise_font_tap: FontMenuTap,
     #[rust]
     active_font_applied: Option<ReaderFont>,
     #[rust]
@@ -11980,8 +12061,6 @@ pub struct App {
     shelf_ready: bool,
     #[rust]
     pending_last_read_open: bool,
-    #[rust]
-    pending_theme_reapply: bool,
     #[rust]
     toc_open: bool,
     #[rust]
@@ -12333,28 +12412,124 @@ impl App {
         }
     }
 
+    fn reader_customise_popover_layout(&self, cx: &mut Cx) -> (Rect, f64) {
+        let trigger_id = if self.ui.widget(cx, ids!(reader_titlebar)).visible() {
+            id!(titlebar_appearance_btn)
+        } else {
+            id!(reader_appearance_btn)
+        };
+        let trigger = current_clipped_rect(cx, self.ui.widget(cx, &[trigger_id]).area());
+        crate::reader_settings_panel::popover_layout(
+            self.responsive_window_size,
+            self.safe_area_insets,
+            Some(trigger),
+            self.reader_customise_tab,
+        )
+    }
+
+    fn sync_reader_customise_anchor(&self, cx: &mut Cx) {
+        use crate::reader_settings_panel::{font_menu_rect, ARROW_HEIGHT};
+        let (rect, arrow) = self.reader_customise_popover_layout(cx);
+        let arrow_rect = Rect {
+            pos: rect.pos - dvec2(0.0, ARROW_HEIGHT),
+            size: dvec2(rect.size.x, ARROW_HEIGHT),
+        };
+        let font_menu = (self.reader_customise_open_dropdown
+            == Some(id!(reader_customise_font_choice))
+            && self
+                .ui
+                .widget(cx, ids!(reader_customise_font_menu))
+                .visible())
+        .then(|| {
+            let input = current_clipped_rect(
+                cx,
+                self.ui
+                    .widget(cx, ids!(reader_customise_font_choice))
+                    .area(),
+            );
+            font_menu_rect(self.responsive_window_size, self.safe_area_insets, input)
+        });
+        // Capture includes an open submenu without stretching the section card.
+        let top = font_menu.map_or(arrow_rect.pos.y, |m| m.pos.y.min(arrow_rect.pos.y));
+        let bottom = font_menu.map_or(rect.pos.y + rect.size.y, |m| {
+            (m.pos.y + m.size.y).max(rect.pos.y + rect.size.y)
+        });
+        let frames: [(&[LiveId], Option<Rect>); 4] = [
+            (
+                ids!(reader_customise_modal.content),
+                Some(Rect {
+                    pos: dvec2(rect.pos.x, top),
+                    size: dvec2(rect.size.x, bottom - top),
+                }),
+            ),
+            (ids!(reader_settings_arrow_row), Some(arrow_rect)),
+            (ids!(reader_customise_card), Some(rect)),
+            (ids!(reader_customise_font_menu), font_menu),
+        ];
+        let mut changed = false;
+        for (path, frame) in frames {
+            let Some(frame) = frame else {
+                continue;
+            };
+            let widget = self.ui.widget(cx, path);
+            if let Some(mut view) = widget.borrow_mut::<View>() {
+                if view.walk.abs_pos != Some(frame.pos)
+                    || !matches!(view.walk.width, Size::Fixed(value) if value == frame.size.x)
+                    || !matches!(view.walk.height, Size::Fixed(value) if value == frame.size.y)
+                {
+                    view.walk.abs_pos = Some(frame.pos);
+                    view.walk.width = Size::Fixed(frame.size.x);
+                    view.walk.height = Size::Fixed(frame.size.y);
+                    view.redraw(cx);
+                    changed = true;
+                }
+            };
+        }
+        let row = self.ui.widget(cx, ids!(reader_settings_arrow_row));
+        if let Some(mut view) = row.borrow_mut::<View>() {
+            if view.layout.padding.left != arrow - 8.0 {
+                view.layout.padding.left = arrow - 8.0;
+                view.redraw(cx);
+                changed = true;
+            }
+        }
+        if changed {
+            let mut modal = self.ui.widget(cx, ids!(reader_customise_modal));
+            script_apply_eval!(cx, modal, {});
+        }
+    }
+
     fn configure_reader_customise_layout(&self, cx: &mut Cx) {
         if self.responsive_window_size.x <= 0.0 || self.responsive_window_size.y <= 0.0 {
             return;
         }
-        let rect = reader_customise_rect(self.responsive_window_size, self.safe_area_insets);
+        let (rect, _) = self.reader_customise_popover_layout(cx);
         let stacked = rect.size.x < 500.0;
-        let mut content = self.ui.widget(cx, ids!(reader_customise_modal.content));
-        if let Some(mut view) = content.borrow_mut::<View>() {
-            view.walk.abs_pos = Some(rect.pos);
-        }
-        script_apply_eval!(cx, content, {width: #(rect.size.x) height: #(rect.size.y)});
+        self.sync_reader_customise_anchor(cx);
         let mut card = self.ui.widget(cx, ids!(reader_customise_card));
-        let padding = if stacked { 12.0 } else { 20.0 };
-        let spacing = if stacked { 12.0 } else { 16.0 };
+        let padding = 16.0;
+        let spacing = 8.0;
         script_apply_eval!(cx, card, {padding: #(padding) spacing: #(spacing)});
+        let mode_width = ((rect.size.x - padding * 2.0 - 16.0) / 3.0).max(44.0);
+        for id in [
+            id!(reader_mode_original),
+            id!(reader_mode_quiet),
+            id!(reader_mode_paper),
+            id!(reader_mode_bold),
+            id!(reader_mode_calm),
+            id!(reader_mode_focus),
+        ] {
+            let mut button = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, button, {width: #(mode_width) draw_text +: {text_style +: {font_size: 12.0}}});
+        }
         let mut preview = self.ui.widget(cx, ids!(reader_preview));
-        let preview_height = if stacked { 140.0 } else { 180.0 };
+        let preview_height = 140.0;
         script_apply_eval!(cx, preview, {height: #(preview_height)});
         for id in [
             id!(reader_customise_font_row),
             id!(reader_customise_size_row),
             id!(reader_customise_gloss_size_row),
+            id!(reader_quick_pen_row),
             id!(reader_customise_highlight_row),
             id!(reader_customise_gloss_color_row),
             id!(reader_customise_gloss_bg_row),
@@ -12379,6 +12554,7 @@ impl App {
             };
         }
         for id in [
+            id!(reader_quick_pen_options),
             id!(reader_customise_highlight_options),
             id!(reader_customise_gloss_color_options),
             id!(reader_customise_gloss_bg_options),
@@ -12396,8 +12572,11 @@ impl App {
             };
         }
         for id in [
+            id!(reader_customise_layout_title),
+            id!(reader_customise_gloss_title),
             id!(reader_customise_size_label),
             id!(reader_customise_gloss_size_label),
+            id!(reader_quick_pen_label),
             id!(reader_customise_highlight_label),
             id!(reader_customise_gloss_color_label),
             id!(reader_customise_gloss_bg_label),
@@ -12414,34 +12593,29 @@ impl App {
             } else {
                 Size::Fixed(164.0)
             };
-            script_apply_eval!(cx, label, {width: #(width)});
+            script_apply_eval!(cx, label, {width: #(width) height: 20 padding: 0 draw_text +: {text_style +: {font_size: 11.0}}});
         }
         for id in [
-            id!(reader_customise_font_choice),
+            id!(reader_customise_font_field),
             id!(reader_customise_columns_choice),
         ] {
             let mut choice = self.ui.widget(cx, &[id]);
             let width = Size::Fixed(180.0);
             script_apply_eval!(cx, choice, {width: #(width)});
         }
-        let mut save = self.ui.widget(cx, ids!(reader_customise_save));
-        let width = if stacked {
-            Size::fill()
-        } else {
-            Size::Fixed(148.0)
-        };
-        script_apply_eval!(cx, save, {width: #(width)});
         // Modal owns a separate overlay draw list; invalidate it after rotation.
         let mut modal = self.ui.widget(cx, ids!(reader_customise_modal));
         script_apply_eval!(cx, modal, {});
     }
 
     fn close_reader_customise_dropdowns(&mut self, cx: &mut Cx) {
+        self.reader_customise_font_tap.cancel();
         self.reader_customise_open_dropdown = None;
-        for id in [
-            id!(reader_customise_font_choice),
-            id!(reader_customise_columns_choice),
-        ] {
+        self.ui
+            .widget(cx, ids!(reader_customise_font_menu))
+            .set_visible(cx, false);
+        self.sync_reader_customise_anchor(cx);
+        for id in [id!(reader_customise_columns_choice)] {
             if let Some(mut dropdown) = self.ui.widget(cx, &[id]).borrow_mut::<DropDown>() {
                 dropdown.set_closed(cx);
             }
@@ -12456,29 +12630,33 @@ impl App {
         self.ui.modal(cx, ids!(reader_customise_modal)).close(cx);
     }
 
-    fn save_reader_customise(&mut self, cx: &mut Cx) {
-        self.close_reader_customise_dropdowns(cx);
-        let draft = self.reader_customise_draft.take();
-        READER_CUSTOMISE_OPEN.store(false, Ordering::Release);
-        self.pending_customise_preview_after_draw = false;
-        self.ui.modal(cx, ids!(reader_customise_modal)).close(cx);
-        if let Some(settings) = draft {
-            let current = current_reader_settings();
-            if settings != current {
-                if reader_customise_change_is_highlight_only(&current, &settings) {
-                    *crate::mark_span::HL_SLOT.write().unwrap() = settings.highlight_color_slot;
-                    self.refresh_swatches(cx);
-                    self.ui.redraw(cx);
-                } else {
-                    self.apply_reader_settings(cx, settings);
-                }
-                self.persist_reader_settings(cx);
-            }
+    /// The aA popover is a live settings surface, not a cancel/save editor.
+    fn apply_reader_customise_live(&mut self, cx: &mut Cx) {
+        let Some(settings) = self.reader_customise_draft.clone() else {
+            return;
+        };
+        let current = current_reader_settings();
+        if settings == current {
+            return;
         }
+        if reader_customise_change_is_paint_only(&current, &settings) {
+            *SELECTION_SLOT.write().unwrap() = settings.selection_color_slot;
+            *crate::mark_span::HL_SLOT.write().unwrap() = settings.highlight_color_slot;
+            self.refresh_swatches(cx);
+            self.ui.redraw(cx);
+        } else {
+            self.apply_reader_settings(cx, settings);
+        }
+        // Keep the working projection synchronized with normalization and reload.
+        self.reader_customise_draft = Some(current_reader_settings());
+        self.persist_reader_settings(cx);
+        self.sync_reader_customise_controls(cx);
     }
 
     fn dismiss_reader_customise_dropdowns_outside(&mut self, cx: &mut Cx, abs: DVec2) -> bool {
-        if self.reader_customise_draft.is_none() {
+        if self.reader_customise_draft.is_none()
+            || self.reader_customise_tab != ReaderSettingsTab::Text
+        {
             return false;
         }
         // Makepad's DropDown dismisses on MouseDown outside its popup, but
@@ -12500,9 +12678,16 @@ impl App {
                 .unwrap_or(0.0);
             let active = self.ui.widget(cx, &[active_id]);
             let control = active.area().rect(cx);
-            let menu = Rect {
-                pos: control.pos + dvec2(0.0, control.size.y),
-                size: dvec2(control.size.x, menu_height),
+            let menu = if active_id == id!(reader_customise_font_choice) {
+                current_clipped_rect(
+                    cx,
+                    self.ui.widget(cx, ids!(reader_customise_font_menu)).area(),
+                )
+            } else {
+                Rect {
+                    pos: control.pos + dvec2(0.0, control.size.y),
+                    size: dvec2(control.size.x, menu_height),
+                }
             };
             if control.contains(abs) {
                 self.close_reader_customise_dropdowns(cx);
@@ -12512,13 +12697,23 @@ impl App {
                 return false;
             }
             self.close_reader_customise_dropdowns(cx);
+            // Segment taps intentionally dismiss the popup AND switch sections.
+            // Other outside presses still only dismiss, preserving touch safety.
+            if ReaderSettingsTab::ALL.into_iter().any(|tab| {
+                current_clipped_rect(cx, self.ui.widget(cx, &[tab.button()]).area()).contains(abs)
+            }) {
+                return false;
+            }
             if let Some(id) = pressed_choice {
-                self.reader_customise_open_dropdown = Some(id);
+                self.reader_customise_open_dropdown =
+                    (id != id!(reader_customise_font_choice)).then_some(id);
                 return false;
             }
             return true;
         }
-        self.reader_customise_open_dropdown = pressed_choice;
+        // The owned font menu opens on a completed tap, not on pointer-down.
+        self.reader_customise_open_dropdown =
+            pressed_choice.filter(|id| *id != id!(reader_customise_font_choice));
         false
     }
 
@@ -12633,13 +12828,6 @@ impl App {
             if self.reader_customise_draft.is_some() {
                 self.close_reader_customise(cx);
             }
-            self.reader_theme_open = false;
-            self.ui
-                .widget(cx, ids!(reader_theme_menu))
-                .set_visible(cx, false);
-            self.ui
-                .widget(cx, ids!(reader_theme_arrow_row))
-                .set_visible(cx, false);
         }
         self.ui
             .widget(cx, ids!(sidebar))
@@ -12782,22 +12970,7 @@ impl App {
             let mut row = self.ui.widget(cx, &[id]);
             script_apply_eval!(cx, row, {padding: #(padding)});
         }
-        let padding = Inset {
-            left: 0.0,
-            right: if self.compact_layout {
-                self.safe_area_insets.right + 2.5 * button_size - 14.0
-            } else if in_caption {
-                70.0
-            } else {
-                90.0
-            },
-            top: 0.0,
-            bottom: 0.0,
-        };
-        let mut row = self.ui.widget(cx, ids!(reader_theme_arrow_row));
-        script_apply_eval!(cx, row, {padding: #(padding)});
         self.ui.widget(cx, ids!(reader_panel_layer)).redraw(cx);
-        self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
     }
 
     fn set_reader_toolbar_visible(&mut self, cx: &mut Cx, visible: bool) {
@@ -12822,76 +12995,13 @@ impl App {
         } else {
             0.0
         };
-        for id in [id!(reader_panel_layer), id!(reader_theme_layer)] {
-            let widget = self.ui.widget(cx, &[id]);
-            if let Some(mut view) = widget.borrow_mut::<View>() {
+        let widget = self.ui.widget(cx, ids!(reader_panel_layer));
+        if let Some(mut view) = widget.borrow_mut::<View>() {
+            if view.layout.padding.top != top {
                 view.layout.padding.top = top;
-                if id == id!(reader_theme_layer) {
-                    view.layout.padding.left = if self.compact_layout {
-                        self.safe_area_insets.left + 12.0
-                    } else {
-                        0.0
-                    };
-                    view.layout.padding.right = if self.compact_layout {
-                        self.safe_area_insets.right + 12.0
-                    } else {
-                        18.0
-                    };
-                }
                 view.redraw(cx);
-            };
-        }
-        // Short landscape windows scroll the theme/colour content, not the fixed
-        // Customise action. Account for the actual overlay origin and safe area.
-        let layer_top = self
-            .ui
-            .widget(cx, ids!(reader_theme_layer))
-            .area()
-            .rect(cx)
-            .pos
-            .y;
-        let popup_top = layer_top.max(self.safe_area_insets.top) + top + 10.0;
-        let available =
-            (self.responsive_window_size.y - self.safe_area_insets.bottom - popup_top - 12.0)
-                .max(1.0);
-        let width = if self.compact_layout {
-            (self.responsive_window_size.x
-                - self.safe_area_insets.left
-                - self.safe_area_insets.right
-                - 24.0)
-                .clamp(1.0, 316.0)
-        } else {
-            316.0
+            }
         };
-        let stacked = width < 316.0;
-        for id in [
-            id!(reader_quick_pen_title),
-            id!(reader_quick_highlight_title),
-        ] {
-            let mut label = self.ui.widget(cx, &[id]);
-            let height = if stacked {
-                Size::fit()
-            } else {
-                Size::Fixed(44.0)
-            };
-            script_apply_eval!(cx, label, {height: #(height)});
-        }
-        let natural_height: f64 = if stacked { 400.0 } else { 356.0 };
-        let height = natural_height.min(available);
-        let mut menu = self.ui.widget(cx, ids!(reader_theme_menu));
-        script_apply_eval!(cx, menu, {width: #(width) height: #(height)});
-        let mode_width = ((width - 32.0 - 14.0) / 3.0).clamp(44.0, 88.0);
-        for id in [
-            id!(reader_mode_original),
-            id!(reader_mode_quiet),
-            id!(reader_mode_paper),
-            id!(reader_mode_bold),
-            id!(reader_mode_calm),
-            id!(reader_mode_focus),
-        ] {
-            let mut button = self.ui.widget(cx, &[id]);
-            script_apply_eval!(cx, button, {width: #(mode_width)});
-        }
     }
 
     fn configure_reader_toolbar_layout(&mut self, cx: &mut Cx, size: DVec2) {
@@ -12964,16 +13074,6 @@ impl App {
                 width: #(button_size) height: #(button_size) margin: 0
             });
         }
-        let mut menu = self.ui.widget(cx, ids!(reader_theme_menu));
-        let menu_width = if compact {
-            (size.x - self.safe_area_insets.left - self.safe_area_insets.right - 24.0)
-                .clamp(1.0, 316.0)
-        } else {
-            316.0
-        };
-        script_apply_eval!(cx, menu, {width: #(menu_width)});
-        let mut arrow = self.ui.widget(cx, ids!(reader_theme_arrow_row));
-        script_apply_eval!(cx, arrow, {width: #(menu_width)});
         self.reader_arrow_caption_layout = None;
         self.sync_reader_toolbar_placement(cx);
         self.sync_reader_popup_top_inset(cx);
@@ -13569,6 +13669,75 @@ impl App {
             .set_visible(cx, !mode.is_paged());
     }
 
+    fn handle_reader_settings_notice(&self, cx: &mut Cx, notice: &ReaderSettingsAction) {
+        let text = match notice {
+            ReaderSettingsAction::Saved => localized(
+                "阅读设置已自动保存在本机。",
+                "Reading settings saved on this device.",
+            )
+            .to_string(),
+            ReaderSettingsAction::Error(error) => {
+                if app_language() == AppLanguage::English {
+                    format!("Failed to save reading settings: {error}")
+                } else {
+                    format!("阅读设置保存失败：{error}")
+                }
+            }
+        };
+        self.ui.label(cx, ids!(settings_hint)).set_text(cx, &text);
+    }
+
+    fn reader_controls(&self) -> ReaderControls<'_> {
+        let mut ui = AppUiIndex::default();
+        ui.begin_projection(&self.ui);
+        ReaderControls { app: self, ui }
+    }
+
+    fn sync_reader_background_controls(&self, cx: &mut Cx, background: ReaderBackground) {
+        self.reader_controls()
+            .sync_reader_background_controls(cx, background);
+    }
+    fn paint_color_swatch(
+        &self,
+        cx: &mut Cx,
+        id: LiveId,
+        color: Vec4f,
+        selected: bool,
+        palette: ReaderScenePalette,
+    ) {
+        self.reader_controls()
+            .paint_color_swatch(cx, id, color, selected, palette);
+    }
+    fn sync_reader_quick_colors(&self, cx: &mut Cx) {
+        self.reader_controls().sync_reader_quick_colors(cx);
+    }
+    fn sync_reader_customise_highlighter(&self, cx: &mut Cx, settings: &ReaderSettings) {
+        self.reader_controls()
+            .sync_reader_customise_highlighter(cx, settings);
+    }
+    fn sync_reader_customise_controls(&self, cx: &mut Cx) {
+        self.reader_controls().sync_reader_customise_controls(cx);
+    }
+    fn apply_reader_background(&self, cx: &mut Cx, background: ReaderBackground) {
+        self.reader_controls()
+            .apply_reader_background(cx, background);
+    }
+}
+
+/// A single, short-lived control lookup snapshot for one projection pass. It
+/// owns no geometry or pagination data and cannot survive a reload/rotation.
+struct ReaderControls<'a> {
+    app: &'a App,
+    ui: AppUiIndex,
+}
+impl std::ops::Deref for ReaderControls<'_> {
+    type Target = App;
+    fn deref(&self) -> &App {
+        self.app
+    }
+}
+
+impl ReaderControls<'_> {
     fn sync_reader_background_controls(&self, cx: &mut Cx, background: ReaderBackground) {
         for (id, option) in [
             (id!(reader_background_paper), ReaderBackground::Paper),
@@ -13623,29 +13792,29 @@ impl App {
                 0xd8d4_caff,
             ),
         ] {
-            let mut button = self.ui.widget(cx, &[id]);
+            let button = self.ui.widget(cx, &[id]);
             let surface = Vec4f::from_u32(surface);
             let text = Vec4f::from_u32(text);
             let border = if mode == background { accent } else { surface };
-            script_apply_eval!(cx, button, {
-                draw_bg +: {
-                    color: #(surface)
-                    color_hover: #(surface)
-                    color_down: #(surface)
-                    color_focus: #(surface)
-                    border_color: #(border)
-                    border_color_focus: #(border)
-                    border_color_hover: #(border)
-                    border_color_down: #(border)
-                    border_size: 2.0
-                }
-                draw_text +: {
-                    color: #(text)
-                    color_focus: #(text)
-                    color_hover: #(text)
-                    color_down: #(text)
-                }
-            });
+            apply_widget_paint(
+                cx,
+                button,
+                &[
+                    (ids!(draw_bg.color), surface),
+                    (ids!(draw_bg.color_hover), surface),
+                    (ids!(draw_bg.color_down), surface),
+                    (ids!(draw_bg.color_focus), surface),
+                    (ids!(draw_bg.border_color), border),
+                    (ids!(draw_bg.border_color_focus), border),
+                    (ids!(draw_bg.border_color_hover), border),
+                    (ids!(draw_bg.border_color_down), border),
+                    (ids!(draw_text.color), text),
+                    (ids!(draw_text.color_focus), text),
+                    (ids!(draw_text.color_hover), text),
+                    (ids!(draw_text.color_down), text),
+                ],
+                &[(ids!(draw_bg.border_size), 2.0)],
+            );
         }
     }
 
@@ -13659,47 +13828,36 @@ impl App {
     ) {
         let ring_width = if selected { 1.4 } else { 0.0 };
         let ring_color = palette.muted;
-        let mut button = self.ui.widget(cx, &[id]);
-        script_apply_eval!(cx, button, {
-            draw_bg +: {
-                color: #(color)
-                border_color: #(ring_color)
-                border_size: #(ring_width)
-            }
-        });
+        apply_widget_paint(
+            cx,
+            self.ui.widget(cx, &[id]),
+            &[
+                (ids!(draw_bg.color), color),
+                (ids!(draw_bg.border_color), ring_color),
+            ],
+            &[(ids!(draw_bg.border_size), ring_width)],
+        );
     }
 
     fn sync_reader_quick_colors(&self, cx: &mut Cx) {
-        let settings = current_reader_settings();
+        let settings = self
+            .reader_customise_draft
+            .clone()
+            .unwrap_or_else(current_reader_settings);
         let palette = reader_scene_palette(settings.background, settings.theme);
-        for (cells, name, label, kind, selected, slots) in [
-            (
-                [
-                    id!(reader_quick_pen_vermilion),
-                    id!(reader_quick_pen_cobalt),
-                    id!(reader_quick_pen_moss),
-                    id!(reader_quick_pen_graphite),
-                ],
-                id!(reader_quick_pen_name),
-                id!(reader_quick_pen_label),
-                ColorKind::Selection,
-                settings.selection_color_slot,
-                crate::settings_swatch::PEN_SLOTS,
-            ),
-            (
-                [
-                    id!(reader_quick_highlight_yellow),
-                    id!(reader_quick_highlight_green),
-                    id!(reader_quick_highlight_blue),
-                    id!(reader_quick_highlight_pink),
-                ],
-                id!(reader_quick_highlight_name),
-                id!(reader_quick_highlight_label),
-                ColorKind::Highlight,
-                settings.highlight_color_slot,
-                crate::mark_span::MARKER_SLOTS,
-            ),
-        ] {
+        for (cells, name, label, kind, selected, slots) in [(
+            [
+                id!(reader_quick_pen_vermilion),
+                id!(reader_quick_pen_cobalt),
+                id!(reader_quick_pen_moss),
+                id!(reader_quick_pen_graphite),
+            ],
+            id!(reader_quick_pen_name),
+            id!(reader_quick_pen_label),
+            ColorKind::Selection,
+            settings.selection_color_slot,
+            crate::settings_swatch::PEN_SLOTS,
+        )] {
             for (cell, slot) in cells.into_iter().zip(slots) {
                 self.paint_color_swatch(
                     cx,
@@ -13788,21 +13946,188 @@ impl App {
         }
     }
 
+    fn sync_reader_customise_tabs(&self, cx: &mut Cx, settings: &ReaderSettings) {
+        use crate::reader_settings_panel::{section_visible, section_widgets, ReaderSettingsTab};
+        let palette = reader_scene_palette(settings.background, settings.theme);
+        for (id, owner) in section_widgets() {
+            self.ui.widget(cx, &[id]).set_visible(
+                cx,
+                section_visible(self.reader_customise_tab, owner, id, settings.gloss_enabled),
+            );
+        }
+        // Draft theme previews belong to the panel, never the underlying book.
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_settings_arrow)),
+            palette.surface,
+            palette.border,
+        );
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_customise_card)),
+            palette.surface,
+            palette.border,
+        );
+        for id in [
+            id!(reader_customise_gloss_title),
+            id!(reader_customise_layout_title),
+            id!(reader_customise_columns_title),
+            id!(reader_customise_bold),
+            id!(reader_customise_gloss_enable),
+            id!(reader_customise_justify),
+            id!(reader_customise_size_value),
+            id!(reader_customise_gloss_size_value),
+            id!(reader_customise_line_value),
+            id!(reader_customise_character_value),
+            id!(reader_customise_word_value),
+            id!(reader_customise_margin_value),
+        ] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
+        }
+        for id in [
+            id!(reader_customise_font_label),
+            id!(reader_customise_size_label),
+            id!(reader_customise_gloss_size_label),
+            id!(reader_customise_line_label),
+            id!(reader_customise_character_label),
+            id!(reader_customise_word_label),
+            id!(reader_customise_margin_label),
+        ] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
+        }
+        for id in [
+            id!(reader_customise_reset),
+            id!(reader_customise_font_choice),
+            id!(reader_customise_columns_choice),
+        ] {
+            apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
+        }
+        // CheckBox mixes active colours after its ordinary label/background.
+        // Project those too when previewing a draft theme without scene reload.
+        let text = palette.text;
+        let field = palette.field;
+        let hover = palette.hover;
+        let border = palette.border;
+        let accent = palette.accent;
+        for id in [
+            id!(reader_customise_bold),
+            id!(reader_customise_gloss_enable),
+            id!(reader_customise_justify),
+        ] {
+            apply_widget_paint(
+                cx,
+                self.ui.widget(cx, &[id]),
+                &[
+                    (ids!(draw_text.color_active), text),
+                    (ids!(draw_bg.color), field),
+                    (ids!(draw_bg.color_active), field),
+                    (ids!(draw_bg.color_hover), hover),
+                    (ids!(draw_bg.color_focus), hover),
+                    (ids!(draw_bg.color_down), hover),
+                    (ids!(draw_bg.border_color), border),
+                    (ids!(draw_bg.border_color_active), accent),
+                    (ids!(draw_bg.border_color_hover), accent),
+                    (ids!(draw_bg.border_color_focus), accent),
+                    (ids!(draw_bg.border_color_down), accent),
+                    (ids!(draw_bg.mark_color_active), accent),
+                ],
+                &[],
+            );
+        }
+        let dark = palette.text.x + palette.text.y + palette.text.z > 1.5;
+        let track = if dark {
+            palette.field
+        } else {
+            Vec4f::from_u32(0xf0f0_eeff)
+        };
+        let capsule = if dark {
+            palette.hover
+        } else {
+            Vec4f::from_u32(0xffff_ffff)
+        };
+        apply_widget_paint(
+            cx,
+            self.ui.widget(cx, ids!(reader_settings_segments)),
+            &[(ids!(draw_bg.color), track)],
+            &[],
+        );
+        for tab in ReaderSettingsTab::ALL {
+            let selected = if self.reader_customise_tab == tab {
+                1.0
+            } else {
+                0.0
+            };
+            let text = if selected > 0.5 {
+                palette.text
+            } else {
+                palette.muted
+            };
+            let focus = palette.accent;
+            let button = self.ui.widget(cx, &[tab.button()]);
+            button.set_text(cx, tr(tab.label_key()));
+            apply_widget_paint(
+                cx,
+                button,
+                &[
+                    (ids!(draw_bg.color), capsule),
+                    (ids!(draw_bg.border_color), focus),
+                    (ids!(draw_text.color), text),
+                    (ids!(draw_text.color_hover), text),
+                    (ids!(draw_text.color_focus), text),
+                    (ids!(draw_text.color_down), text),
+                ],
+                &[(ids!(draw_bg.border_size), selected)],
+            );
+        }
+        self.ui.widget(cx, ids!(reader_customise_card)).redraw(cx);
+    }
+
     fn sync_reader_customise_font_labels(
         &self,
         cx: &mut Cx,
         language: AppLanguage,
         font: ReaderFont,
     ) {
-        let choice = self.ui.drop_down(cx, ids!(reader_customise_font_choice));
-        choice.set_labels(
+        self.ui
+            .widget(cx, ids!(reader_customise_font_choice))
+            .set_text(cx, reader_font_display_label(language, font));
+        let settings = self
+            .reader_customise_draft
+            .clone()
+            .unwrap_or_else(current_reader_settings);
+        let palette = reader_scene_palette(settings.background, settings.theme);
+        apply_reader_button_palette(
             cx,
-            ReaderFont::ALL
-                .iter()
-                .map(|font| reader_font_display_label(language, *font).to_string())
-                .collect(),
+            self.ui.widget(cx, ids!(reader_customise_font_choice)),
+            palette,
         );
-        choice.set_selected_item(cx, font.index());
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_customise_font_caret)),
+            palette.text,
+            palette.text,
+        );
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_customise_font_menu)),
+            palette.surface,
+            palette.border,
+        );
+        for (id, option) in crate::reader_settings_panel::font_option_ids()
+            .into_iter()
+            .zip(ReaderFont::ALL)
+        {
+            let button = self.ui.widget(cx, &[id]);
+            button.set_text(cx, reader_font_display_label(language, option));
+            apply_reader_button_palette(cx, button.clone(), palette);
+            let border = if font == option { 1.0 } else { 0.0 };
+            apply_widget_paint(
+                cx,
+                button,
+                &[(ids!(draw_bg.border_color), palette.accent)],
+                &[(ids!(draw_bg.border_size), border)],
+            );
+        }
     }
 
     fn sync_reader_customise_highlighter(&self, cx: &mut Cx, settings: &ReaderSettings) {
@@ -13843,6 +14168,9 @@ impl App {
             .unwrap_or_else(current_reader_settings);
         let background = settings.background;
         let palette = reader_scene_palette(background, settings.theme);
+        self.sync_reader_customise_tabs(cx, &settings);
+        self.sync_reader_mode_controls(cx, settings.background);
+        self.sync_reader_quick_colors(cx);
         self.sync_reader_customise_highlighter(cx, &settings);
         self.sync_reader_customise_annotation_colors(cx, &settings);
         let font = settings.font;
@@ -13897,17 +14225,6 @@ impl App {
         self.ui
             .slider(cx, ids!(reader_customise_gloss_size_slider))
             .set_value(cx, settings.gloss_font_size as f64);
-        for id in [
-            id!(reader_customise_gloss_size_row),
-            id!(reader_customise_gloss_color_row),
-            id!(reader_customise_gloss_bg_row),
-            id!(reader_customise_word_color_row),
-            id!(reader_customise_word_bg_row),
-        ] {
-            self.ui
-                .widget(cx, &[id])
-                .set_visible(cx, settings.gloss_enabled);
-        }
         self.sync_reader_customise_font_labels(cx, app_language(), font);
         self.ui
             .drop_down(cx, ids!(reader_customise_columns_choice))
@@ -13947,8 +14264,14 @@ impl App {
             .widget(cx, ids!(reader_preview_second_column))
             .set_visible(cx, two_columns);
         crate::ruby_word::set_preview_appearance(&settings);
-        let (first_body, second_body) =
-            sample_chapter::build_glossed_preview(settings.gloss_enabled, two_columns);
+        let (first_body, second_body) = if two_columns {
+            sample_chapter::build_glossed_preview(settings.gloss_enabled, true)
+        } else {
+            (
+                crate::reader_settings_panel::gloss_preview(settings.gloss_enabled),
+                String::new(),
+            )
+        };
         if let Some(mut columns_view) = self
             .ui
             .widget(cx, ids!(reader_preview_columns))
@@ -14267,11 +14590,9 @@ impl App {
             id!(reader_bookmarks_panel),
             id!(note_panel),
             id!(reader_search_panel),
-            id!(reader_theme_menu),
             id!(toc_arrow),
             id!(reader_bookmarks_arrow),
             id!(note_arrow),
-            id!(reader_theme_arrow),
         ] {
             apply_reader_surface_palette(
                 cx,
@@ -14310,9 +14631,6 @@ impl App {
             id!(card_word),
             id!(library_rename_title),
             id!(reader_turn_mode_label),
-            id!(reader_theme_title),
-            id!(reader_customise_title),
-            id!(reader_customise_text_title),
             id!(reader_customise_gloss_title),
             id!(reader_customise_layout_title),
             id!(reader_customise_columns_title),
@@ -14396,10 +14714,6 @@ impl App {
             id!(reader_search_submit),
             id!(reader_bookmark_btn),
             id!(reader_bookmark_filled_btn),
-            id!(reader_customise_btn),
-            id!(reader_customise_close),
-            id!(reader_customise_cancel),
-            id!(reader_customise_save),
             id!(reader_customise_font_choice),
             id!(reader_customise_columns_choice),
             id!(reader_customise_reset),
@@ -14446,12 +14760,9 @@ impl App {
             id!(titlebar_search_btn),
             id!(titlebar_bookmark_btn),
             id!(titlebar_bookmark_filled_btn),
-            id!(reader_customise_btn),
         ] {
             apply_reader_icon_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
-        self.sync_reader_mode_controls(cx, background);
-        self.sync_reader_quick_colors(cx);
         self.sync_reader_customise_controls(cx);
         let popup_button_palette = ReaderScenePalette {
             field: palette.surface,
@@ -14526,7 +14837,9 @@ impl App {
         self.ui.widget(cx, ids!(main_column)).redraw(cx);
         self.ui.widget(cx, ids!(page_reader)).redraw(cx);
     }
+}
 
+impl App {
     fn set_reader_background(&mut self, cx: &mut Cx, background: ReaderBackground) {
         if *READER_BACKGROUND.read().unwrap() == background {
             self.sync_reader_background_controls(cx, background);
@@ -14540,25 +14853,16 @@ impl App {
         self.apply_runtime_theme(cx, *READER_THEME.read().unwrap());
     }
 
-    fn apply_reader_mode(&mut self, cx: &mut Cx, background: ReaderBackground) {
-        let bold_text = background == ReaderBackground::Bold;
-        let bold_changed = *READER_BOLD_TEXT.read().unwrap() != bold_text;
-        *READER_BOLD_TEXT.write().unwrap() = bold_text;
-        self.set_reader_background(cx, background);
-        if bold_changed {
-            self.invalidate_reader_pagination_layout(cx);
-            self.persist_reader_settings(cx);
-        }
-        self.reader_theme_open = false;
-        self.ui
-            .widget(cx, ids!(reader_theme_menu))
-            .set_visible(cx, false);
-        self.ui
-            .widget(cx, ids!(reader_theme_arrow_row))
-            .set_visible(cx, false);
-        self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
+    fn sync_app_language_controls(&self, cx: &mut Cx, language: AppLanguage) {
+        self.reader_controls()
+            .sync_app_language_controls(cx, language);
     }
+    fn apply_ui_language(&self, cx: &mut Cx, language: AppLanguage) {
+        self.reader_controls().apply_ui_language(cx, language);
+    }
+}
 
+impl ReaderControls<'_> {
     fn sync_app_language_controls(&self, cx: &mut Cx, language: AppLanguage) {
         self.ui.radio_button(cx, ids!(language_chinese)).set_active(
             cx,
@@ -14719,19 +15023,15 @@ impl App {
         set_text!(close_card_btn, "close");
         set_text!(add_vocab_btn, "add_vocabulary");
         set_text!(know_btn, "mark_known");
-        set_text!(reader_theme_title, "reader_themes_settings");
         set_text!(reader_mode_original, "reader_mode_original");
         set_text!(reader_mode_quiet, "reader_mode_quiet");
         set_text!(reader_mode_paper, "reader_mode_paper");
         set_text!(reader_mode_bold, "reader_mode_bold");
         set_text!(reader_mode_calm, "reader_mode_calm");
         set_text!(reader_mode_focus, "reader_mode_focus");
-        set_text!(reader_customise_btn, "reader_customise");
         set_text!(reader_quick_pen_label, "reader_pen");
-        set_text!(reader_quick_highlight_label, "reader_highlighter");
-        set_text!(reader_customise_title, "reader_customise");
         set_text!(reader_preview_heading, "reader_preview");
-        set_text!(reader_customise_text_title, "text_section");
+
         set_text!(reader_customise_font_label, "reader_font");
         set_text!(reader_customise_size_label, "reader_text_size");
         set_text!(reader_customise_bold, "reader_bold_text");
@@ -14757,8 +15057,6 @@ impl App {
         set_text!(reader_customise_columns_title, "reader_columns");
         set_text!(reader_customise_justify, "reader_justify_text");
         set_text!(reader_customise_reset, "reader_reset_theme");
-        set_text!(reader_customise_cancel, "cancel");
-        set_text!(reader_customise_save, "reader_save_apply");
         let columns = self.ui.drop_down(cx, ids!(reader_customise_columns_choice));
         columns.set_labels(
             cx,
@@ -14920,7 +15218,9 @@ impl App {
             .label(cx, ids!(settings_hint))
             .set_text(cx, crate::i18n::text(language, "reader_settings_saved"));
     }
+}
 
+impl App {
     fn set_app_language(&mut self, cx: &mut Cx, language: AppLanguage) {
         if app_language() == language {
             self.sync_app_language_controls(cx, language);
@@ -15004,13 +15304,16 @@ impl App {
     }
 
     fn apply_runtime_theme(&mut self, cx: &mut Cx, _theme: ReaderTheme) {
-        // script_mod 会依据 READER_BACKGROUND + READER_THEME 重建完整场景主题。
-        // 不能只改页面底色，否则模板化卡片、输入框和按钮仍会保留灰色 token。
-        self.pending_theme_reapply = true;
-        cx.request_script_reapply();
+        // apply_reader_background projects the live controls; paragraph/link/list
+        // widgets read the saved scene while drawing. ScriptReapply only reapplies
+        // the original app value (it does NOT rerun AppMain::script_mod), resetting
+        // colours and forcing a costly full UI restoration before the first frame.
+        // Invalidate GPU batches/snapshots, not chapter geometry or widget state.
+        self.redraw_reader_annotations(cx);
+        cx.redraw_all();
     }
 
-    /// 安全区变化触发 LiveEdit，主题切换触发 ScriptReapply；两者都可能
+    /// 安全区变化触发 LiveEdit，开发重载可能触发 ScriptReapply；两者都可能
     /// 覆盖运行时布局。恢复安全区、当前页面和控件投影，业务状态仍由 Rust 持有。
     fn restore_after_script_reload(&mut self, cx: &mut Cx) {
         self.pending_ui_projection_after_draw = true;
@@ -15026,12 +15329,6 @@ impl App {
             cx.display_context.safe_area_insets,
         );
         self.apply_reader_settings(cx, current_reader_settings());
-        self.ui
-            .widget(cx, ids!(reader_theme_arrow_row))
-            .set_visible(cx, self.on_reader_page && self.reader_theme_open);
-        self.ui
-            .widget(cx, ids!(reader_theme_menu))
-            .set_visible(cx, self.on_reader_page && self.reader_theme_open);
         self.sync_reader_panel_layout(cx);
         if self.on_reader_page {
             let title = CURRENT_BOOK
@@ -15067,21 +15364,11 @@ impl App {
         if matches!(self.active_page, AppPage::Statistics | AppPage::Profile) {
             spawn_load_statistics();
         }
-        if self.pending_theme_reapply {
-            self.ui.label(cx, ids!(settings_hint)).set_text(
-                cx,
-                localized(
-                    "主题已应用；更改会自动保存在本机。",
-                    "Theme applied; changes are saved on this device.",
-                ),
-            );
-            self.pending_theme_reapply = false;
-        }
         self.ui.redraw(cx);
     }
 
     fn track_reader_swipe(&mut self, cx: &mut Cx, event: &Event) -> Option<ReaderSwipeDirection> {
-        if self.reader_theme_open || READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
+        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
             self.reader_swipe.cancel();
             return None;
         }
@@ -17023,7 +17310,7 @@ impl App {
 
     /// 视口翻屏；到底/到顶时跨章。
     fn page_scroll(&mut self, cx: &mut Cx, down: bool) {
-        if self.reader_theme_open || READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
+        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
             return;
         }
         if self.compact_layout {
@@ -17089,7 +17376,6 @@ impl App {
     /// 阅读页快捷键：空格/PgDn/→ 下一屏，PgUp/← 上一屏，Shift+←/→ 跨章，Home 回章首。
     fn handle_reader_key(&mut self, cx: &mut Cx, ke: &KeyEvent) {
         if !self.on_reader_page
-            || self.reader_theme_open
             || READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
             || self.text_input_has_focus(cx)
         {
@@ -17201,6 +17487,8 @@ impl App {
         use crate::ruby_word::*;
 
         let settings = settings.normalized();
+        let layout_changed =
+            reader_settings_change_requires_layout(&current_reader_settings(), &settings);
         self.load_reader_font(cx, settings.font, false);
         let scene_changed = *READER_THEME.read().unwrap() != settings.theme
             || *READER_BACKGROUND.read().unwrap() != settings.background;
@@ -17262,7 +17550,11 @@ impl App {
         self.set_gloss_rows_visible(cx, settings.gloss_enabled);
         self.refresh_swatches(cx);
 
-        self.refresh_current_chapter(cx);
+        if layout_changed {
+            self.refresh_current_chapter(cx);
+        } else {
+            self.redraw_reader_annotations(cx);
+        }
         self.ui.widget(cx, ids!(book_shelf)).redraw(cx);
         if scene_changed {
             self.apply_runtime_theme(cx, settings.theme);
@@ -17782,6 +18074,31 @@ impl MatchEvent for App {
         if app_action_batch_is_passive(actions, self.on_reader_page) {
             return;
         }
+        // Save acknowledgements are delivered before the next Draw. They must
+        // update their hint, not scan every unrelated control and delay paint.
+        if reader_settings_notices_only(actions) {
+            for action in actions {
+                if let Some(notice) = action.downcast_ref::<ReaderSettingsAction>() {
+                    self.handle_reader_settings_notice(cx, notice);
+                }
+            }
+            return;
+        }
+        if self.reader_customise_draft.is_some() {
+            let controls = self.reader_controls();
+            let buttons = crate::reader_settings_panel::theme_modes()
+                .map(|(id, mode)| (controls.ui.widget(cx, &[id]).widget_uid(), mode));
+            let choice = crate::reader_settings_panel::theme_button_choice(actions, &buttons);
+            drop(controls);
+            if let Some(background) = choice {
+                if let Some(draft) = &mut self.reader_customise_draft {
+                    draft.background = background;
+                    draft.bold_text = background == ReaderBackground::Bold;
+                }
+                self.apply_reader_customise_live(cx);
+                return;
+            }
+        }
         // A menu action can close the overlay before this action batch reaches
         // the shelf-card loop. Preserve the state from the start of the batch
         // so that the same pointer release can never open a book underneath.
@@ -17848,7 +18165,6 @@ impl MatchEvent for App {
             if action.downcast_ref::<ReaderToolbarTap>().is_some() {
                 if self.on_reader_page
                     && self.compact_layout
-                    && !self.reader_theme_open
                     && !self.toc_open
                     && !self.bookmarks_open
                     && !self.note_open
@@ -17991,27 +18307,7 @@ impl MatchEvent for App {
                 continue;
             }
             if let Some(settings_action) = action.downcast_ref::<ReaderSettingsAction>() {
-                match settings_action {
-                    ReaderSettingsAction::Saved => {
-                        self.ui.label(cx, ids!(settings_hint)).set_text(
-                            cx,
-                            localized(
-                                "阅读设置已自动保存在本机。",
-                                "Reading settings saved on this device.",
-                            ),
-                        );
-                    }
-                    ReaderSettingsAction::Error(error) => {
-                        self.ui.label(cx, ids!(settings_hint)).set_text(
-                            cx,
-                            &if app_language() == AppLanguage::English {
-                                format!("Failed to save reading settings: {error}")
-                            } else {
-                                format!("阅读设置保存失败：{error}")
-                            },
-                        );
-                    }
-                }
+                self.handle_reader_settings_notice(cx, settings_action);
                 continue;
             }
             if let Some(session_action) = action.downcast_ref::<ReadingSessionAction>() {
@@ -19582,18 +19878,8 @@ impl MatchEvent for App {
                 .button(cx, ids!(titlebar_appearance_btn))
                 .clicked(actions)
         {
-            self.reader_theme_open = !self.reader_theme_open;
-            if self.reader_theme_open {
-                self.close_reader_info_popup(cx);
-            }
-            self.ui
-                .widget(cx, ids!(reader_theme_menu))
-                .set_visible(cx, self.reader_theme_open);
-            self.ui
-                .widget(cx, ids!(reader_theme_arrow_row))
-                .set_visible(cx, self.reader_theme_open);
-            self.set_reader_toolbar_visible(cx, true);
-            self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
+            self.close_reader_info_popup(cx);
+            self.open_reader_customise(cx);
         }
         if self
             .ui
@@ -19623,100 +19909,82 @@ impl MatchEvent for App {
             (id!(reader_mode_focus), ReaderBackground::Night),
         ] {
             if self.ui.button(cx, &[id]).clicked(actions) {
-                self.apply_reader_mode(cx, background);
-            }
-        }
-        // Quick choices are committed preferences, never a layout edit or a
-        // draft preview. Preserve the current page, caches and turn history.
-        let mut quick_color_changed = false;
-        for (ids, kind, slots) in [
-            (
-                [
-                    id!(reader_quick_pen_vermilion),
-                    id!(reader_quick_pen_cobalt),
-                    id!(reader_quick_pen_moss),
-                    id!(reader_quick_pen_graphite),
-                ],
-                ColorKind::Selection,
-                crate::settings_swatch::PEN_SLOTS,
-            ),
-            (
-                [
-                    id!(reader_quick_highlight_yellow),
-                    id!(reader_quick_highlight_green),
-                    id!(reader_quick_highlight_blue),
-                    id!(reader_quick_highlight_pink),
-                ],
-                ColorKind::Highlight,
-                crate::mark_span::MARKER_SLOTS,
-            ),
-        ] {
-            for (id, slot) in ids.into_iter().zip(slots) {
-                if self.ui.button(cx, &[id]).clicked(actions) {
-                    let lock = match kind {
-                        ColorKind::Selection => &SELECTION_SLOT,
-                        _ => &crate::mark_span::HL_SLOT,
-                    };
-                    let mut selected = lock.write().unwrap();
-                    quick_color_changed |= *selected != slot;
-                    *selected = slot;
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.background = background;
+                    draft.bold_text = background == ReaderBackground::Bold;
                 }
             }
         }
-        if quick_color_changed {
-            self.refresh_swatches(cx);
-            self.ui.redraw(cx);
-            self.persist_reader_settings(cx);
+        for tab in crate::reader_settings_panel::ReaderSettingsTab::ALL {
+            if self.ui.button(cx, &[tab.button()]).clicked(actions)
+                && self.reader_customise_draft.is_some()
+                && self.reader_customise_tab != tab
+            {
+                self.close_reader_customise_dropdowns(cx);
+                self.reader_customise_tab = tab;
+                self.configure_reader_customise_layout(cx);
+                self.pending_customise_preview_after_draw = true;
+                self.ui
+                    .widget(cx, ids!(reader_customise_scroll))
+                    .set_scroll_pos(cx, DVec2::default());
+                self.sync_reader_customise_controls(cx);
+            }
         }
-        if self
-            .ui
-            .button(cx, ids!(reader_customise_btn))
-            .clicked(actions)
+        for (id, slot) in [
+            id!(reader_quick_pen_vermilion),
+            id!(reader_quick_pen_cobalt),
+            id!(reader_quick_pen_moss),
+            id!(reader_quick_pen_graphite),
+        ]
+        .into_iter()
+        .zip(crate::settings_swatch::PEN_SLOTS)
         {
-            self.reader_theme_open = false;
-            self.ui
-                .widget(cx, ids!(reader_theme_menu))
-                .set_visible(cx, false);
-            self.ui
-                .widget(cx, ids!(reader_theme_arrow_row))
-                .set_visible(cx, false);
-            self.open_reader_customise(cx);
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.selection_color_slot = slot;
+                    self.sync_reader_customise_controls(cx);
+                }
+            }
         }
-        if self
-            .ui
-            .button(cx, ids!(reader_customise_close))
-            .clicked(actions)
-            || self
-                .ui
-                .button(cx, ids!(reader_customise_cancel))
-                .clicked(actions)
-            || self
-                .ui
-                .modal(cx, ids!(reader_customise_modal))
-                .dismissed(actions)
+        if self.ui.modal(cx, ids!(reader_customise_modal)).dismissed(actions)
+            // The pinned Modal emits Dismissed on its content UID. Reconcile
+            // native closure too, so overlay/Back/Escape dismissal cannot
+            // leave a detached live projection and a locked reading surface.
+            || (self.reader_customise_draft.is_some()
+                && !self.ui.modal(cx, ids!(reader_customise_modal)).is_open())
         {
             self.close_reader_customise(cx);
         }
         if self
             .ui
-            .button(cx, ids!(reader_customise_save))
+            .button(cx, ids!(reader_customise_font_choice))
             .clicked(actions)
+            && self.reader_customise_font_tap.allows_click()
+            && self.reader_customise_draft.is_some()
         {
-            self.save_reader_customise(cx);
+            self.reader_customise_open_dropdown = Some(id!(reader_customise_font_choice));
+            self.ui
+                .widget(cx, ids!(reader_customise_font_menu))
+                .set_visible(cx, true);
+            self.ui
+                .widget(cx, ids!(reader_customise_font_scroll))
+                .set_scroll_pos(cx, DVec2::default());
+            self.sync_reader_customise_anchor(cx);
         }
-        if let Some(index) = self
-            .ui
-            .drop_down(cx, ids!(reader_customise_font_choice))
-            .selected(actions)
+        for (id, font) in crate::reader_settings_panel::font_option_ids()
+            .into_iter()
+            .zip(ReaderFont::ALL)
         {
-            self.reader_customise_open_dropdown = None;
-            if let (Some(draft), Some(font)) = (
-                self.reader_customise_draft.as_mut(),
-                ReaderFont::from_index(index),
-            ) {
-                draft.font = font;
-                self.load_reader_font(cx, font, true);
-                self.sync_reader_customise_controls(cx);
+            if self.ui.button(cx, &[id]).clicked(actions)
+                && self.reader_customise_font_tap.allows_click()
+                && self.reader_customise_open_dropdown == Some(id!(reader_customise_font_choice))
+            {
+                self.close_reader_customise_dropdowns(cx);
+                if let Some(draft) = self.reader_customise_draft.as_mut() {
+                    draft.font = font;
+                    self.load_reader_font(cx, font, true);
+                    self.sync_reader_customise_controls(cx);
+                }
             }
         }
         if let Some(bold) = self
@@ -19958,6 +20226,7 @@ impl MatchEvent for App {
                 self.sync_reader_customise_controls(cx);
             }
         }
+        self.apply_reader_customise_live(cx);
         if self.ui.button(cx, ids!(nav_reader)).clicked(actions) {
             if let Some(book) = Self::reading_home_book() {
                 self.pending_last_read_open = false;
@@ -20554,13 +20823,6 @@ impl MatchEvent for App {
                 self.note_open = false;
                 self.reader_ai_open = false;
                 self.bookmarks_open = false;
-                self.reader_theme_open = false;
-                self.ui
-                    .widget(cx, ids!(reader_theme_menu))
-                    .set_visible(cx, false);
-                self.ui
-                    .widget(cx, ids!(reader_theme_arrow_row))
-                    .set_visible(cx, false);
             }
             self.sync_reader_panel_layout(cx);
             self.ui.redraw(cx);
@@ -20907,8 +21169,8 @@ impl AppMain for App {
         }
         script_eval!(vm, {
             // 阅读背景是整个应用场景的单一颜色来源。这里覆盖组件模板实际
-            // 消费的 token，保证所有页面、卡片和控件在 ScriptReapply 后
-            // 仍与正文使用同一纸张配色，而不会退回官方主题的中性灰。
+            // 消费的启动 token；运行时换色与重载恢复由阅读场景投影负责。
+            // ScriptReapply 只重放已有模板，不会重新执行本函数。
             mod.readwise_theme_scene = mod.readwise_theme_scene{
                 color_bg_app: #(surface)
                 color_fg_app: #(surface)
@@ -21073,6 +21335,7 @@ impl AppMain for App {
         crate::reader_page_turn::script_mod(vm);
         crate::mark_span::script_mod(vm);
         crate::settings_swatch::script_mod(vm);
+        crate::reader_settings_panel::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -21179,6 +21442,35 @@ impl AppMain for App {
         {
             self.close_library_action_menu(cx);
         }
+        if matches!(
+            event,
+            Event::LiveEdit | Event::ScriptReapply | Event::WindowGeomChange(_)
+        ) {
+            self.close_reader_customise_dropdowns(cx);
+        }
+        if self.reader_customise_open_dropdown == Some(id!(reader_customise_font_choice))
+            && self
+                .ui
+                .widget(cx, ids!(reader_customise_font_menu))
+                .visible()
+        {
+            if matches!(event, Event::KeyDown(key) if key.key_code == KeyCode::Escape)
+                || event.back_pressed()
+            {
+                self.close_reader_customise_dropdowns(cx);
+                return;
+            }
+            if let Event::Scroll(scroll) = event {
+                let menu = current_clipped_rect(
+                    cx,
+                    self.ui.widget(cx, ids!(reader_customise_font_menu)).area(),
+                );
+                if !menu.contains(scroll.abs) {
+                    self.close_reader_customise_dropdowns(cx);
+                    return;
+                }
+            }
+        }
         let reader_swipe = self.track_reader_swipe(cx, event);
         let pointer_start = match event {
             Event::MouseDown(e) => Some(e.abs),
@@ -21242,27 +21534,6 @@ impl AppMain for App {
                             return;
                         }
                     }
-                }
-            }
-        }
-        if self.reader_theme_open {
-            if let Some(abs) = pointer_start {
-                let menu =
-                    current_clipped_rect(cx, self.ui.widget(cx, ids!(reader_theme_menu)).area());
-                let trigger_hit = [id!(reader_appearance_btn), id!(titlebar_appearance_btn)]
-                    .into_iter()
-                    .any(|id| {
-                        current_clipped_rect(cx, self.ui.widget(cx, &[id]).area()).contains(abs)
-                    });
-                if !menu.contains(abs) && !trigger_hit {
-                    self.reader_theme_open = false;
-                    self.ui
-                        .widget(cx, ids!(reader_theme_menu))
-                        .set_visible(cx, false);
-                    self.ui
-                        .widget(cx, ids!(reader_theme_arrow_row))
-                        .set_visible(cx, false);
-                    self.ui.widget(cx, ids!(reader_theme_layer)).redraw(cx);
                 }
             }
         }
@@ -21479,7 +21750,7 @@ impl AppMain for App {
                     event.abs.y >= 0.0 && event.abs.y <= toolbar_height
                 };
                 let visible = over_header
-                    || self.reader_theme_open
+                    || self.reader_customise_draft.is_some()
                     || self.toc_open
                     || self.bookmarks_open
                     || self.note_open
@@ -21513,16 +21784,29 @@ impl AppMain for App {
             _ => {}
         }
         self.match_event(cx, event);
-        // ChapterList is drawn underneath the non-modal aA overlay. Mirror the
-        // owner state before dispatch so its wheel/touch/key handlers cannot
-        // turn pages or begin selection while the colour panel is scrolling.
-        READER_APPEARANCE_OPEN.store(
-            self.on_reader_page && self.reader_theme_open,
-            Ordering::Release,
-        );
+        if self.reader_customise_draft.is_some()
+            && self.reader_customise_tab == ReaderSettingsTab::Text
+        {
+            let id = if self
+                .ui
+                .widget(cx, ids!(reader_customise_font_menu))
+                .visible()
+            {
+                id!(reader_customise_font_menu)
+            } else {
+                id!(reader_customise_font_choice)
+            };
+            let rect = current_clipped_rect(cx, self.ui.widget(cx, &[id]).area());
+            self.reader_customise_font_tap.track(event, rect);
+        } else {
+            self.reader_customise_font_tap.cancel();
+        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if matches!(event, Event::Draw(_) | Event::WindowGeomChange(_)) {
             self.sync_reader_toolbar_placement(cx);
+            if self.reader_customise_draft.is_some() {
+                self.sync_reader_customise_anchor(cx);
+            }
         }
         if let Event::WindowDragQuery(query) = event {
             // Makepad treats the whole caption bar as a window drag target.
