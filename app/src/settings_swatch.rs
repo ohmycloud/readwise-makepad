@@ -146,11 +146,13 @@ script_mod! {
         flow: Right spacing: 4 align: Align{y: 0.5}
     }
     mod.widgets.SettingsColorTitle = Label{
-        width: 136
+        width: 88 height: Fit
+        padding: 0
         draw_text.color: theme.color_label_inner_inactive
     }
     mod.widgets.SettingsColorName = Label{
         width: 68 height: Fit
+        padding: 0
         draw_text.text_style.font_size: 11
         draw_text.color: theme.color_label_inner_inactive
     }

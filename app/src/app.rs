@@ -15,6 +15,7 @@ use makepad_ai::{
 };
 use makepad_widgets::makepad_draw::text::geom::Point as LayoutPoint;
 use makepad_widgets::makepad_draw::text::layouter::LaidoutText;
+use makepad_widgets::makepad_draw::turtle::RowAlign;
 use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState, WindowDragQueryResponse};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
@@ -7960,9 +7961,10 @@ script_mod! {
                                 gloss_size_label := Label{ text: "7.5" }
                                 gloss_inc := ButtonFlat{ text: "A+" }
                             }
+                            // Wrapped rows use row_align rather than align.y.
                             gloss_color_row := View{
                                 width: Fill height: Fit
-                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                flow: Flow.Right{wrap: true row_align: RowAlign.Center} spacing: 12 align: Align{y: 0.5}
                                 gloss_color_title := mod.widgets.SettingsColorTitle{text: "注音字色"}
                                 gloss_color_picker := mod.widgets.SettingsColorPicker{
                                     gc0 := mod.widgets.SettingsColorSwatch{}
@@ -7974,7 +7976,7 @@ script_mod! {
                             }
                             gloss_bg_row := View{
                                 width: Fill height: Fit
-                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                flow: Flow.Right{wrap: true row_align: RowAlign.Center} spacing: 12 align: Align{y: 0.5}
                                 gloss_bg_title := mod.widgets.SettingsColorTitle{text: "注音背景"}
                                 gloss_bg_picker := mod.widgets.SettingsColorPicker{
                                     gb0 := mod.widgets.SettingsColorSwatch{}
@@ -7986,7 +7988,7 @@ script_mod! {
                             }
                             word_color_row := View{
                                 width: Fill height: Fit
-                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                flow: Flow.Right{wrap: true row_align: RowAlign.Center} spacing: 12 align: Align{y: 0.5}
                                 word_color_title := mod.widgets.SettingsColorTitle{text: "词字色"}
                                 word_color_picker := mod.widgets.SettingsColorPicker{
                                     wc0 := mod.widgets.SettingsColorSwatch{}
@@ -7998,7 +8000,7 @@ script_mod! {
                             }
                             word_bg_row := View{
                                 width: Fill height: Fit
-                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                flow: Flow.Right{wrap: true row_align: RowAlign.Center} spacing: 12 align: Align{y: 0.5}
                                 word_bg_title := mod.widgets.SettingsColorTitle{text: "词背景"}
                                 word_bg_picker := mod.widgets.SettingsColorPicker{
                                     wb0 := mod.widgets.SettingsColorSwatch{}
@@ -8015,7 +8017,7 @@ script_mod! {
                             }
                             sel_color_row := View{
                                 width: Fill height: Fit
-                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                flow: Flow.Right{wrap: true row_align: RowAlign.Center} spacing: 12 align: Align{y: 0.5}
                                 selection_color_title := mod.widgets.SettingsColorTitle{text: "选中颜色"}
                                 selection_color_picker := mod.widgets.SettingsColorPicker{
                                     sc0 := mod.widgets.SettingsColorSwatch{}
@@ -8027,7 +8029,7 @@ script_mod! {
                             }
                             hl_color_row := View{
                                 width: Fill height: Fit
-                                flow: Flow.Right{wrap: true} spacing: 12 align: Align{y: 0.5}
+                                flow: Flow.Right{wrap: true row_align: RowAlign.Center} spacing: 12 align: Align{y: 0.5}
                                 highlight_color_title := mod.widgets.SettingsColorTitle{text: "高亮颜色"}
                                 highlight_color_picker := mod.widgets.SettingsColorPicker{
                                     hc0 := mod.widgets.SettingsColorSwatch{}
@@ -13057,7 +13059,11 @@ impl App {
             if let Some(mut view) = options.borrow_mut::<View>() {
                 view.walk.width = if stacked { Size::fill() } else { Size::fit() };
                 view.layout.flow = if stacked {
-                    Flow::right_wrap()
+                    // Keep the current colour name on the swatches' centre line.
+                    Flow::Right {
+                        wrap: true,
+                        row_align: RowAlign::Center,
+                    }
                 } else {
                     Flow::right()
                 };
@@ -17935,6 +17941,23 @@ impl App {
     }
 
     fn refresh_swatch_names(&self, cx: &mut Cx, language: AppLanguage) {
+        // Chinese titles fit a compact column; keep room for longer English names.
+        let title_width = if language == AppLanguage::English {
+            136.0
+        } else {
+            88.0
+        };
+        for id in [
+            id!(gloss_color_title),
+            id!(gloss_bg_title),
+            id!(word_color_title),
+            id!(word_bg_title),
+            id!(selection_color_title),
+            id!(highlight_color_title),
+        ] {
+            let mut title = self.ui.widget(cx, &[id]);
+            script_apply_eval!(cx, title, {width: #(title_width)});
+        }
         for (_, name, kind, slot) in settings_swatch_rows(&current_reader_settings()) {
             self.ui
                 .widget(cx, &[name])
