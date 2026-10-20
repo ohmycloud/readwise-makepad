@@ -6,11 +6,11 @@ use readwise_core::settings::ReaderBackground;
 pub fn theme_modes() -> [(LiveId, ReaderBackground); 6] {
     [
         (id!(reader_mode_original), ReaderBackground::Original),
-        (id!(reader_mode_quiet), ReaderBackground::Sepia),
+        (id!(reader_mode_quiet), ReaderBackground::Quiet),
         (id!(reader_mode_paper), ReaderBackground::Paper),
-        (id!(reader_mode_bold), ReaderBackground::Bold),
+        (id!(reader_mode_sepia), ReaderBackground::Sepia),
         (id!(reader_mode_calm), ReaderBackground::Sage),
-        (id!(reader_mode_focus), ReaderBackground::Night),
+        (id!(reader_mode_snow), ReaderBackground::Snow),
     ]
 }
 
@@ -60,6 +60,31 @@ mod theme_action_tests {
             group: None,
         })
     }
+    #[test]
+    fn theme_choices_are_unique_and_include_sepia_and_snow() {
+        let modes = theme_modes();
+        for (index, (id, background)) in modes.iter().enumerate() {
+            assert!(!modes[..index].iter().any(|(other_id, other_background)| {
+                id == other_id || background == other_background
+            }));
+        }
+        assert_eq!(modes[3], (id!(reader_mode_sepia), ReaderBackground::Sepia));
+        assert_eq!(modes[5], (id!(reader_mode_snow), ReaderBackground::Snow));
+        for (key, zh, en) in [
+            ("reader_mode_sepia", "复古", "Sepia"),
+            ("reader_mode_snow", "雪白", "Snow"),
+        ] {
+            assert_eq!(
+                crate::i18n::text(readwise_core::settings::AppLanguage::Chinese, key),
+                zh
+            );
+            assert_eq!(
+                crate::i18n::text(readwise_core::settings::AppLanguage::English, key),
+                en
+            );
+        }
+    }
+
     #[test]
     fn isolated_theme_click_uses_short_path_but_mixed_actions_do_not() {
         let buttons = [(WidgetUid(1), ReaderBackground::Night)];

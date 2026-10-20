@@ -2594,9 +2594,10 @@ fn reader_palette(background: ReaderBackground, theme: ReaderTheme) -> (Vec4f, V
         ReaderBackground::FollowTheme => (0x4d4d_4dff, 0xd9d9_d9ff),
         ReaderBackground::Original => (0xffffff_ff, 0x2020_20ff),
         ReaderBackground::Paper => (0xf7f4_eaff, 0x2b29_25ff),
-        ReaderBackground::Sepia => (0xf2e3_c6ff, 0x3b30_25ff),
+        ReaderBackground::Quiet => (0xf2e3_c6ff, 0x3b30_25ff),
+        ReaderBackground::Sepia => (0xf1e6_cfff, 0x3327_1bff),
         ReaderBackground::Sage => (0xe7ef_e3ff, 0x2734_2bff),
-        ReaderBackground::Bold => (0xfaf8_f2ff, 0x1717_17ff),
+        ReaderBackground::Snow => (0xffffff_ff, 0x1415_18ff),
         ReaderBackground::Night => (0x2025_2bff, 0xd8d4_caff),
     };
     (Vec4f::from_u32(surface), Vec4f::from_u32(text))
@@ -2663,7 +2664,7 @@ fn reader_scene_palette(background: ReaderBackground, theme: ReaderTheme) -> Rea
             0x2b29_2514,
             0x2b29_2528,
         ),
-        ReaderBackground::Sepia => (
+        ReaderBackground::Quiet => (
             0xe2cf_acff,
             0xccb9_95ff,
             0x7562_4eff,
@@ -2679,13 +2680,21 @@ fn reader_scene_palette(background: ReaderBackground, theme: ReaderTheme) -> Rea
             0x2734_2b14,
             0x2734_2b28,
         ),
-        ReaderBackground::Bold => (
-            0xeae8_e2ff,
-            0xbdb9_afff,
-            0x5555_55ff,
-            0x2b2b_2bff,
-            0x1111_1118,
-            0x1111_112e,
+        ReaderBackground::Sepia => (
+            0xe6d8_bcff,
+            0xcbbd_a2ff,
+            0x8c78_5bff,
+            0x3b7a_3dff,
+            0x3327_1b14,
+            0x3327_1b28,
+        ),
+        ReaderBackground::Snow => (
+            0xf3f4_f3ff,
+            0xd8dc_d8ff,
+            0x6b70_6bff,
+            0x3b7a_3dff,
+            0x1415_1814,
+            0x1415_1828,
         ),
         ReaderBackground::Night => (
             0x343b_43ff,
@@ -2925,6 +2934,23 @@ mod reader_scene_palette_tests {
                 let scene = reader_scene_palette(background, theme);
                 assert_ne!(scene.field, scene.surface);
                 assert_ne!(scene.border, scene.surface);
+            }
+        }
+    }
+
+    #[test]
+    fn sepia_and_snow_match_the_reference_and_share_scene_paints() {
+        for theme in [ReaderTheme::Dark, ReaderTheme::Light] {
+            for (background, surface, text) in [
+                (ReaderBackground::Sepia, 0xf1e6_cfff, 0x3327_1bff),
+                (ReaderBackground::Snow, 0xffffff_ff, 0x1415_18ff),
+            ] {
+                let expected = (Vec4f::from_u32(surface), Vec4f::from_u32(text));
+                assert_eq!(reader_palette(background, theme), expected);
+                let scene = reader_scene_palette(background, theme);
+                assert_eq!((scene.surface, scene.text), expected);
+                assert_ne!(scene.field, scene.surface);
+                assert_eq!(scene.accent, Vec4f::from_u32(0x3b7a_3dff));
             }
         }
     }
@@ -3178,6 +3204,80 @@ mod lazy_gloss_tests {
     }
 
     #[test]
+    fn pdf_text_uses_epub_ruby_highlight_and_stable_pagination_coordinates() {
+        let directory =
+            std::env::temp_dir().join(format!("readwise-pdf-reader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("book.pdf");
+        std::fs::write(
+            &path,
+            include_bytes!("../../core/tests/fixtures/reader-text.pdf"),
+        )
+        .unwrap();
+        let loaded = readwise_core::books::load_imported_chapters_with_toc(&path).unwrap();
+        let mut book = book();
+        book.chapters = loaded
+            .chapters
+            .iter()
+            .map(|chapter| chapter.html.clone())
+            .collect();
+        book.chapter_paths = loaded
+            .chapters
+            .iter()
+            .map(|chapter| chapter.source_path.clone())
+            .collect();
+        book.toc = loaded.toc;
+        book.glosses.insert("reader".into(), "读者".into());
+        let first = book.chapter_chunks(0, true).unwrap();
+        let second = book.chapter_chunks(1, true).unwrap();
+        assert!(first.join("").contains("<ruby>solitude"));
+        assert!(second.join("").contains("<ruby>reader"));
+        let text = readwise_core::vocab::annotate::rendered_text(&first[0]);
+        let start = text.find("solitude").unwrap();
+        let highlight = readwise_core::books::Highlight {
+            id: "pdf-highlight".into(),
+            start_block: 0,
+            end_block: 0,
+            start_char: start,
+            end_char: start + "solitude".len(),
+            color: "yellow".into(),
+        };
+        assert_eq!(
+            highlight_range_in_block(&highlight, 0, text.len()),
+            Some((start, start + 8))
+        );
+        let signature = reader_page_layout_signature(0, 17, 25);
+        book.mark_word_known("solitude");
+        book.mark_word_known("reader");
+        for (index, before) in [first, second].iter().enumerate() {
+            let after = book.chapter_chunks(index, true).unwrap();
+            assert_eq!(before.len(), after.len());
+            assert_eq!(
+                readwise_core::vocab::annotate::rendered_text(&before.join("")),
+                readwise_core::vocab::annotate::rendered_text(&after.join(""))
+            );
+            assert!(!after.join("").contains("孤独"));
+            assert!(!after.join("").contains("读者"));
+            assert_eq!(
+                pagination_chapter_chunks(
+                    &book.chapters[index],
+                    book.glossed_chapter_chunks[index].clone(),
+                    true,
+                    &book.glosses,
+                    &book.known_words
+                ),
+                after
+            );
+        }
+        assert_eq!(reader_page_layout_signature(0, 17, 25), signature);
+        let reopened = readwise_core::books::load_imported_chapters_with_toc(&path).unwrap();
+        assert_eq!(reopened.chapters[0].html, book.chapters[0]);
+        // Old image-reader page bookmarks still address the same original page.
+        assert_eq!(ReaderLocation::decode("v3:1:0:0", 2).chapter, 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn glosses_only_the_requested_chapter_and_keeps_raw_html() {
         let mut book = book();
         let second = book.chapter_chunks(1, true).unwrap().join("");
@@ -3372,14 +3472,25 @@ enum SelAction {
     Hide,
 }
 
-const SELECTION_POPUP_MAX_WIDTH: f64 = 520.0;
+const SELECTION_POPUP_MAX_WIDTH: f64 = 560.0;
 const SELECTION_POPUP_SIDE_INSET: f64 = 12.0;
 const SELECTION_POPUP_GAP: f64 = 10.0;
-const SELECTION_POPUP_ESTIMATED_HEIGHT: f64 = 56.0;
-const WORD_CARD_MAX_WIDTH: f64 = 420.0;
+const SELECTION_POPUP_ESTIMATED_HEIGHT: f64 = 44.0;
+
+fn selection_popup_height(viewport: Rect, content_height: f64) -> f64 {
+    content_height
+        .max(1.0)
+        .min((viewport.size.y - SELECTION_POPUP_SIDE_INSET * 2.0).max(1.0))
+}
+
+const WORD_CARD_MAX_WIDTH: f64 = 540.0;
 const WORD_CARD_SIDE_INSET: f64 = 12.0;
-const WORD_CARD_GAP: f64 = 10.0;
-const WORD_CARD_ESTIMATED_HEIGHT: f64 = 116.0;
+const WORD_CARD_GAP: f64 = 24.0;
+const WORD_CARD_ESTIMATED_HEIGHT: f64 = 340.0;
+
+fn word_card_height(viewport: Rect) -> f64 {
+    WORD_CARD_ESTIMATED_HEIGHT.min((viewport.size.y - WORD_CARD_SIDE_INSET * 2.0).max(1.0))
+}
 const LIBRARY_ACTION_MENU_MAX_WIDTH: f64 = 238.0;
 const LIBRARY_ACTION_MENU_ESTIMATED_HEIGHT: f64 = 238.0;
 
@@ -3392,11 +3503,15 @@ fn selection_popup_captures_pointer(
     popup_open && selection_exists && popup_rect().contains(abs)
 }
 
-fn selection_popup_geometry(viewport: Rect, anchor: DVec2, popup_height: f64) -> (DVec2, f64) {
+fn selection_popup_geometry(
+    viewport: Rect,
+    anchor: DVec2,
+    popup_height: f64,
+    max_width: f64,
+) -> (DVec2, f64) {
     let horizontal_inset = SELECTION_POPUP_SIDE_INSET.min(viewport.size.x.max(0.0) * 0.25);
     let vertical_inset = SELECTION_POPUP_SIDE_INSET.min(viewport.size.y.max(0.0) * 0.25);
-    let popup_width =
-        SELECTION_POPUP_MAX_WIDTH.min((viewport.size.x - horizontal_inset * 2.0).max(1.0));
+    let popup_width = max_width.min((viewport.size.x - horizontal_inset * 2.0).max(1.0));
     let min_x = viewport.pos.x + horizontal_inset;
     let max_x = (viewport.pos.x + viewport.size.x - horizontal_inset - popup_width).max(min_x);
     let x = (anchor.x - popup_width * 0.5).clamp(min_x, max_x);
@@ -3440,12 +3555,12 @@ fn word_card_geometry(viewport: Rect, anchor: DVec2, card_height: f64) -> (DVec2
     let max_y = (viewport.pos.y + viewport.size.y - vertical_inset - card_height).max(min_y);
     let above = anchor.y - card_height - WORD_CARD_GAP;
     let below = anchor.y + WORD_CARD_GAP;
-    let y = if above >= min_y {
-        above
-    } else if below <= max_y {
+    let y = if below <= max_y {
         below
+    } else if above >= min_y {
+        above
     } else {
-        above.clamp(min_y, max_y)
+        below.clamp(min_y, max_y)
     };
     (dvec2(x, y), card_width)
 }
@@ -4095,9 +4210,11 @@ fn spawn_open_book(item: ShelfItem) {
     *CURRENT_ITEM.write().unwrap() = Some(item.clone());
     std::thread::spawn(move || {
         let open_started = std::time::Instant::now();
-        let loaded = match readwise_core::books::epub_meta::load_chapters_with_toc(
-            std::path::Path::new(&item.file_path),
-        ) {
+        let loaded = match DB
+            .get()
+            .ok_or_else(|| "数据库尚未就绪".to_string())
+            .and_then(|db| db.load_book_chapters(&item.id, std::path::Path::new(&item.file_path)))
+        {
             Ok(list) => list,
             Err(e) => {
                 Cx::post_action(ReaderAction::OpenError {
@@ -4324,9 +4441,14 @@ mod selection_popup_tests {
             pos: dvec2(100.0, 80.0),
             size: dvec2(800.0, 600.0),
         };
-        let (position, width) = selection_popup_geometry(viewport, dvec2(500.0, 400.0), 76.0);
-        assert_eq!(width, 520.0);
-        assert_eq!(position, dvec2(240.0, 314.0));
+        let (position, width) = selection_popup_geometry(
+            viewport,
+            dvec2(500.0, 400.0),
+            76.0,
+            SELECTION_POPUP_MAX_WIDTH,
+        );
+        assert_eq!(width, 560.0);
+        assert_eq!(position, dvec2(220.0, 314.0));
     }
 
     #[test]
@@ -4335,7 +4457,8 @@ mod selection_popup_tests {
             pos: dvec2(20.0, 40.0),
             size: dvec2(320.0, 500.0),
         };
-        let (position, width) = selection_popup_geometry(viewport, dvec2(28.0, 55.0), 76.0);
+        let (position, width) =
+            selection_popup_geometry(viewport, dvec2(28.0, 55.0), 76.0, SELECTION_POPUP_MAX_WIDTH);
         assert_eq!(width, 296.0);
         assert_eq!(position, dvec2(32.0, 65.0));
     }
@@ -4346,7 +4469,12 @@ mod selection_popup_tests {
             pos: dvec2(0.0, 0.0),
             size: dvec2(260.0, 100.0),
         };
-        let (position, _) = selection_popup_geometry(viewport, dvec2(130.0, 50.0), 90.0);
+        let (position, _) = selection_popup_geometry(
+            viewport,
+            dvec2(130.0, 50.0),
+            90.0,
+            SELECTION_POPUP_MAX_WIDTH,
+        );
         assert_eq!(position.y, 12.0);
     }
 
@@ -4381,7 +4509,12 @@ mod selection_popup_tests {
             );
             for anchor in [dvec2(0.0, 0.0), size * 0.5, size, size + dvec2(20.0, 20.0)] {
                 for height in [88.0, 126.0] {
-                    let (position, width) = selection_popup_geometry(viewport, anchor, height);
+                    let (position, width) = selection_popup_geometry(
+                        viewport,
+                        anchor,
+                        height,
+                        SELECTION_POPUP_MAX_WIDTH,
+                    );
                     assert!(position.x >= safe.left);
                     assert!(position.y >= safe.top);
                     assert!(position.x + width <= size.x - safe.right);
@@ -4392,14 +4525,41 @@ mod selection_popup_tests {
     }
 
     #[test]
+    fn tall_selection_content_scrolls_inside_short_safe_viewport() {
+        let viewport = reader_overlay_viewport(
+            Rect {
+                pos: dvec2(0.0, 0.0),
+                size: dvec2(568.0, 240.0),
+            },
+            dvec2(568.0, 240.0),
+            SafeAreaInsets {
+                top: 24.0,
+                bottom: 21.0,
+                ..Default::default()
+            },
+        );
+        let height = selection_popup_height(viewport, 400.0);
+        let (pos, width) = selection_popup_geometry(
+            viewport,
+            dvec2(280.0, 210.0),
+            height,
+            SELECTION_POPUP_MAX_WIDTH,
+        );
+        assert_eq!(height, viewport.size.y - 24.0);
+        assert!(pos.y >= 24.0);
+        assert!(pos.y + height <= 219.0);
+        assert!(pos.x + width <= 568.0);
+    }
+
+    #[test]
     fn word_card_stays_near_the_clicked_word() {
         let viewport = Rect {
             pos: dvec2(100.0, 80.0),
             size: dvec2(800.0, 600.0),
         };
         let (position, width) = word_card_geometry(viewport, dvec2(500.0, 400.0), 116.0);
-        assert_eq!(width, 420.0);
-        assert_eq!(position, dvec2(290.0, 274.0));
+        assert_eq!(width, 540.0);
+        assert_eq!(position, dvec2(230.0, 424.0));
     }
 
     #[test]
@@ -4410,7 +4570,44 @@ mod selection_popup_tests {
         };
         let (position, width) = word_card_geometry(viewport, dvec2(28.0, 55.0), 116.0);
         assert_eq!(width, 296.0);
-        assert_eq!(position, dvec2(32.0, 65.0));
+        assert_eq!(position, dvec2(32.0, 79.0));
+    }
+
+    #[test]
+    fn word_card_flips_above_the_last_line() {
+        let viewport = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(800.0, 700.0),
+        };
+        let (position, _) = word_card_geometry(viewport, dvec2(400.0, 650.0), 340.0);
+        assert_eq!(position.y, 286.0);
+    }
+
+    #[test]
+    fn word_card_bounds_respect_safe_areas_in_narrow_and_short_viewports() {
+        for size in [dvec2(320.0, 568.0), dvec2(844.0, 260.0)] {
+            let safe = SafeAreaInsets {
+                top: 24.0,
+                bottom: 18.0,
+                left: 12.0,
+                right: 16.0,
+            };
+            let viewport = reader_overlay_viewport(
+                Rect {
+                    pos: dvec2(0.0, 0.0),
+                    size,
+                },
+                size,
+                safe,
+            );
+            let height = word_card_height(viewport);
+            for anchor in [dvec2(0.0, 0.0), size * 0.5, size] {
+                let (pos, width) = word_card_geometry(viewport, anchor, height);
+                assert!(pos.x >= safe.left && pos.y >= safe.top);
+                assert!(pos.x + width <= size.x - safe.right);
+                assert!(pos.y + height <= size.y - safe.bottom);
+            }
+        }
     }
 
     #[test]
@@ -4688,8 +4885,14 @@ fn spawn_delete(id: String, title: String) {
     });
 }
 
-fn is_epub_path(path: &str) -> bool {
-    path.to_lowercase().ends_with(".epub")
+fn current_book_is_pdf() -> bool {
+    CURRENT_ITEM.read().unwrap().as_ref().is_some_and(|item| {
+        readwise_core::books::supported_format(std::path::Path::new(&item.file_path)) == Some("pdf")
+    })
+}
+
+fn is_book_path(path: &str) -> bool {
+    readwise_core::books::supported_format(std::path::Path::new(path)).is_some()
 }
 
 /// macOS 拖放给的是 URL 百分号编码路径（中文/空格会变 %XX），解码成真实路径。
@@ -4719,8 +4922,8 @@ fn percent_decode_path(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn is_epub_item(item: &DragItem) -> bool {
-    matches!(item, DragItem::FilePath { path, .. } if is_epub_path(path))
+fn is_book_item(item: &DragItem) -> bool {
+    matches!(item, DragItem::FilePath { path, .. } if is_book_path(path))
 }
 
 /// EPUB 文件在后台导入，完成后刷新书架。系统选择器的 import 模式会给应用一份
@@ -4922,7 +5125,8 @@ mod customise_highlight_tests {
             ReaderBackground::Sepia,
             ReaderBackground::Sage,
             ReaderBackground::Night,
-            ReaderBackground::Bold,
+            ReaderBackground::Quiet,
+            ReaderBackground::Snow,
             ReaderBackground::FollowTheme,
         ] {
             let mut next = current.clone();
@@ -4980,6 +5184,33 @@ mod customise_highlight_tests {
         assert!(!method.contains("request_script_reapply"));
         assert!(method.contains("cx.redraw_all()"));
         assert!(method.contains("self.redraw_reader_annotations(cx)"));
+    }
+
+    #[test]
+    fn both_theme_action_routes_leave_typography_unchanged() {
+        let source = include_str!("app.rs");
+        let shortcut = source
+            .split("\n            if let Some(background) = choice {")
+            .nth(1)
+            .unwrap()
+            .split("self.apply_reader_customise_live(cx);")
+            .next()
+            .unwrap();
+        let normal_route = source
+            .split(
+                "\n        for (id, background) in crate::reader_settings_panel::theme_modes() {",
+            )
+            .nth(1)
+            .unwrap()
+            .split("for tab in crate::reader_settings_panel::ReaderSettingsTab::ALL {")
+            .next()
+            .unwrap();
+        for route in [shortcut, normal_route] {
+            assert!(route.contains("draft.background = background;"));
+            assert!(!route.contains("draft.bold_text"));
+            assert!(!route.contains("draft.font"));
+            assert!(!route.contains("draft.spacing"));
+        }
     }
 
     #[test]
@@ -5987,8 +6218,14 @@ script_mod! {
     let ReaderCodeViewPaper = ReaderCodeViewLight{editor +:{scroll_bars +:{
         scroll_bar_y +:{draw_bg +:{color:#d5cdbd color_hover:#716a60 color_drag:#805d35}}
     }}}
-    let ReaderCodeViewSepia = ReaderCodeViewLight{editor +:{scroll_bars +:{
+    let ReaderCodeViewQuiet = ReaderCodeViewLight{editor +:{scroll_bars +:{
         scroll_bar_y +:{draw_bg +:{color:#ccb995 color_hover:#x75624e color_drag:#85562f}}
+    }}}
+    let ReaderCodeViewSepia = ReaderCodeViewLight{editor +:{scroll_bars +:{
+        scroll_bar_y +:{draw_bg +:{color:#cbbda2 color_hover:#8c785b color_drag:#3b7a3d}}
+    }}}
+    let ReaderCodeViewSnow = ReaderCodeViewLight{editor +:{scroll_bars +:{
+        scroll_bar_y +:{draw_bg +:{color:#d8dcd8 color_hover:#6b706b color_drag:#3b7a3d}}
     }}}
     let ReaderCodeViewSage = ReaderCodeViewLight{editor +:{scroll_bars +:{
         scroll_bar_y +:{draw_bg +:{color:#becdb8 color_hover:#607065 color_drag:#3e6850}}
@@ -6035,6 +6272,36 @@ script_mod! {
                 sdf.line_to(10.6, 3.2)
                 sdf.line_to(self.rect_size.x - 0.8, self.rect_size.y + 0.8)
                 sdf.stroke(self.border_color, 1.2)
+                return sdf.result
+            }
+        }
+    }
+
+    let WordCardAction = ButtonFlat{
+        width: Fit height: 36
+        padding: Inset{left: 13 right: 13 top: 6 bottom: 6}
+        spacing: 7
+        icon_walk: Walk{width: 16 height: 16}
+        draw_text.text_style.font_size: 11
+        draw_bg.border_radius: 10.0
+    }
+    let WordCardArrow = View{
+        width: 24 height: 13
+        show_bg: true
+        draw_bg +: {
+            color: theme.color_bg_container
+            border_color: theme.color_bg_highlight_inline
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.move_to(0.0, 13.0)
+                sdf.line_to(12.0, 1.0)
+                sdf.line_to(24.0, 13.0)
+                sdf.close_path()
+                sdf.fill(self.color)
+                sdf.move_to(0.0, 13.0)
+                sdf.line_to(12.0, 1.0)
+                sdf.line_to(24.0, 13.0)
+                sdf.stroke(self.border_color, 1.0)
                 return sdf.result
             }
         }
@@ -6140,9 +6407,17 @@ script_mod! {
                 draw_bg +: {color: #f7f4ea border_color: #d8d1c2}
                 code_view := ReaderCodeViewPaper{}
             }
-            CodeSepia := ReaderCodePara{
+            CodeQuiet := ReaderCodePara{
                 draw_bg +: {color: #f2e3c6 border_color: #ccb995}
+                code_view := ReaderCodeViewQuiet{}
+            }
+            CodeSepia := ReaderCodePara{
+                draw_bg +: {color: #xf1e6cf border_color: #cbbda2}
                 code_view := ReaderCodeViewSepia{}
+            }
+            CodeSnow := ReaderCodePara{
+                draw_bg +: {color: #fff border_color: #d8dcd8}
+                code_view := ReaderCodeViewSnow{}
             }
             CodeSage := ReaderCodePara{
                 draw_bg +: {color: #e7efe3 border_color: #becdb8}
@@ -6326,7 +6601,7 @@ script_mod! {
                                     }
                                     import_epub_btn := ButtonFlat{
                                         visible: true
-                                        text: "导入 EPUB"
+                                        text: "导入书籍"
                                         draw_bg.color: theme.color_bg_app
                                         draw_bg.color_focus: theme.color_bg_app
                                     }
@@ -6334,7 +6609,7 @@ script_mod! {
                                 }
                                 library_hint := Label{
                                     width: Fill
-                                    text: "把 EPUB 拖进窗口，或放入导入目录后重启。"
+                                    text: "把 EPUB / PDF 拖进窗口，或放入导入目录后重启。"
                                     draw_text.color: theme.color_label_inner_inactive
                                     draw_text.text_style.font_size: 9
                                 }
@@ -6382,7 +6657,7 @@ script_mod! {
                                         draw_text.text_style.font_size: 14
                                     }
                                     library_empty_hint := Label{
-                                        text: "拖入 EPUB 文件，或放进 ReadWise/import 目录"
+                                        text: "拖入 EPUB / PDF 文件，或放进 ReadWise/import 目录"
                                         draw_text.color: theme.color_label_inner_inactive
                                         draw_text.text_style.font_size: 9
                                     }
@@ -6780,32 +7055,141 @@ script_mod! {
                                     visible: false
                                     width: Fill height: Fill
                                     flow: Overlay
-                                    selection_popup := RoundedView{
-                                        width: 520 height: Fit
-                                        new_batch: true
-                                        padding: Inset{left: 12 right: 12 top: 9 bottom: 9}
-                                        flow: Down spacing: 5
-                                        draw_bg.color: theme.color_bg_container
-                                        draw_bg.border_radius: 10.0
-                                        selection_actions := View{
-                                            width: Fill height: Fit
-                                            flow: Flow.Right{wrap: true} spacing: 6
-                                            align: Align{y: 0.5}
-                                            copy_sel_btn := ButtonFlat{height: 32 text: "复制"}
-                                            note_from_sel_btn := ButtonFlat{height: 32 text: "笔记"}
-                                            vocab_from_sel_btn := ButtonFlat{height: 32 text: "生词"}
-                                            translate_sel_btn := ButtonFlat{height: 32 text: "翻译"}
-                                            ask_ai_sel_btn := ButtonFlat{height: 32 text: "问 AI"}
-                                            speak_sel_btn := ButtonFlat{height: 32 text: "发音"}
-                                            hl_btn := ButtonFlat{height: 32 text: "高亮"}
-                                            sel_close_btn := ButtonFlatter{height: 32 text: "关闭"}
+                                    selection_popup := RoundedShadowView{
+                                        width: 460 height: 44
+                                        new_batch: true padding: 6 flow: Down
+                                        draw_bg.color: #x302617
+                                        draw_bg.border_radius: 20.0
+                                        draw_bg.shadow_color: #0004
+                                        draw_bg.shadow_radius: 12.0
+                                        draw_bg.shadow_offset: vec2(0, 4)
+                                        selection_scroll := ScrollYView{
+                                            width: Fill height: Fill
+                                            selection_content := View{
+                                                width: Fill height: Fit flow: Down spacing: 4
+                                                selection_actions := View{
+                                                    width: Fill height: Fit
+                                                    flow: Flow.Right{wrap: true} spacing: 2
+                                                    align: Align{y: 0.5}
+                                                    ask_ai_sel_btn := mod.widgets.SelectionAction{text: "问 AI"}
+                                                    SolidView{width: 1 height: 20 margin: Inset{left: 4 right: 4} draw_bg.color: #x574936}
+                                                    explain_sel_btn := mod.widgets.SelectionAction{
+                                                        text: "解释"
+                                                        draw_icon.svg: crate_resource("self:resources/icons/selection_explain.svg")
+                                                    }
+                                                    define_sel_btn := mod.widgets.SelectionAction{
+                                                        text: "释义"
+                                                        draw_icon.svg: crate_resource("self:resources/icons/selection_define.svg")
+                                                    }
+                                                    more_sel_btn := mod.widgets.SelectionAction{
+                                                        width: 32 text: ""
+                                                        draw_icon.svg: crate_resource("self:resources/icons/selection_more.svg")
+                                                    }
+                                                    hl_btn := mod.widgets.SelectionAction{
+                                                        width: 32 text: ""
+                                                        draw_icon.svg: crate_resource("self:resources/icons/selection_marker.svg")
+                                                    }
+                                                    sel_yellow := mod.widgets.SelectionSwatch{draw_bg.color: #xf2c438}
+                                                    sel_green := mod.widgets.SelectionSwatch{draw_bg.color: #x7cc66f}
+                                                    sel_blue := mod.widgets.SelectionSwatch{draw_bg.color: #x6aa8f0}
+                                                    sel_pink := mod.widgets.SelectionSwatch{draw_bg.color: #xf084ac}
+                                                    note_from_sel_btn := mod.widgets.SelectionAction{
+                                                        width: 32 text: ""
+                                                        draw_icon.svg: crate_resource("self:resources/icons/selection_pen.svg")
+                                                    }
+                                                }
+                                                selection_ai := View{
+                                                    visible: false width: Fill height: Fit flow: Down spacing: 5
+                                                    View{
+                                                        width: Fill height: Fit flow: Right spacing: 4
+                                                        align: Align{y: 0.5}
+                                                        selection_ai_input := mod.widgets.SelectionQuestionInput{}
+                                                        selection_ai_web := mod.widgets.SelectionAction{
+                                                            width: 68 text: "Web"
+                                                            draw_icon.svg: crate_resource("self:resources/icons/selection_web.svg")
+                                                            draw_bg +: {color: #xf4ead5 color_hover: #xfffff0 color_down: #xd9c8a7 color_focus: #xfffff0}
+                                                            draw_text +: {color: #x302617 color_hover: #x302617 color_down: #x302617 color_focus: #x302617}
+                                                            draw_icon +: {color: #x302617 color_hover: #x302617 color_down: #x302617 color_focus: #x302617}
+                                                        }
+                                                        selection_ai_send := mod.widgets.SelectionAction{
+                                                            width: 32 text: ""
+                                                            draw_bg.color: #x344127
+                                                            draw_icon.svg: crate_resource("self:resources/icons/selection_send.svg")
+                                                        }
+                                                    }
+                                                    SolidView{width: Fill height: 1 draw_bg.color: #x493c29}
+                                                    selection_ai_suggestions := View{
+                                                        width: Fill height: Fit
+                                                        flow: Flow.Right{wrap: true} spacing: 2
+                                                        selection_ai_why := mod.widgets.SelectionAction{text: "为什么用这个词？" draw_bg.color: #x493b29}
+                                                        selection_ai_origin := mod.widgets.SelectionAction{text: "这个词源自哪里？"}
+                                                        selection_ai_example := mod.widgets.SelectionAction{text: "用它造个句子"}
+                                                        selection_ai_back := mod.widgets.SelectionAction{text: "返回"}
+                                                    }
+                                                }
+                                                sel_hint := Label{
+                                                    visible: false width: Fill height: Fit text: ""
+                                                    margin: Inset{left: 10 right: 10 bottom: 4}
+                                                    draw_text.color: #xb3a184
+                                                    draw_text.text_style.font_size: 10
+                                                }
+                                            }
                                         }
-                                        sel_hint := Label{
-                                            visible: false
-                                            width: Fill
-                                            text: ""
-                                            draw_text.color: theme.color_label_inner_inactive
-                                            draw_text.text_style.font_size: 8.5
+                                    }
+                                    selection_pointer := View{
+                                        width: 18 height: 8 show_bg: true new_batch: true
+                                        draw_bg +: {
+                                            color: #x302617
+                                            pixel: fn() {
+                                                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                                                sdf.move_to(0.0, 0.0)
+                                                sdf.line_to(18.0, 0.0)
+                                                sdf.line_to(9.0, 8.0)
+                                                sdf.close_path()
+                                                sdf.fill(self.color)
+                                                return sdf.result
+                                            }
+                                        }
+                                    }
+                                    selection_more := RoundedShadowView{
+                                        visible: false width: 288 height: 360
+                                        new_batch: true padding: 6 flow: Down
+                                        draw_bg.color: #x302617
+                                        draw_bg.border_radius: 12.0
+                                        draw_bg.shadow_color: #0004
+                                        draw_bg.shadow_radius: 10.0
+                                        draw_bg.shadow_offset: vec2(0, 3)
+                                        selection_more_scroll := ScrollYView{
+                                            width: Fill height: Fill
+                                            selection_more_content := View{
+                                                width: Fill height: Fit flow: Down spacing: 2
+                                                selection_more_define := mod.widgets.SelectionMenuItem{
+                                                    content.icon.draw_icon.svg: crate_resource("self:resources/icons/selection_define.svg")
+                                                }
+                                                selection_more_fact := mod.widgets.SelectionMenuItem{
+                                                    content.icon.draw_icon.svg: crate_resource("self:resources/icons/selection_fact.svg")
+                                                }
+                                                selection_more_related := mod.widgets.SelectionMenuItem{
+                                                    content.icon.draw_icon.svg: crate_resource("self:resources/icons/selection_related.svg")
+                                                }
+                                                selection_more_counter := mod.widgets.SelectionMenuItem{
+                                                    content.icon.draw_icon.svg: crate_resource("self:resources/icons/selection_counter.svg")
+                                                }
+                                                SolidView{width: Fill height: 1 margin: Inset{left: 10 right: 10 top: 4 bottom: 4} draw_bg.color: #x493c29}
+                                                selection_more_quote := mod.widgets.SelectionMenuItem{
+                                                    content.icon.draw_icon.svg: crate_resource("self:resources/icons/selection_quote.svg")
+                                                }
+                                                selection_more_utilities := View{
+                                                    width: Fill height: Fit
+                                                    flow: Flow.Right{wrap: true} spacing: 1
+                                                    copy_sel_btn := mod.widgets.SelectionAction{text: "复制"}
+                                                    vocab_from_sel_btn := mod.widgets.SelectionAction{text: "生词"}
+                                                    translate_sel_btn := mod.widgets.SelectionAction{text: "翻译"}
+                                                    speak_sel_btn := mod.widgets.SelectionAction{text: "发音"}
+                                                    remove_hl_sel_btn := mod.widgets.SelectionAction{text: "移除高亮"}
+                                                    sel_close_btn := mod.widgets.SelectionAction{text: "关闭"}
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -6817,45 +7201,139 @@ script_mod! {
                                     flow: Overlay
                                     word_card := RoundedShadowView{
                                         visible: false
-                                        width: 420 height: Fit
+                                        width: 540 height: 340
                                         new_batch: true
-                                        padding: 14
-                                        flow: Down spacing: 10
+                                        flow: Down
                                         draw_bg.color: theme.color_bg_container
                                         draw_bg.border_color: theme.color_bg_highlight_inline
-                                        draw_bg.border_radius: 10.0
-                                        draw_bg.shadow_color: #0004
-                                        draw_bg.shadow_radius: 12.0
-                                        draw_bg.shadow_offset: vec2(0, 4)
+                                        draw_bg.border_radius: 16.0
+                                        draw_bg.shadow_color: #0002
+                                        draw_bg.shadow_radius: 22.0
+                                        draw_bg.shadow_offset: vec2(0, 7)
                                         card_head := View{
-                                            width: Fill
-                                            height: Fit
-                                            spacing: 14
-                                            align: Align{ y: 0.5 }
-                                            card_word := Label{
-                                                text: ""
-                                                draw_text.text_style.font_size: 17
+                                            width: Fill height: Fit
+                                            padding: Inset{left: 22 right: 14 top: 18 bottom: 10}
+                                            flow: Down spacing: 5
+                                            View{
+                                                width: Fill height: Fit
+                                                spacing: 10 align: Align{y: 0.5}
+                                                card_word := Label{
+                                                    width: Fit{max: FitBound.Abs(290)} text: ""
+                                                    max_lines: 2 text_overflow: Ellipsis
+                                                    draw_text.text_style: theme.font_bold{font_size: 26}
+                                                }
+                                                card_speak_btn := ButtonFlatter{
+                                                    width: 34 height: 34 text: ""
+                                                    icon_walk: Walk{width: 20 height: 20}
+                                                    draw_icon.svg: crate_resource("self:resources/icons/word_speak.svg")
+                                                }
+                                                card_pos_badge := RoundedView{
+                                                    visible: false
+                                                    width: Fit height: Fit
+                                                    padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
+                                                    new_batch: true
+                                                    draw_bg.color: #x397cf015
+                                                    draw_bg.border_radius: 7.0
+                                                    card_pos := Label{
+                                                        width: Fit{max: FitBound.Abs(95)}
+                                                        max_lines: 1 text_overflow: Ellipsis
+                                                        text: "" draw_text.color: #x397cf0
+                                                        draw_text.text_style.font_size: 11
+                                                    }
+                                                }
+                                                Filler{}
+                                                close_card_btn := ButtonFlatter{
+                                                    width: 34 height: 34 text: ""
+                                                    icon_walk: Walk{width: 20 height: 20}
+                                                    draw_icon.svg: crate_resource("self:resources/icons/word_close.svg")
+                                                }
                                             }
+                                            card_phonetic := Label{
+                                                visible: false
+                                                width: Fill text: ""
+                                                draw_text.color: theme.color_label_inner_inactive
+                                                draw_text.text_style.font_size: 12
+                                            }
+                                        }
+                                        card_body := ScrollYView{
+                                            width: Fill height: Fill
+                                            new_batch: true
+                                            flow: Down spacing: 14
+                                            padding: Inset{left: 22 right: 22 top: 8 bottom: 18}
                                             card_gloss := Label{
-                                                width: Fill
-                                                text: ""
-                                                draw_text.color: theme.color_highlight
-                                                draw_text.text_style.font_size: 13
+                                                width: Fill text: ""
+                                                draw_text.text_style.font_size: 12
                                             }
-                                            close_card_btn := ButtonFlat{ text: "关闭" }
+                                            card_context_group := View{
+                                                visible: false
+                                                width: Fill height: Fit
+                                                flow: Down spacing: 6
+                                                card_context_title := Label{
+                                                    text: "书中原句"
+                                                    draw_text.color: theme.color_label_inner_inactive
+                                                    draw_text.text_style.font_size: 9
+                                                }
+                                                card_context := Label{
+                                                    width: Fill text: ""
+                                                    draw_text.color: theme.color_label_inner_inactive
+                                                    draw_text.text_style.font_size: 11
+                                                }
+                                            }
+                                        }
+                                        card_divider := SolidView{
+                                            width: Fill height: 1
+                                            draw_bg.color: theme.color_bg_highlight_inline
                                         }
                                         card_foot := View{
                                             width: Fill height: Fit
-                                            spacing: 14
-                                            align: Align{ y: 0.5 }
-                                            add_vocab_btn := ButtonFlat{ text: "加入生词本" }
-                                            know_btn := ButtonFlat{ text: "标为已认识" }
+                                            padding: Inset{left: 18 right: 18 top: 12 bottom: 12}
+                                            flow: Down spacing: 6
+                                            card_actions := View{
+                                                width: Fill height: Fit
+                                                flow: Flow.Right{wrap: true} spacing: 8
+                                                add_vocab_btn := WordCardAction{
+                                                    text: "加入生词本"
+                                                    draw_icon.svg: crate_resource("self:resources/icons/reader_notes.svg")
+                                                }
+                                                card_dictionary_btn := WordCardAction{
+                                                    text: "在词典中查看"
+                                                    draw_icon.svg: crate_resource("self:resources/icons/reader_search.svg")
+                                                }
+                                                card_more_btn := WordCardAction{
+                                                    text: "更多"
+                                                    draw_icon.svg: crate_resource("self:resources/icons/word_more.svg")
+                                                }
+                                            }
+                                            card_more_menu := View{
+                                                visible: false
+                                                width: Fill height: Fit
+                                                flow: Flow.Right{wrap: true} spacing: 8
+                                                know_btn := WordCardAction{text: "标为已认识"}
+                                                card_copy_btn := WordCardAction{text: "复制单词"}
+                                            }
                                             card_hint := Label{
-                                                width: Fill
-                                                text: ""
+                                                visible: false
+                                                width: Fill text: ""
                                                 draw_text.color: theme.color_label_inner_inactive
                                                 draw_text.text_style.font_size: 9
                                             }
+                                        }
+                                    }
+                                    word_card_arrow := WordCardArrow{visible: false}
+                                    word_card_arrow_bottom := WordCardArrow{
+                                        visible: false
+                                        draw_bg.pixel: fn() {
+                                            let sdf = Sdf2d.viewport(vec2(self.pos.x, 1.0 - self.pos.y) * self.rect_size)
+                                            sdf.move_to(0.0, 13.0)
+                                            sdf.line_to(12.0, 1.0)
+                                            sdf.line_to(24.0, 13.0)
+                                            sdf.close_path()
+                                            sdf.fill(self.color)
+                                            sdf.move_to(0.0, 13.0)
+                                            sdf.line_to(12.0, 1.0)
+                                            sdf.line_to(24.0, 13.0)
+                                            sdf.stroke(self.border_color, 1.0)
+                                            return sdf.result
                                         }
                                     }
                                 }
@@ -7723,7 +8201,7 @@ script_mod! {
                                 flow: Down spacing: 12 padding: 16
                                 draw_bg.color: theme.color_bg_container
                                 draw_bg.border_radius: 14.0
-                                library_import_title := Label{width: Fill text: "导入 EPUB" draw_text.text_style.font_size: 16}
+                                library_import_title := Label{width: Fill text: "导入书籍" draw_text.text_style.font_size: 16}
                                 library_import_scroll := ScrollYView{
                                     width: Fill height: Fill flow: Down spacing: 12
                                     library_import_choices := View{
@@ -7743,7 +8221,7 @@ script_mod! {
                                         library_import_instructions := TextBox{
                                             width: Fill height: Fit padding: 0
                                             flow: Flow.Right{wrap: true}
-                                            text: "两台设备连接同一 Wi-Fi，在电脑浏览器打开下方网址，选择 EPUB 上传。关闭界面或切到后台仍可接收。"
+                                            text: "两台设备连接同一 Wi-Fi，在电脑浏览器打开下方网址，选择 EPUB / PDF 上传。关闭界面或切到后台仍可接收。"
                                             draw_text.text_style.font_size: 10
                                         }
                                         library_import_address := View{
@@ -7824,9 +8302,9 @@ script_mod! {
                                             }
                                             View{
                                                 width: Fill height: 42 flow: Right spacing: 8
-                                                reader_mode_bold := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Bold"}
+                                                reader_mode_sepia := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Sepia"}
                                                 reader_mode_calm := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Calm"}
-                                                reader_mode_focus := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Focus"}
+                                                reader_mode_snow := ButtonFlat{width: 88 height: 42 margin: 0 enable_long_press: true text: "Snow"}
                                             }
                                         }
                                         reader_quick_pen_row := View{
@@ -10121,9 +10599,10 @@ impl ChapterList {
         let code_template = match reader_background {
             ReaderBackground::Original => id!(CodeThemeLight),
             ReaderBackground::Paper => id!(CodePaper),
+            ReaderBackground::Quiet => id!(CodeQuiet),
             ReaderBackground::Sepia => id!(CodeSepia),
             ReaderBackground::Sage => id!(CodeSage),
-            ReaderBackground::Bold => id!(CodePaper),
+            ReaderBackground::Snow => id!(CodeSnow),
             ReaderBackground::Night => id!(CodeNight),
             ReaderBackground::FollowTheme if reader_theme == ReaderTheme::Light => {
                 id!(CodeThemeLight)
@@ -10751,7 +11230,8 @@ impl Widget for ChapterList {
                     | Event::TouchUpdate(_)
                     | Event::LongPress(_)
             ))
-            || (reader_info_open && matches!(event, Event::Scroll(_)))
+            || ((reader_info_open || SELECTION_POPUP_POINTER.load(Ordering::Relaxed))
+                && matches!(event, Event::Scroll(_)))
         {
             self.cancel_reader_tap(cx);
             return;
@@ -12030,9 +12510,21 @@ pub struct App {
     selection_popup_anchor: Option<DVec2>,
     #[rust]
     pending_selection_popup_layout: bool,
+    #[rust]
+    selection_ai_open: bool,
+    #[rust]
+    selection_more_open: bool,
+    #[rust]
+    selection_ai_draft: String,
+    #[rust]
+    selection_ai_focus_pending: bool,
     /// 生词释义卡片由阅读器覆盖层定位，避免参与纵向正文布局。
     #[rust]
     word_card_anchor: Option<DVec2>,
+    #[rust]
+    word_card_context: String,
+    #[rust]
+    word_card_more_open: bool,
     #[rust]
     pending_word_card_layout: bool,
     #[rust]
@@ -12270,7 +12762,7 @@ impl App {
 
     fn sync_library_import_dialog(&self, cx: &mut Cx) {
         for (id, zh, en) in [
-            (id!(library_import_title), "导入 EPUB", "Import EPUB"),
+            (id!(library_import_title), "导入书籍", "Import books"),
             (id!(library_import_local), "本机文件", "Files on this device"),
             (id!(library_import_lan), "局域网传书", "Wi-Fi transfer"),
             (id!(library_import_copy), "复制网址", "Copy address"),
@@ -12279,8 +12771,8 @@ impl App {
             (id!(library_import_stop), "停止接收", "Stop receiving"),
             (id!(library_import_close), "关闭界面", "Close screen"),
             (id!(library_import_instructions),
-                "两台设备连接同一 Wi-Fi，在电脑浏览器打开下方网址，选择 EPUB 上传（每本最大 200 MB）。",
-                "Connect both devices to the same Wi-Fi. Open the address below in a computer browser and upload EPUB files (up to 200 MB each)."),
+                "两台设备连接同一 Wi-Fi，在电脑浏览器打开下方网址，选择 EPUB / PDF 上传（每本最大 200 MB）。",
+                "Connect both devices to the same Wi-Fi. Open the address below in a computer browser and upload EPUB / PDF files (up to 200 MB each)."),
         ] {
             self.ui.widget(cx, &[id]).set_text(cx, localized(zh, en));
         }
@@ -12515,9 +13007,9 @@ impl App {
             id!(reader_mode_original),
             id!(reader_mode_quiet),
             id!(reader_mode_paper),
-            id!(reader_mode_bold),
+            id!(reader_mode_sepia),
             id!(reader_mode_calm),
-            id!(reader_mode_focus),
+            id!(reader_mode_snow),
         ] {
             let mut button = self.ui.widget(cx, &[id]);
             script_apply_eval!(cx, button, {width: #(mode_width) draw_text +: {text_style +: {font_size: 12.0}}});
@@ -12767,6 +13259,10 @@ impl App {
             // Reload can reset label text even when cached page geometry is unchanged.
             self.update_progress_label(cx);
             self.update_reader_page_footer(cx);
+            if self.card.is_some() {
+                self.project_word_card(cx);
+                self.position_word_card(cx);
+            }
             // Reload resets draw Areas; repaint cached batches after projecting labels.
             cx.redraw_all();
         }
@@ -13272,13 +13768,13 @@ impl App {
                 tr("no_tag_matches_hint")
             } else if cfg!(any(target_os = "android", target_os = "ios")) {
                 localized(
-                    "点击右上角“导入 EPUB”从系统文件选择器中添加书籍",
-                    "Choose Import EPUB in the top-right corner to add books from the system picker",
+                    "点击右上角“导入书籍”从系统文件选择器中添加 EPUB / PDF",
+                    "Choose Import books in the top-right corner to add EPUB / PDF files",
                 )
             } else if cfg!(target_os = "macos") {
                 localized(
-                    "点击右上角“导入 EPUB”，或把 EPUB 拖进窗口",
-                    "Choose Import EPUB in the top-right corner, or drop an EPUB here",
+                    "点击右上角“导入书籍”，或把 EPUB / PDF 拖进窗口",
+                    "Choose Import books in the top-right corner, or drop an EPUB / PDF here",
                 )
             } else {
                 tr("library_empty_hint")
@@ -13509,12 +14005,12 @@ impl App {
         self.pending_delete_book = Some((book.id.clone(), book.title.clone()));
         let message = if app_language() == AppLanguage::English {
             format!(
-                "Delete “{}” from ReadWise? Reading progress, notes, and highlights will also be removed. The original EPUB outside the app is not affected.",
+                "Delete “{}” from ReadWise? Reading progress, notes, and highlights will also be removed. The original book file outside the app is not affected.",
                 book.title
             )
         } else {
             format!(
-                "确定要从 ReadWise 删除《{}》吗？阅读进度、笔记和高亮也会一并删除。应用外的原始 EPUB 不受影响。",
+                "确定要从 ReadWise 删除《{}》吗？阅读进度、笔记和高亮也会一并删除。应用外的原始书籍文件不受影响。",
                 book.title
             )
         };
@@ -13754,47 +14250,9 @@ impl ReaderControls<'_> {
 
     fn sync_reader_mode_controls(&self, cx: &mut Cx, background: ReaderBackground) {
         let accent = reader_scene_palette(background, *READER_THEME.read().unwrap()).accent;
-        for (id, mode, surface, text) in [
-            (
-                id!(reader_mode_original),
-                ReaderBackground::Original,
-                0xffff_ffff,
-                0x2020_20ff,
-            ),
-            (
-                id!(reader_mode_quiet),
-                ReaderBackground::Sepia,
-                0xf2e3_c6ff,
-                0x3b30_25ff,
-            ),
-            (
-                id!(reader_mode_paper),
-                ReaderBackground::Paper,
-                0xf7f4_eaff,
-                0x2b29_25ff,
-            ),
-            (
-                id!(reader_mode_bold),
-                ReaderBackground::Bold,
-                0xfaf8_f2ff,
-                0x1717_17ff,
-            ),
-            (
-                id!(reader_mode_calm),
-                ReaderBackground::Sage,
-                0xe7ef_e3ff,
-                0x2734_2bff,
-            ),
-            (
-                id!(reader_mode_focus),
-                ReaderBackground::Night,
-                0x2025_2bff,
-                0xd8d4_caff,
-            ),
-        ] {
+        for (id, mode) in crate::reader_settings_panel::theme_modes() {
             let button = self.ui.widget(cx, &[id]);
-            let surface = Vec4f::from_u32(surface);
-            let text = Vec4f::from_u32(text);
+            let (surface, text) = reader_palette(mode, *READER_THEME.read().unwrap());
             let border = if mode == background { accent } else { surface };
             apply_widget_paint(
                 cx,
@@ -14601,7 +15059,7 @@ impl ReaderControls<'_> {
                 palette.border,
             );
         }
-        for id in [id!(selection_popup), id!(library_action_menu)] {
+        for id in [id!(library_action_menu)] {
             apply_reader_surface_palette(
                 cx,
                 self.ui.widget(cx, &[id]),
@@ -14653,7 +15111,6 @@ impl ReaderControls<'_> {
             id!(reader_chat_status),
             id!(reader_bookmarks_hint),
             id!(reader_search_hint),
-            id!(sel_hint),
             id!(card_hint),
             id!(library_rename_status),
             id!(reader_scroll_hint),
@@ -14683,7 +15140,40 @@ impl ReaderControls<'_> {
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
         }
-        for id in [id!(note_quote_title), id!(card_gloss)] {
+        apply_reader_label_palette(cx, self.ui.widget(cx, ids!(card_gloss)), palette.text);
+        for id in [
+            id!(card_phonetic),
+            id!(card_context),
+            id!(card_context_title),
+        ] {
+            apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
+        }
+        apply_reader_surface_palette(
+            cx,
+            self.ui.widget(cx, ids!(card_divider)),
+            palette.border,
+            palette.border,
+        );
+        for id in [id!(word_card_arrow), id!(word_card_arrow_bottom)] {
+            apply_reader_surface_palette(
+                cx,
+                self.ui.widget(cx, &[id]),
+                palette.surface,
+                palette.border,
+            );
+        }
+        for id in [id!(card_speak_btn), id!(close_card_btn)] {
+            apply_flat_entry_background(cx, self.ui.widget(cx, &[id]), palette);
+            apply_reader_icon_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
+        }
+        for id in [
+            id!(add_vocab_btn),
+            id!(card_dictionary_btn),
+            id!(card_more_btn),
+        ] {
+            apply_reader_icon_palette(cx, self.ui.widget(cx, &[id]), palette.text);
+        }
+        for id in [id!(note_quote_title)] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.accent);
         }
 
@@ -14699,9 +15189,11 @@ impl ReaderControls<'_> {
             id!(reader_chat_send),
             id!(reader_chat_cancel),
             id!(reader_chat_clear),
-            id!(close_card_btn),
             id!(add_vocab_btn),
             id!(know_btn),
+            id!(card_dictionary_btn),
+            id!(card_more_btn),
+            id!(card_copy_btn),
             id!(image_viewer_close),
             id!(library_rename_cancel),
             id!(library_rename_save),
@@ -14769,14 +15261,6 @@ impl ReaderControls<'_> {
             ..palette
         };
         for id in [
-            id!(copy_sel_btn),
-            id!(note_from_sel_btn),
-            id!(vocab_from_sel_btn),
-            id!(translate_sel_btn),
-            id!(ask_ai_sel_btn),
-            id!(speak_sel_btn),
-            id!(hl_btn),
-            id!(sel_close_btn),
             id!(library_share_book),
             id!(library_want_to_read),
             id!(library_add_collection),
@@ -14949,8 +15433,8 @@ impl ReaderControls<'_> {
             self.ui.label(cx, ids!(library_hint)).set_text(
                 cx,
                 localized(
-                    "点击“导入 EPUB”添加书籍。",
-                    "Choose Import EPUB to add books.",
+                    "点击“导入书籍”添加 EPUB / PDF。",
+                    "Choose Import books to add EPUB / PDF files.",
                 ),
             );
         }
@@ -15006,29 +15490,25 @@ impl ReaderControls<'_> {
         set_text!(reader_chat_cancel, "stop");
         set_text!(reader_chat_clear, "new_chat");
         set_text!(copy_sel_btn, "copy");
-        set_text!(note_from_sel_btn, "note");
+        // Pen and marker remain icon-only.
         set_text!(vocab_from_sel_btn, "word");
         set_text!(translate_sel_btn, "translate");
         set_text!(ask_ai_sel_btn, "ask_ai");
         set_text!(speak_sel_btn, "speak");
-        let highlight_key = if self.selected_highlight_ids().is_empty() {
-            "highlight"
-        } else {
-            "remove_highlight"
-        };
-        self.ui
-            .widget(cx, ids!(hl_btn))
-            .set_text(cx, crate::i18n::text(language, highlight_key));
+        self.sync_selection_popup(cx);
         set_text!(sel_close_btn, "close");
-        set_text!(close_card_btn, "close");
         set_text!(add_vocab_btn, "add_vocabulary");
         set_text!(know_btn, "mark_known");
+        set_text!(card_dictionary_btn, "view_dictionary");
+        set_text!(card_more_btn, "word_more");
+        set_text!(card_copy_btn, "copy_word");
+        set_text!(card_context_title, "book_context");
         set_text!(reader_mode_original, "reader_mode_original");
         set_text!(reader_mode_quiet, "reader_mode_quiet");
         set_text!(reader_mode_paper, "reader_mode_paper");
-        set_text!(reader_mode_bold, "reader_mode_bold");
+        set_text!(reader_mode_sepia, "reader_mode_sepia");
         set_text!(reader_mode_calm, "reader_mode_calm");
-        set_text!(reader_mode_focus, "reader_mode_focus");
+        set_text!(reader_mode_snow, "reader_mode_snow");
         set_text!(reader_quick_pen_label, "reader_pen");
         set_text!(reader_preview_heading, "reader_preview");
 
@@ -15342,6 +15822,13 @@ impl App {
             }
         }
 
+        if self.selection_popup_anchor.is_some() {
+            self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, true);
+            self.ui
+                .widget(cx, ids!(selection_ai_input))
+                .set_text(cx, &self.selection_ai_draft);
+            self.relayout_selection_popup(cx);
+        }
         self.refresh_shelf_projection(cx);
         if self.import_dialog_open {
             self.sync_library_import_dialog(cx);
@@ -16017,6 +16504,7 @@ impl App {
     fn text_input_has_focus(&self, cx: &Cx) -> bool {
         [
             ids!(note_extra),
+            ids!(selection_ai_input),
             ids!(reader_chat_input),
             ids!(chat_input),
             ids!(ai_endpoint),
@@ -17012,10 +17500,19 @@ impl App {
             .chars()
             .take(56)
             .collect();
-        let label = if excerpt.is_empty() {
-            format!("第 {} 章", snapshot.location.chapter + 1)
+        let heading = if current_book_is_pdf() {
+            if app_language() == AppLanguage::English {
+                format!("PDF source page {}", snapshot.location.chapter + 1)
+            } else {
+                format!("PDF 原始第 {} 页", snapshot.location.chapter + 1)
+            }
         } else {
-            format!("第 {} 章 · {excerpt}", snapshot.location.chapter + 1)
+            format!("第 {} 章", snapshot.location.chapter + 1)
+        };
+        let label = if excerpt.is_empty() {
+            heading
+        } else {
+            format!("{heading} · {excerpt}")
         };
         spawn_bookmark_change(
             snapshot.book_id,
@@ -17638,17 +18135,192 @@ impl App {
     }
 
     fn update_highlight_action_label(&self, cx: &mut Cx) {
-        let key = if self.selected_highlight_ids().is_empty() {
-            "highlight"
+        self.sync_selection_popup(cx);
+    }
+
+    fn sync_selection_popup(&self, cx: &mut Cx) {
+        let radius = if self.selection_ai_open {
+            10.0_f32
         } else {
-            "remove_highlight"
+            9.0
         };
+        let mut popup = self.ui.widget(cx, ids!(selection_popup));
+        script_apply_eval!(cx, popup, {draw_bg +: {border_radius: #(radius)}});
         self.ui
-            .widget(cx, ids!(hl_btn))
-            .set_text(cx, crate::i18n::text(app_language(), key));
+            .widget(cx, ids!(remove_hl_sel_btn))
+            .set_visible(cx, !self.selected_highlight_ids().is_empty());
+        self.ui
+            .widget(cx, ids!(selection_actions))
+            .set_visible(cx, !self.selection_ai_open);
+        self.ui
+            .widget(cx, ids!(selection_more))
+            .set_visible(cx, !self.selection_ai_open && self.selection_more_open);
+        let mut more_button = self.ui.widget(cx, ids!(more_sel_btn));
+        let active = if self.selection_more_open {
+            Vec4f::from_u32(0x493b29ff)
+        } else {
+            Vec4f::default()
+        };
+        script_apply_eval!(cx, more_button, {draw_bg +: {color: #(active)}});
+        for (path, title_zh, title_en, hint_zh, hint_en) in [
+            (
+                ids!(selection_more_define),
+                "释义",
+                "Define",
+                "理解作者在此处使用这个词的含义",
+                "The word, as this author uses it",
+            ),
+            (
+                ids!(selection_more_fact),
+                "事实核查",
+                "Fact-check",
+                "是否仍然成立？在浏览器中搜索",
+                "Does it still hold up? Search the web",
+            ),
+            (
+                ids!(selection_more_related),
+                "相关内容",
+                "Related",
+                "在书中查找这段文字",
+                "Find this text elsewhere in the book",
+            ),
+            (
+                ids!(selection_more_counter),
+                "不同观点",
+                "Counterpoint",
+                "寻找对这个观点最有力的反驳",
+                "The strongest objection to it",
+            ),
+            (
+                ids!(selection_more_quote),
+                "复制引文",
+                "Copy quote",
+                "附上书名、章节及段落编号",
+                "With the title and paragraph number",
+            ),
+        ] {
+            let item = self.ui.widget(cx, path);
+            item.widget(cx, ids!(content.labels.menu_title))
+                .set_text(cx, localized(title_zh, title_en));
+            item.widget(cx, ids!(content.labels.menu_subtitle))
+                .set_text(cx, localized(hint_zh, hint_en));
+        }
+        self.ui
+            .widget(cx, ids!(selection_ai))
+            .set_visible(cx, self.selection_ai_open);
+        for (id, zh, en) in [
+            (id!(explain_sel_btn), "解释", "Explain"),
+            (id!(define_sel_btn), "释义", "Define"),
+            (
+                id!(selection_ai_why),
+                "为什么用这个词？",
+                "Why this word here?",
+            ),
+            (
+                id!(selection_ai_origin),
+                "这个词源自哪里？",
+                "Where does it come from?",
+            ),
+            (
+                id!(selection_ai_example),
+                "用它造个句子",
+                "Use it in a sentence",
+            ),
+            (id!(selection_ai_back), "返回", "Back"),
+            (id!(remove_hl_sel_btn), "移除高亮", "Remove highlight"),
+        ] {
+            self.ui.widget(cx, &[id]).set_text(cx, localized(zh, en));
+        }
+        let mut input = self.ui.widget(cx, ids!(selection_ai_input));
+        let placeholder = localized("询问这个词或这段文字", "Ask about this word");
+        script_apply_eval!(cx, input, {empty_text: #(placeholder)});
+        let slot = *crate::mark_span::HL_SLOT.read().unwrap();
+        for (id, value) in [
+            (id!(sel_yellow), 4),
+            (id!(sel_green), 5),
+            (id!(sel_blue), 6),
+            (id!(sel_pink), 7),
+        ] {
+            let mut swatch = self.ui.widget(cx, &[id]);
+            let ring = if slot == value { 2.0_f32 } else { 0.0 };
+            script_apply_eval!(cx, swatch, {draw_bg +: {border_size: #(ring)}});
+        }
+    }
+
+    fn relayout_selection_popup(&mut self, cx: &mut Cx) {
+        self.sync_selection_popup(cx);
+        self.ui
+            .view(cx, ids!(selection_scroll))
+            .set_scroll_pos(cx, DVec2::default());
+        self.pending_selection_popup_layout = true;
+        // Place a newly shown sibling before its first draw, not at (0, 0)
+        // for one frame while waiting for the measured-height correction.
+        self.position_selection_popup(cx, false);
+        self.ui.widget(cx, ids!(sel_bar)).redraw(cx);
+    }
+
+    fn submit_selection_question(&mut self, cx: &mut Cx, question: &str) {
+        let selected = SELECTED_TEXT.read().unwrap().clone();
+        let Some(prompt) = crate::reader_selection::question_prompt(
+            &selected,
+            question,
+            app_language() == AppLanguage::English,
+        ) else {
+            self.set_selection_hint(cx, localized("请先输入问题", "Enter a question first"));
+            return;
+        };
+        self.selection_more_open = false;
+        if !self.send_chat_text(cx, prompt) {
+            self.selection_ai_open = true;
+            self.selection_ai_focus_pending = true;
+            self.selection_ai_draft = question.to_string();
+            self.ui
+                .widget(cx, ids!(selection_ai_input))
+                .set_text(cx, question);
+            self.set_selection_hint(
+                cx,
+                if self.ai_request.is_some() {
+                    tr("answer_in_progress")
+                } else {
+                    tr("ai_not_configured")
+                },
+            );
+            self.relayout_selection_popup(cx);
+            return;
+        }
+        self.clear_reader_selection(cx);
+        cx.set_key_focus(Area::Empty);
+        self.set_reader_ai_visible(cx, true);
     }
 
     fn reset_selection_action_hover(&self, cx: &mut Cx) {
+        for path in [
+            ids!(selection_more_define.hit),
+            ids!(selection_more_fact.hit),
+            ids!(selection_more_related.hit),
+            ids!(selection_more_counter.hit),
+            ids!(selection_more_quote.hit),
+        ] {
+            self.ui.button(cx, path).reset_hover(cx);
+        }
+        for id in [
+            id!(explain_sel_btn),
+            id!(define_sel_btn),
+            id!(more_sel_btn),
+            id!(selection_ai_send),
+            id!(selection_ai_web),
+            id!(selection_ai_why),
+            id!(selection_ai_origin),
+            id!(selection_ai_example),
+            id!(selection_ai_back),
+            id!(sel_yellow),
+            id!(sel_green),
+            id!(sel_blue),
+            id!(sel_pink),
+            id!(remove_hl_sel_btn),
+        ] {
+            self.ui.button(cx, &[id]).reset_hover(cx);
+        }
         self.ui.button(cx, ids!(copy_sel_btn)).reset_hover(cx);
         self.ui.button(cx, ids!(note_from_sel_btn)).reset_hover(cx);
         self.ui.button(cx, ids!(vocab_from_sel_btn)).reset_hover(cx);
@@ -17690,14 +18362,34 @@ impl App {
         if viewport.size.x <= 0.0 || viewport.size.y <= 0.0 {
             return false;
         }
-        let popup = self.ui.view(cx, ids!(selection_popup));
-        let measured_height = popup.area().rect(cx).size.y;
-        let popup_height = if use_measured_height && measured_height > 0.0 {
-            measured_height
+        let max_width = if self.selection_ai_open {
+            SELECTION_POPUP_MAX_WIDTH
+        } else if app_language() == AppLanguage::English {
+            500.0
         } else {
-            SELECTION_POPUP_ESTIMATED_HEIGHT
+            460.0
         };
-        let (position, width) = selection_popup_geometry(viewport, anchor, popup_height);
+        let popup = self.ui.view(cx, ids!(selection_popup));
+        self.sync_selection_popup(cx);
+        let measured_height = self
+            .ui
+            .widget(cx, ids!(selection_content))
+            .area()
+            .rect(cx)
+            .size
+            .y
+            + 12.0;
+        let popup_height = selection_popup_height(
+            viewport,
+            if use_measured_height && measured_height > 12.0 {
+                measured_height
+            } else if self.selection_ai_open {
+                96.0
+            } else {
+                SELECTION_POPUP_ESTIMATED_HEIGHT
+            },
+        );
+        let (position, width) = selection_popup_geometry(viewport, anchor, popup_height, max_width);
         let Some(mut inner) = popup.borrow_mut() else {
             return false;
         };
@@ -17706,26 +18398,134 @@ impl App {
             Size::Fixed(value) => value,
             _ => -1.0,
         };
+        let old_height = match inner.walk.height {
+            Size::Fixed(value) => value,
+            _ => -1.0,
+        };
         let changed = old_position
             .map(|old| (old.x - position.x).abs() > 0.5 || (old.y - position.y).abs() > 0.5)
             .unwrap_or(true)
-            || (old_width - width).abs() > 0.5;
+            || (old_width - width).abs() > 0.5
+            || (old_height - popup_height).abs() > 0.5;
         inner.walk.abs_pos = Some(position);
         inner.walk.width = Size::Fixed(width);
+        inner.walk.height = Size::Fixed(popup_height);
         // A rotation can change the number of wrapped action rows. Measure
         // again after drawing at the new width before finalizing its position.
         if (old_width - width).abs() > 0.5 {
             self.pending_selection_popup_layout = true;
         }
         drop(inner);
-        if changed {
-            popup.redraw(cx);
+        if use_measured_height && self.selection_ai_open && self.selection_ai_focus_pending {
+            let input = self.ui.widget(cx, ids!(selection_ai_input));
+            if input.area().rect(cx).size.x > 0.0 {
+                input.set_key_focus(cx);
+                self.selection_ai_focus_pending = false;
+            }
         }
-        changed
+        let pointer = self.ui.view(cx, ids!(selection_pointer));
+        pointer.set_visible(cx, position.y + popup_height <= anchor.y);
+        if let Some(mut inner) = pointer.borrow_mut() {
+            inner.walk.abs_pos = Some(dvec2(
+                (anchor.x - 9.0).clamp(
+                    position.x + 20.0,
+                    (position.x + width - 38.0).max(position.x + 20.0),
+                ),
+                position.y + popup_height - 1.0,
+            ));
+        }
+        let mut menu_changed = false;
+        if self.selection_more_open && !self.selection_ai_open {
+            let menu = self.ui.view(cx, ids!(selection_more));
+            let natural_height = if use_measured_height {
+                self.ui
+                    .widget(cx, ids!(selection_more_content))
+                    .area()
+                    .rect(cx)
+                    .size
+                    .y
+                    + 12.0
+            } else {
+                360.0
+            };
+            let rect = crate::reader_selection::more_menu_geometry(
+                viewport,
+                Rect {
+                    pos: position,
+                    size: dvec2(width, popup_height),
+                },
+                natural_height.max(1.0),
+            );
+            if let Some(mut inner) = menu.borrow_mut() {
+                let width_changed = !matches!(inner.walk.width, Size::Fixed(value) if (value - rect.size.x).abs() < 0.5);
+                let height_changed = !matches!(inner.walk.height, Size::Fixed(value) if (value - rect.size.y).abs() < 0.5);
+                menu_changed =
+                    inner.walk.abs_pos != Some(rect.pos) || width_changed || height_changed;
+                if width_changed {
+                    self.pending_selection_popup_layout = true;
+                }
+                inner.walk.abs_pos = Some(rect.pos);
+                inner.walk.width = Size::Fixed(rect.size.x);
+                inner.walk.height = Size::Fixed(rect.size.y);
+            };
+        }
+        if changed || menu_changed {
+            self.ui.widget(cx, ids!(sel_bar)).redraw(cx);
+        }
+        changed || menu_changed
     }
 
-    /// Card placement uses a font-scaled height estimate on its first frame.
-    /// Repositioning after layout made the card jump under the pointer.
+    fn project_word_card(&self, cx: &mut Cx) {
+        let Some((word, lemma, gloss)) = &self.card else {
+            return;
+        };
+        let content = crate::reader_word_card::content(word, lemma, gloss);
+        self.ui.label(cx, ids!(card_word)).set_text(cx, word);
+        self.ui
+            .label(cx, ids!(card_gloss))
+            .set_text(cx, &content.meanings);
+        self.ui
+            .label(cx, ids!(card_phonetic))
+            .set_text(cx, &content.phonetic);
+        self.ui
+            .widget(cx, ids!(card_phonetic))
+            .set_visible(cx, !content.phonetic.is_empty());
+        self.ui
+            .label(cx, ids!(card_pos))
+            .set_text(cx, &content.part_of_speech);
+        self.ui
+            .widget(cx, ids!(card_pos_badge))
+            .set_visible(cx, !content.part_of_speech.is_empty());
+        self.ui
+            .label(cx, ids!(card_context))
+            .set_text(cx, &self.word_card_context);
+        self.ui
+            .widget(cx, ids!(card_context_group))
+            .set_visible(cx, !self.word_card_context.is_empty());
+        self.ui
+            .widget(cx, ids!(card_more_menu))
+            .set_visible(cx, self.word_card_more_open);
+        self.ui.widget(cx, ids!(word_card)).set_visible(cx, true);
+        let size = (READER_FONT_SIZE
+            .read()
+            .unwrap()
+            .unwrap_or(READER_FONT_DEFAULT)
+            * 0.85)
+            .clamp(11.0, 13.0);
+        for (id, font_size) in [
+            (id!(card_word), size * 2.3),
+            (id!(card_gloss), size * 1.1),
+            (id!(card_context), size),
+            (id!(card_phonetic), size * 1.1),
+        ] {
+            if let Some(mut label) = self.ui.label(cx, &[id]).borrow_mut() {
+                label.draw_text.text_style.font_size = font_size;
+            }
+        }
+    }
+
+    /// Fixed outer bounds on the very first frame; only the body scrolls.
+    /// No measured-height correction that would move the card under a pointer.
     fn position_word_card(&self, cx: &mut Cx) -> bool {
         let Some(anchor) = self.word_card_anchor else {
             return false;
@@ -17738,14 +18538,61 @@ impl App {
         if viewport.size.x <= 0.0 || viewport.size.y <= 0.0 {
             return false;
         }
+        let viewport =
+            reader_overlay_viewport(viewport, self.responsive_window_size, self.safe_area_insets);
         let card = self.ui.view(cx, ids!(word_card));
-        let font_size = READER_FONT_SIZE
-            .read()
-            .unwrap()
-            .unwrap_or(READER_FONT_DEFAULT);
-        let card_height = WORD_CARD_ESTIMATED_HEIGHT
-            + (font_size as f64 - READER_FONT_DEFAULT as f64).max(0.0) * 5.0;
+        let card_height = word_card_height(viewport);
         let (position, width) = word_card_geometry(viewport, anchor, card_height);
+        let narrow = width < 400.0;
+        if let Some((word, lemma, gloss)) = &self.card {
+            let content = crate::reader_word_card::content(word, lemma, gloss);
+            self.ui
+                .widget(cx, ids!(card_pos_badge))
+                .set_visible(cx, !narrow && !content.part_of_speech.is_empty());
+            let phonetic = if narrow && !content.part_of_speech.is_empty() {
+                format!("{}  {}", content.phonetic, content.part_of_speech)
+                    .trim()
+                    .to_string()
+            } else {
+                content.phonetic
+            };
+            self.ui
+                .label(cx, ids!(card_phonetic))
+                .set_text(cx, &phonetic);
+            self.ui
+                .widget(cx, ids!(card_phonetic))
+                .set_visible(cx, !phonetic.is_empty());
+        }
+        for id in [
+            id!(add_vocab_btn),
+            id!(card_dictionary_btn),
+            id!(card_more_btn),
+            id!(know_btn),
+            id!(card_copy_btn),
+        ] {
+            let mut button = self.ui.widget(cx, &[id]);
+            let font_size = if narrow { 11.0 } else { 12.5 };
+            script_apply_eval!(cx, button, { draw_text.text_style.font_size: #(font_size) });
+        }
+        if let Some(mut label) = self.ui.label(cx, ids!(card_word)).borrow_mut() {
+            label.walk.width = Size::Fit {
+                min: None,
+                max: Some(FitBound::Abs(
+                    (width - if narrow { 130.0 } else { 240.0 }).max(40.0),
+                )),
+            };
+            label.draw_text.text_style.font_size = if narrow {
+                23.0
+            } else {
+                (READER_FONT_SIZE
+                    .read()
+                    .unwrap()
+                    .unwrap_or(READER_FONT_DEFAULT)
+                    * 0.85)
+                    .clamp(11.0, 13.0)
+                    * 2.3
+            };
+        }
         let Some(mut inner) = card.borrow_mut() else {
             return false;
         };
@@ -17760,6 +18607,30 @@ impl App {
             || (old_width - width).abs() > 0.5;
         inner.walk.abs_pos = Some(position);
         inner.walk.width = Size::Fixed(width);
+        inner.walk.height = Size::Fixed(card_height);
+        drop(inner);
+        let arrow_x = (anchor.x - 12.0).clamp(
+            position.x + 20.0,
+            (position.x + width - 44.0).max(position.x + 20.0),
+        );
+        for (id, visible, y) in [
+            (
+                id!(word_card_arrow),
+                anchor.y < position.y - 12.0,
+                position.y - 12.0,
+            ),
+            (
+                id!(word_card_arrow_bottom),
+                anchor.y > position.y + card_height + 12.0,
+                position.y + card_height - 1.0,
+            ),
+        ] {
+            let arrow = self.ui.view(cx, &[id]);
+            if let Some(mut inner) = arrow.borrow_mut() {
+                inner.walk.abs_pos = Some(dvec2(arrow_x, y));
+            }
+            arrow.set_visible(cx, visible);
+        }
         changed
     }
 
@@ -17767,7 +18638,17 @@ impl App {
         self.card = None;
         self.word_card_anchor = None;
         self.pending_word_card_layout = false;
-        self.ui.widget(cx, ids!(word_card)).set_visible(cx, false);
+        self.word_card_context.clear();
+        self.word_card_more_open = false;
+        *crate::ruby_word::ACTIVE_WORD.write().unwrap() = None;
+        self.ui.widget(cx, ids!(chapter_list)).redraw(cx);
+        for id in [
+            id!(word_card),
+            id!(word_card_arrow),
+            id!(word_card_arrow_bottom),
+        ] {
+            self.ui.widget(cx, &[id]).set_visible(cx, false);
+        }
         self.ui.widget(cx, ids!(word_card_layer)).redraw(cx);
     }
 
@@ -17777,6 +18658,20 @@ impl App {
         SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
         self.selection_popup_anchor = None;
         self.pending_selection_popup_layout = false;
+        self.selection_ai_open = false;
+        self.selection_ai_focus_pending = false;
+        self.selection_more_open = false;
+        self.selection_ai_draft.clear();
+        if self
+            .ui
+            .text_input(cx, ids!(selection_ai_input))
+            .key_focus(cx)
+        {
+            cx.set_key_focus(Area::Empty);
+        }
+        self.ui
+            .widget(cx, ids!(selection_ai_input))
+            .set_text(cx, "");
         self.reset_selection_action_hover(cx);
         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
         let chapter_list = self.ui.widget(cx, ids!(chapter_list));
@@ -18093,7 +18988,6 @@ impl MatchEvent for App {
             if let Some(background) = choice {
                 if let Some(draft) = &mut self.reader_customise_draft {
                     draft.background = background;
-                    draft.bold_text = background == ReaderBackground::Bold;
                 }
                 self.apply_reader_customise_live(cx);
                 return;
@@ -18189,7 +19083,7 @@ impl MatchEvent for App {
                     crate::desktop_import::DesktopImportAction::Picked(paths) => {
                         self.ui.label(cx, ids!(library_hint)).set_text(
                             cx,
-                            localized("正在导入所选 EPUB…", "Importing selected EPUB files…"),
+                            localized("正在导入所选书籍…", "Importing selected books…"),
                         );
                         spawn_import(paths.clone(), false);
                     }
@@ -18218,7 +19112,7 @@ impl MatchEvent for App {
                     crate::mobile_import::IosImportAction::Picked(paths) => {
                         self.ui.label(cx, ids!(library_hint)).set_text(
                             cx,
-                            localized("正在导入所选 EPUB…", "Importing selected EPUB files…"),
+                            localized("正在导入所选书籍…", "Importing selected books…"),
                         );
                         spawn_import(paths.clone(), true);
                     }
@@ -18248,7 +19142,7 @@ impl MatchEvent for App {
                     crate::android_import::AndroidImportAction::Picked(paths) => {
                         self.ui.label(cx, ids!(library_hint)).set_text(
                             cx,
-                            localized("正在导入所选 EPUB…", "Importing selected EPUB files…"),
+                            localized("正在导入所选书籍…", "Importing selected books…"),
                         );
                         spawn_import(paths.clone(), true);
                     }
@@ -18765,6 +19659,7 @@ impl MatchEvent for App {
                             localized("生词本里已有这个词", "This word is already in Vocabulary")
                         };
                         self.ui.label(cx, ids!(card_hint)).set_text(cx, hint);
+                        self.ui.widget(cx, ids!(card_hint)).set_visible(cx, true);
                         self.set_selection_hint(cx, hint);
                         if *added {
                             spawn_load_vocab();
@@ -18829,6 +19724,12 @@ impl MatchEvent for App {
                             .clipped_rect(cx);
                         self.selection_popup_anchor =
                             Some(anchor.unwrap_or_else(|| viewport.pos + viewport.size * 0.5));
+                        self.selection_ai_open = false;
+                        self.selection_more_open = false;
+                        self.selection_ai_draft.clear();
+                        self.ui
+                            .widget(cx, ids!(selection_ai_input))
+                            .set_text(cx, "");
                         self.reset_selection_action_hover(cx);
                         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, true);
                         self.position_selection_popup(cx, false);
@@ -18840,6 +19741,16 @@ impl MatchEvent for App {
                         SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
                         self.selection_popup_anchor = None;
                         self.pending_selection_popup_layout = false;
+                        self.selection_ai_open = false;
+                        self.selection_more_open = false;
+                        self.selection_ai_draft.clear();
+                        if self
+                            .ui
+                            .text_input(cx, ids!(selection_ai_input))
+                            .key_focus(cx)
+                        {
+                            cx.set_key_focus(Area::Empty);
+                        }
                         self.reset_selection_action_hover(cx);
                         self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
                     }
@@ -18992,7 +19903,7 @@ impl MatchEvent for App {
                             continue;
                         }
                         ::log::info!(
-                            "Opened EPUB: parse={}ms, initial chapter gloss={}ms, lazy remaining chapters",
+                            "Opened book: parse={}ms, initial chapter gloss={}ms, lazy remaining chapters",
                             parse_ms,
                             initial_gloss_ms
                         );
@@ -19164,20 +20075,22 @@ impl MatchEvent for App {
                             }
                         } else if cfg!(any(target_os = "android", target_os = "ios")) {
                             if app_language() == AppLanguage::English {
-                                format!("{items} books · Choose Import EPUB to add files")
+                                format!("{items} books · Choose Import books to add EPUB / PDF")
                             } else {
-                                format!("共 {items} 本 · 点击“导入 EPUB”从文件中添加")
+                                format!("共 {items} 本 · 点击“导入书籍”添加 EPUB / PDF")
                             }
                         } else if cfg!(target_os = "macos")
                             && app_language() == AppLanguage::English
                         {
-                            format!("{items} books · Choose Import EPUB or drop an EPUB here")
+                            format!(
+                                "{items} books · Choose Import books or drop an EPUB / PDF here"
+                            )
                         } else if cfg!(target_os = "macos") {
-                            format!("共 {items} 本 · 点击“导入 EPUB”或把 EPUB 拖进窗口")
+                            format!("共 {items} 本 · 点击“导入书籍”或拖入 EPUB / PDF")
                         } else if app_language() == AppLanguage::English {
-                            format!("{items} books · Drop an EPUB or place it in the import folder")
+                            format!("{items} books · Drop an EPUB / PDF or place it in the import folder")
                         } else {
-                            format!("共 {items} 本 · 拖入 EPUB 或放进 import 目录添加")
+                            format!("共 {items} 本 · 拖入 EPUB / PDF 或放进 import 目录添加")
                         };
                         self.ui.label(cx, ids!(library_hint)).set_text(cx, &hint);
                         self.ui.redraw(cx);
@@ -19394,35 +20307,33 @@ impl MatchEvent for App {
                     .trim_end_matches(['.', ',', ';', ':', '!', '?'])
                     .to_string();
                 let lemma = readwise_core::vocab::lemma::lemmatize(&word);
-                let font_size = READER_FONT_SIZE
-                    .read()
-                    .unwrap()
-                    .unwrap_or(READER_FONT_DEFAULT);
-                for id in [id!(card_word), id!(card_hint)] {
-                    if let Some(mut label) = self.ui.label(cx, &[id]).borrow_mut() {
-                        label.draw_text.text_style.font_size = font_size;
-                    }
-                }
-                // Chinese gloss and action glyphs look larger than Latin body
-                // text at the same numeric size.
-                let action_font_size = (font_size * 0.8).max(8.0);
-                if let Some(mut label) = self.ui.label(cx, ids!(card_gloss)).borrow_mut() {
-                    label.draw_text.text_style.font_size = action_font_size;
-                }
-                for id in [id!(close_card_btn), id!(add_vocab_btn), id!(know_btn)] {
-                    let mut button = self.ui.widget(cx, &[id]);
-                    script_apply_eval!(cx, button, {
-                        draw_text.text_style.font_size: #(action_font_size)
-                    });
-                }
-                self.ui.label(cx, ids!(card_word)).set_text(cx, &word);
-                self.ui.label(cx, ids!(card_gloss)).set_text(cx, &gloss);
-                self.ui.label(cx, ids!(card_hint)).set_text(cx, "");
-                self.ui.widget(cx, ids!(word_card)).set_visible(cx, true);
+                self.word_card_context = self
+                    .ui
+                    .widget(cx, ids!(chapter_list))
+                    .borrow::<ChapterList>()
+                    .and_then(|reader| reader.hit_block_char(cx, anchor))
+                    .and_then(|(block, offset)| {
+                        PARAGRAPHS.read().unwrap().get(block).map(|html| {
+                            crate::reader_word_card::context_sentence(
+                                &readwise_core::vocab::annotate::rendered_text(html),
+                                offset,
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                self.word_card_more_open = false;
+                self.card = Some((word, lemma, gloss));
                 self.word_card_anchor = Some(anchor);
+                *crate::ruby_word::ACTIVE_WORD.write().unwrap() = Some(action.widget_uid);
+                self.project_word_card(cx);
+                self.ui.label(cx, ids!(card_hint)).set_text(cx, "");
+                self.ui.widget(cx, ids!(card_hint)).set_visible(cx, false);
+                self.ui
+                    .view(cx, ids!(card_body))
+                    .set_scroll_pos(cx, DVec2::default());
                 self.position_word_card(cx);
                 self.pending_word_card_layout = false;
-                self.card = Some((word, lemma, gloss));
+                self.ui.widget(cx, ids!(chapter_list)).redraw(cx);
                 self.ui.widget(cx, ids!(word_card_layer)).redraw(cx);
             }
         }
@@ -19743,7 +20654,10 @@ impl MatchEvent for App {
             match crate::mobile_import::open_epub_picker() {
                 Ok(()) => self.ui.label(cx, ids!(library_hint)).set_text(
                     cx,
-                    localized("请从“文件”中选择 EPUB…", "Select EPUB files in Files…"),
+                    localized(
+                        "请从“文件”中选择 EPUB / PDF…",
+                        "Select EPUB / PDF files in Files…",
+                    ),
                 ),
                 Err(error) => self.ui.label(cx, ids!(library_hint)).set_text(
                     cx,
@@ -19759,8 +20673,8 @@ impl MatchEvent for App {
                 Ok(()) => self.ui.label(cx, ids!(library_hint)).set_text(
                     cx,
                     localized(
-                        "请从系统文件选择器中选择 EPUB…",
-                        "Select EPUB files in the system picker…",
+                        "请从系统文件选择器中选择 EPUB / PDF…",
+                        "Select EPUB / PDF files in the system picker…",
                     ),
                 ),
                 Err(error) => self.ui.label(cx, ids!(library_hint)).set_text(
@@ -19900,18 +20814,10 @@ impl MatchEvent for App {
         {
             self.toggle_reader_bookmark(cx);
         }
-        for (id, background) in [
-            (id!(reader_mode_original), ReaderBackground::Original),
-            (id!(reader_mode_quiet), ReaderBackground::Sepia),
-            (id!(reader_mode_paper), ReaderBackground::Paper),
-            (id!(reader_mode_bold), ReaderBackground::Bold),
-            (id!(reader_mode_calm), ReaderBackground::Sage),
-            (id!(reader_mode_focus), ReaderBackground::Night),
-        ] {
+        for (id, background) in crate::reader_settings_panel::theme_modes() {
             if self.ui.button(cx, &[id]).clicked(actions) {
                 if let Some(draft) = self.reader_customise_draft.as_mut() {
                     draft.background = background;
-                    draft.bold_text = background == ReaderBackground::Bold;
                 }
             }
         }
@@ -20601,7 +21507,22 @@ impl MatchEvent for App {
         if let Some(on) = self.ui.check_box(cx, ids!(gloss_enable)).changed(actions) {
             self.toggle_gloss(cx, on);
         }
-        if self.ui.button(cx, ids!(hl_btn)).clicked(actions) {
+        for (id, slot) in [
+            (id!(sel_yellow), 4),
+            (id!(sel_green), 5),
+            (id!(sel_blue), 6),
+            (id!(sel_pink), 7),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                *crate::mark_span::HL_SLOT.write().unwrap() = slot;
+                self.persist_reader_settings(cx);
+                self.sync_selection_popup(cx);
+                self.ui.widget(cx, ids!(sel_bar)).redraw(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(hl_btn)).clicked(actions)
+            || self.ui.button(cx, ids!(remove_hl_sel_btn)).clicked(actions)
+        {
             let range = *SEL_RANGE.read().unwrap();
             let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
             if let (Some(range), Some(book_id)) = (range, book_id) {
@@ -20668,26 +21589,177 @@ impl MatchEvent for App {
                 );
             }
         }
-        if self.ui.button(cx, ids!(ask_ai_sel_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(more_sel_btn)).clicked(actions) {
+            self.selection_more_open = !self.selection_more_open;
+            self.ui
+                .view(cx, ids!(selection_more_scroll))
+                .set_scroll_pos(cx, DVec2::default());
+            self.relayout_selection_popup(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(selection_more_define.hit))
+            .clicked(actions)
+        {
+            self.submit_selection_question(
+                cx,
+                localized(
+                    "请解释所选词语的含义、词性和在此处的用法。",
+                    "Define the selected words and their meaning in this author's context.",
+                ),
+            );
+        }
+        if self
+            .ui
+            .button(cx, ids!(selection_more_counter.hit))
+            .clicked(actions)
+        {
+            self.submit_selection_question(cx, localized("请提出对所选观点最有力的反驳，区分事实、假设与意见。", "Give the strongest counterpoint to this claim, distinguishing facts, assumptions and opinions."));
+        }
+        if self
+            .ui
+            .button(cx, ids!(selection_more_fact.hit))
+            .clicked(actions)
+        {
             let selected = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !selected.is_empty() {
-                let prompt = if app_language() == AppLanguage::English {
-                    format!(
-                        "Explain the following English passage and identify important words and expressions:\n\n{selected}"
-                    )
-                } else {
-                    format!("请解释下面这段英文，并指出重要词语和表达：\n\n{selected}")
-                };
-                self.clear_reader_selection(cx);
-                self.note_open = false;
-                self.ui.widget(cx, ids!(note_panel)).set_visible(cx, false);
-                self.set_reader_ai_visible(cx, true);
-                if !self.send_chat_text(cx, prompt.clone()) {
-                    self.ui
-                        .text_input(cx, ids!(reader_chat_input))
-                        .set_text(cx, &prompt);
-                }
+                cx.open_url(
+                    &format!(
+                        "https://www.google.com/search?q={}",
+                        percent_encode_query(&selected)
+                    ),
+                    OpenUrlInPlace::No,
+                );
+                self.selection_more_open = false;
+                self.relayout_selection_popup(cx);
+                self.set_selection_hint(
+                    cx,
+                    localized(
+                        "已在浏览器中打开事实核查搜索",
+                        "Fact-check search opened in the browser",
+                    ),
+                );
             }
+        }
+        if self
+            .ui
+            .button(cx, ids!(selection_more_quote.hit))
+            .clicked(actions)
+        {
+            let selected = SELECTED_TEXT.read().unwrap().trim().to_string();
+            let source = CURRENT_BOOK
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|book| book.title.clone());
+            let range = *SEL_RANGE.read().unwrap();
+            if let (false, Some(title), Some(range)) = (selected.is_empty(), source, range) {
+                let quote = crate::reader_selection::citation_quote(
+                    &selected,
+                    &title,
+                    self.chapter_idx,
+                    range.0 .0,
+                    app_language() == AppLanguage::English,
+                );
+                cx.copy_to_clipboard(&quote);
+                self.selection_more_open = false;
+                self.relayout_selection_popup(cx);
+                self.set_selection_hint(
+                    cx,
+                    localized("已复制引文及出处 ✓", "Quote and source copied ✓"),
+                );
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(selection_more_related.hit))
+            .clicked(actions)
+        {
+            let query = SELECTED_TEXT.read().unwrap().trim().to_string();
+            let book_id = CURRENT_BOOK
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|book| book.id.clone());
+            if let (false, Some(book_id)) = (query.is_empty(), book_id) {
+                self.clear_reader_selection(cx);
+                self.reader_search_query = query.clone();
+                self.ui
+                    .text_input(cx, ids!(reader_search_input))
+                    .set_text(cx, &query);
+                READER_SEARCH_RESULTS.write().unwrap().clear();
+                self.search_open = true;
+                self.toc_open = false;
+                self.note_open = false;
+                self.bookmarks_open = false;
+                self.reader_ai_open = false;
+                self.sync_reader_panel_layout(cx);
+                self.ui
+                    .label(cx, ids!(reader_search_hint))
+                    .set_text(cx, localized("正在搜索…", "Searching…"));
+                spawn_reader_search(book_id, query);
+                self.ui.redraw(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(ask_ai_sel_btn)).clicked(actions) {
+            self.selection_ai_open = true;
+            self.selection_ai_focus_pending = true;
+            self.selection_more_open = false;
+            self.set_selection_hint(cx, "");
+            self.relayout_selection_popup(cx);
+            self.ui
+                .widget(cx, ids!(selection_ai_input))
+                .set_key_focus(cx);
+        }
+        if self.ui.button(cx, ids!(selection_ai_back)).clicked(actions) {
+            self.selection_ai_open = false;
+            self.relayout_selection_popup(cx);
+            cx.set_key_focus(Area::Empty);
+        }
+        if let Some(text) = self
+            .ui
+            .text_input(cx, ids!(selection_ai_input))
+            .changed(actions)
+        {
+            self.selection_ai_draft = text;
+        }
+        if self.ui.button(cx, ids!(selection_ai_web)).clicked(actions) {
+            let selected = SELECTED_TEXT.read().unwrap().trim().to_string();
+            let question = self.ui.text_input(cx, ids!(selection_ai_input)).text();
+            if !selected.is_empty() {
+                cx.open_url(
+                    &format!(
+                        "https://www.google.com/search?q={}",
+                        percent_encode_query(&format!("{selected} {}", question.trim()))
+                    ),
+                    OpenUrlInPlace::No,
+                );
+                self.set_selection_hint(
+                    cx,
+                    localized("已在浏览器中搜索", "Search opened in the browser"),
+                );
+            }
+        }
+        for (id, question) in [
+            (id!(explain_sel_btn), localized("请解释这段文字，并指出重要词语和表达。", "Explain this passage and its important words and expressions.")),
+            (id!(define_sel_btn), localized("请解释所选词语的含义、词性和在此处的用法。", "Define the selected words, their parts of speech and their meaning in this context.")),
+            (id!(selection_ai_why), localized("为什么在这里使用这个词？", "Why this word here?")),
+            (id!(selection_ai_origin), localized("这个词源自哪里？请解释它的词源。", "Where does it come from? Explain its etymology.")),
+            (id!(selection_ai_example), localized("请用所选词语造句，并解释用法。", "Use it in a sentence and explain its usage.")),
+        ] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                self.submit_selection_question(cx, question);
+            }
+        }
+        let returned = self
+            .ui
+            .text_input(cx, ids!(selection_ai_input))
+            .returned(actions);
+        if self.ui.button(cx, ids!(selection_ai_send)).clicked(actions) || returned.is_some() {
+            let question = returned
+                .map(|(text, _)| text)
+                .unwrap_or_else(|| self.ui.text_input(cx, ids!(selection_ai_input)).text());
+            self.submit_selection_question(cx, &question);
         }
         if self.ui.button(cx, ids!(speak_sel_btn)).clicked(actions) {
             let text = SELECTED_TEXT.read().unwrap().trim().to_string();
@@ -20715,6 +21787,57 @@ impl MatchEvent for App {
             self.close_note_composer(cx);
             self.sync_reader_panel_layout(cx);
         }
+        if self.ui.button(cx, ids!(card_speak_btn)).clicked(actions) {
+            if let Some((word, _, _)) = &self.card {
+                if cfg!(any(
+                    target_os = "macos",
+                    target_os = "windows",
+                    target_os = "linux"
+                )) {
+                    speak_text(word.clone());
+                } else {
+                    self.ui.label(cx, ids!(card_hint)).set_text(
+                        cx,
+                        localized(
+                            "此平台暂不支持发音，可在词典中收听",
+                            "Audio is not supported here; listen in the dictionary",
+                        ),
+                    );
+                    self.ui.widget(cx, ids!(card_hint)).set_visible(cx, true);
+                }
+            }
+        }
+        if self
+            .ui
+            .button(cx, ids!(card_dictionary_btn))
+            .clicked(actions)
+        {
+            if let Some((word, _, _)) = &self.card {
+                cx.open_url(
+                    &format!(
+                        "https://www.youdao.com/result?word={}&lang=en",
+                        percent_encode_query(word)
+                    ),
+                    OpenUrlInPlace::No,
+                );
+            }
+        }
+        if self.ui.button(cx, ids!(card_more_btn)).clicked(actions) {
+            self.word_card_more_open = !self.word_card_more_open;
+            self.ui
+                .widget(cx, ids!(card_more_menu))
+                .set_visible(cx, self.word_card_more_open);
+            self.ui.widget(cx, ids!(word_card_layer)).redraw(cx);
+        }
+        if self.ui.button(cx, ids!(card_copy_btn)).clicked(actions) {
+            if let Some((word, _, _)) = &self.card {
+                cx.copy_to_clipboard(word);
+                self.ui
+                    .label(cx, ids!(card_hint))
+                    .set_text(cx, localized("已复制", "Copied"));
+                self.ui.widget(cx, ids!(card_hint)).set_visible(cx, true);
+            }
+        }
         if self.ui.button(cx, ids!(close_card_btn)).clicked(actions) {
             self.close_word_card(cx);
             self.ui.redraw(cx);
@@ -20725,6 +21848,7 @@ impl MatchEvent for App {
                 self.ui
                     .label(cx, ids!(card_hint))
                     .set_text(cx, localized("加入中…", "Adding…"));
+                self.ui.widget(cx, ids!(card_hint)).set_visible(cx, true);
                 spawn_add_vocab(lemma, word, gloss, book_id);
             }
         }
@@ -21335,6 +22459,7 @@ impl AppMain for App {
         crate::reader_page_turn::script_mod(vm);
         crate::mark_span::script_mod(vm);
         crate::settings_swatch::script_mod(vm);
+        crate::reader_selection::script_mod(vm);
         crate::reader_settings_panel::script_mod(vm);
         self::script_mod(vm)
     }
@@ -21375,7 +22500,7 @@ impl AppMain for App {
         {
             self.import_picker_frame = None;
             if let Err(error) = crate::desktop_import::open_epub_picker(
-                localized("导入 EPUB", "Import EPUB"),
+                localized("导入 EPUB / PDF", "Import EPUB / PDF"),
                 localized("导入", "Import"),
             ) {
                 self.ui.label(cx, ids!(library_hint)).set_text(
@@ -21399,6 +22524,13 @@ impl AppMain for App {
                 .map(|touch| touch.abs),
             _ => None,
         };
+        if self.word_card_anchor.is_some()
+            && (matches!(event, Event::KeyDown(key) if key.key_code == KeyCode::Escape)
+                || event.back_pressed())
+        {
+            self.close_word_card(cx);
+            return;
+        }
         let card_captures_pointer = if self.word_card_anchor.is_some() {
             if let Some(abs) = word_card_press {
                 let card_rect =
@@ -21470,6 +22602,53 @@ impl AppMain for App {
                     return;
                 }
             }
+        }
+        if self.selection_more_open && self.selection_popup_anchor.is_some() {
+            if matches!(event, Event::KeyDown(key) if key.key_code == KeyCode::Escape)
+                || event.back_pressed()
+            {
+                self.selection_more_open = false;
+                self.relayout_selection_popup(cx);
+                return;
+            }
+            if let Event::MouseDown(e) = event {
+                let menu =
+                    current_clipped_rect(cx, self.ui.widget(cx, ids!(selection_more)).area());
+                let toolbar =
+                    current_clipped_rect(cx, self.ui.widget(cx, ids!(selection_popup)).area());
+                if !menu.contains(e.abs) && !toolbar.contains(e.abs) {
+                    self.selection_more_open = false;
+                    self.relayout_selection_popup(cx);
+                    return;
+                }
+            }
+            if let Event::TouchUpdate(e) = event {
+                if let Some(touch) = e
+                    .touches
+                    .iter()
+                    .find(|touch| touch.state == TouchState::Start)
+                {
+                    let menu =
+                        current_clipped_rect(cx, self.ui.widget(cx, ids!(selection_more)).area());
+                    let toolbar =
+                        current_clipped_rect(cx, self.ui.widget(cx, ids!(selection_popup)).area());
+                    if !menu.contains(touch.abs) && !toolbar.contains(touch.abs) {
+                        self.selection_more_open = false;
+                        self.relayout_selection_popup(cx);
+                        return;
+                    }
+                }
+            }
+        }
+        if self.selection_ai_open
+            && self.selection_popup_anchor.is_some()
+            && (matches!(event, Event::KeyDown(key) if key.key_code == KeyCode::Escape)
+                || event.back_pressed())
+        {
+            self.selection_ai_open = false;
+            self.relayout_selection_popup(cx);
+            cx.set_key_focus(Area::Empty);
+            return;
         }
         let reader_swipe = self.track_reader_swipe(cx, event);
         let pointer_start = match event {
@@ -21548,8 +22727,13 @@ impl AppMain for App {
                 || current_clipped_rect(cx, self.ui.widget(cx, ids!(selection_popup)).area()),
                 abs,
             );
+            let menu_captures_pointer = selection_popup_open
+                && self.selection_more_open
+                && current_clipped_rect(cx, self.ui.widget(cx, ids!(selection_more)).area())
+                    .contains(abs);
             SELECTION_POPUP_POINTER.store(
                 popup_captures_pointer
+                    || menu_captures_pointer
                     || card_captures_pointer
                     || (self.on_reader_page
                         && self.compact_layout
@@ -21558,6 +22742,20 @@ impl AppMain for App {
                             .contains(abs)),
                 Ordering::Relaxed,
             );
+        }
+        if let Event::Scroll(scroll) = event {
+            let over_selection = self.selection_popup_anchor.is_some()
+                && self.ui.widget(cx, ids!(sel_bar)).visible()
+                && (current_clipped_rect(cx, self.ui.widget(cx, ids!(selection_popup)).area())
+                    .contains(scroll.abs)
+                    || (self.selection_more_open
+                        && current_clipped_rect(
+                            cx,
+                            self.ui.widget(cx, ids!(selection_more)).area(),
+                        )
+                        .contains(scroll.abs)));
+            SELECTION_POPUP_POINTER
+                .store(over_selection || card_captures_pointer, Ordering::Relaxed);
         }
         let wire_outcome = self
             .ai_request
@@ -21680,15 +22878,15 @@ impl AppMain for App {
                     self.ui.label(cx, ids!(library_hint)).set_text(
                         cx,
                         localized(
-                            "点击“导入 EPUB”，从系统文件选择器中选择书籍。",
-                            "Choose Import EPUB to select books from the system picker.",
+                            "点击“导入书籍”，从系统文件选择器中选择 EPUB / PDF。",
+                            "Choose Import books to select EPUB / PDF files from the system picker.",
                         ),
                     );
                     self.ui.label(cx, ids!(library_empty_hint)).set_text(
                         cx,
                         localized(
-                            "点击右上角“导入 EPUB”添加书籍",
-                            "Choose Import EPUB in the top-right corner to add books",
+                            "点击右上角“导入书籍”添加 EPUB / PDF",
+                            "Choose Import books in the top-right corner to add EPUB / PDF",
                         ),
                     );
                 }
@@ -21761,7 +22959,7 @@ impl AppMain for App {
             }
             // 拖入悬停：声明接受拷贝，否则系统不触发 Drop。
             Event::Drag(de) => {
-                if de.items.iter().any(is_epub_item) {
+                if de.items.iter().any(is_book_item) {
                     *de.response.lock().unwrap() = DragResponse::Copy;
                 }
             }
@@ -21771,7 +22969,7 @@ impl AppMain for App {
                     .items
                     .iter()
                     .filter_map(|it| match it {
-                        DragItem::FilePath { path, .. } if is_epub_path(path) => {
+                        DragItem::FilePath { path, .. } if is_book_path(path) => {
                             Some(percent_decode_path(path))
                         }
                         _ => None,

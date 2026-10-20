@@ -47,7 +47,9 @@ fn delegate_class() -> *const Class {
                     let path: ObjcId = msg_send![url, path];
                     if path != nil {
                         let path = nsstring_to_string(path);
-                        if path.to_ascii_lowercase().ends_with(".epub") {
+                        if readwise_core::books::supported_format(std::path::Path::new(&path))
+                            .is_some()
+                        {
                             paths.push(path);
                         }
                     }
@@ -55,7 +57,7 @@ fn delegate_class() -> *const Class {
             }
             release_active_delegate();
             Cx::post_action(if paths.is_empty() {
-                IosImportAction::Error("没有选择 EPUB 文件".to_string())
+                IosImportAction::Error("没有选择 EPUB / PDF 文件".to_string())
             } else {
                 IosImportAction::Picked(paths)
             });
@@ -105,8 +107,12 @@ pub fn open_epub_picker() -> Result<(), String> {
             presenter = presented;
         }
 
-        let epub_uti = str_to_nsstring("org.idpf.epub-container");
-        let document_types: ObjcId = msg_send![class!(NSArray), arrayWithObject: epub_uti];
+        let types = [
+            str_to_nsstring("org.idpf.epub-container"),
+            str_to_nsstring("com.adobe.pdf"),
+        ];
+        let document_types: ObjcId =
+            msg_send![class!(NSArray), arrayWithObjects: types.as_ptr() count: types.len()];
         let picker: ObjcId = msg_send![class!(UIDocumentPickerViewController), alloc];
         // UIDocumentPickerModeImport = 0. The older initializer remains available
         // on every iOS version supported by Makepad and avoids a hard dependency

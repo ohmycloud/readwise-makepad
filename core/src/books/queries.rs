@@ -1,8 +1,22 @@
-use super::epub_meta;
 use super::models::*;
+use super::{parse_meta, supported_format};
 use sqlx::{Row, SqlitePool};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Roll back only the newly allocated private directory, never a user's source.
+struct ImportDirectory {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl Drop for ImportDirectory {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
 
 fn cover_ext(mime: &str) -> &'static str {
     match mime {
@@ -13,31 +27,33 @@ fn cover_ext(mime: &str) -> &'static str {
     }
 }
 
-/// 导入一个 EPUB 文件：Rust 侧解析元数据 → 复制文件与封面到数据目录 → 入库。
+/// 导入 EPUB / PDF：Rust 侧解析元数据 → 复制文件与封面到数据目录 → 入库。
 /// 源文件不删（拖放/导入目录的是用户原文件）。返回新书。
 pub async fn import_book(
     pool: &SqlitePool,
     data_dir: &Path,
     src: &Path,
 ) -> Result<SimpleBook, String> {
-    if src
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        != Some("epub".to_string())
-    {
-        return Err(format!("暂只支持 EPUB：{}", src.display()));
-    }
-
-    let meta = epub_meta::parse_meta(src)?;
+    let format =
+        supported_format(src).ok_or_else(|| format!("仅支持 EPUB 和 PDF：{}", src.display()))?;
+    let meta = parse_meta(src)?;
     let id = uuid::Uuid::new_v4().to_string();
     let file_size = fs::metadata(src).map(|m| m.len() as i64).unwrap_or(0);
 
     let book_dir = data_dir.join("books").join(&id);
     fs::create_dir_all(&book_dir).map_err(|e| format!("创建书目录失败: {}", e))?;
+    let mut directory = ImportDirectory {
+        path: book_dir,
+        committed: false,
+    };
 
-    let epub_rel = format!("books/{}/book.epub", id);
+    let epub_rel = format!("books/{}/book.{format}", id);
     fs::copy(src, data_dir.join(&epub_rel)).map_err(|e| format!("复制书籍失败: {}", e))?;
+    if format == "pdf" {
+        // Validate text extraction before reporting import success, and freeze
+        // the source coordinates used by selection / highlights / ruby.
+        super::pdf::load_imported_pages(&data_dir.join(&epub_rel))?;
+    }
 
     let cover_rel = if let Some((bytes, mime)) = &meta.cover {
         let rel = format!("books/{}/cover.{}", id, cover_ext(mime));
@@ -55,11 +71,12 @@ pub async fn import_book(
 
     sqlx::query(
         r#"INSERT INTO books (id, title, author, format, file_path, cover_path, file_size, language, tags, created_at, updated_at)
-           VALUES (?, ?, ?, 'epub', ?, ?, ?, ?, ?, ?, ?)"#,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&id)
     .bind(&meta.title)
     .bind(&meta.author)
+    .bind(format)
     .bind(&epub_rel)
     .bind(&cover_rel)
     .bind(file_size)
@@ -85,12 +102,13 @@ pub async fn import_book(
     tx.commit()
         .await
         .map_err(|e| format!("提交事务失败: {}", e))?;
+    directory.committed = true;
 
     Ok(SimpleBook {
         id,
         title: meta.title,
         author: meta.author,
-        format: "epub".to_string(),
+        format: format.to_string(),
         file_path: epub_rel,
         cover_path: cover_rel,
         file_size,
@@ -568,7 +586,7 @@ pub async fn update_progress(
     Ok(())
 }
 
-/// 扫描"导入目录"里的 epub，导入尚未入库的（按文件名判断粗略去重靠 import 内 uuid，
+/// 扫描"导入目录"里的 EPUB / PDF，导入尚未入库的（按文件名判断粗略去重靠 import 内 uuid，
 /// 这里用已入库标题+大小近似跳过重复导入）。返回新导入数量。
 pub async fn scan_import_dir(
     pool: &SqlitePool,
@@ -590,16 +608,11 @@ pub async fn scan_import_dir(
     let entries = fs::read_dir(import_dir).map_err(|e| format!("读取导入目录失败: {}", e))?;
     for entry in entries.flatten() {
         let path: PathBuf = entry.path();
-        if path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
-            != Some("epub".to_string())
-        {
+        if supported_format(&path).is_none() {
             continue;
         }
         let size = fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0);
-        if let Ok(meta) = epub_meta::parse_meta(&path) {
+        if let Ok(meta) = parse_meta(&path) {
             if existing.iter().any(|(t, s)| *t == meta.title && *s == size) {
                 continue;
             }
@@ -612,6 +625,42 @@ pub async fn scan_import_dir(
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn failed_pdf_transaction_removes_only_private_import_files() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pool = runtime
+            .block_on(SqlitePool::connect("sqlite::memory:"))
+            .unwrap();
+        runtime
+            .block_on(sqlx::raw_sql(include_str!("../schema.sql")).execute(&pool))
+            .unwrap();
+        runtime
+            .block_on(sqlx::query("DROP TABLE book_status").execute(&pool))
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("readwise-import-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.pdf");
+        fs::write(&source, super::super::pdf::tests::fixture()).unwrap();
+        assert!(runtime
+            .block_on(import_book(&pool, &root, &source))
+            .is_err());
+        assert!(source.is_file());
+        assert_eq!(fs::read_dir(root.join("books")).unwrap().count(), 0);
+        let count: i64 = runtime
+            .block_on(sqlx::query_scalar("SELECT COUNT(*) FROM books").fetch_one(&pool))
+            .unwrap();
+        assert_eq!(count, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]

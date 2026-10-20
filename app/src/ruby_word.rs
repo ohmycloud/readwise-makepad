@@ -2,6 +2,9 @@ use makepad_widgets::makepad_html::HtmlDoc;
 use makepad_widgets::*;
 use std::sync::{LazyLock, RwLock};
 
+/// A paint-only lookup highlight. Never enters text/layout signatures.
+pub static ACTIVE_WORD: LazyLock<RwLock<Option<WidgetUid>>> = LazyLock::new(|| RwLock::new(None));
+
 /// 注音字号（设置页可调，6-12）。
 pub static GLOSS_FONT_SIZE: LazyLock<RwLock<f32>> = LazyLock::new(|| RwLock::new(7.5));
 
@@ -112,6 +115,15 @@ script_mod! {
     mod.widgets.RubyWordBase = #(RubyWord::register_widget(vm))
     mod.widgets.RubyWord = set_type_default() do mod.widgets.RubyWordBase{
         gloss_gap: 2.0
+        draw_active +: {
+            color: #x4285f43c
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 3.0)
+                sdf.fill(self.color)
+                return sdf.result
+            }
+        }
         draw_gloss +: {
             color: #x7fb2a6
             text_style: theme.font_regular{
@@ -153,6 +165,8 @@ pub struct RubyWord {
     draw_debug: DrawColor,
     #[live]
     draw_fill: DrawColor,
+    #[live]
+    draw_active: DrawColor,
     #[live(2.0f32)]
     gloss_gap: f32,
     #[live]
@@ -407,6 +421,11 @@ impl Widget for RubyWord {
             }
         }
 
+        if !self.preview && *ACTIVE_WORD.read().unwrap() == Some(self.uid) {
+            for area in &self.drawn_areas {
+                self.draw_active.draw_abs(cx, area.rect(cx));
+            }
+        }
         DrawStep::done()
     }
 

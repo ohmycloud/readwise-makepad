@@ -9,6 +9,7 @@ pub fn warm_up() {
     // Parse the embedded dictionary before the first reading gesture.
     std::thread::spawn(|| {
         LazyLock::force(&CHINESE);
+        readwise_core::vocab::dictionary::warm_up();
     });
 }
 

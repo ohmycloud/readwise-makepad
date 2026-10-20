@@ -7,6 +7,7 @@
 
 - 里程碑规划：[docs/MILESTONES.md](docs/MILESTONES.md)
 - 开发日志：[docs/DEVLOG.md](docs/DEVLOG.md)
+- PDF 文本阅读（pdf_oxide）：[docs/PDF_READING.md](docs/PDF_READING.md)
 - 有道 PDF 生词导入：[docs/IMPORT_YOUDAO_PDF.md](docs/IMPORT_YOUDAO_PDF.md)
 
 ## 工程结构
@@ -14,7 +15,7 @@
 ```
 readwise-makepad/
 ├── app/          # Makepad UI 应用与平台资源
-├── core/         # SQLite、EPUB、词汇、笔记、AI 等纯 Rust 业务逻辑
+├── core/         # SQLite、EPUB / PDF、词汇、笔记、AI 等纯 Rust 业务逻辑
 ├── scripts/      # 可复现的数据生成与发布脚本
 └── docs/         # 里程碑、部署指南与开发日志
 ```

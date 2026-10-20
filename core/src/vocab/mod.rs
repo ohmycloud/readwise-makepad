@@ -1,4 +1,5 @@
 pub mod annotate;
+pub mod dictionary;
 pub mod lemma;
 pub mod models;
 mod queries;

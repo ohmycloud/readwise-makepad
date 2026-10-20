@@ -13,4 +13,7 @@ chrono = "0.4"
 dirs = "6"
 log = "0.4"
 epub = "2.1.5"
+# Keep semantic extraction stable: stored highlight offsets reference its output.
+pdf_oxide = { version = "=0.3.78", default-features = false, features = ["legacy-crypto"] }
+sha2 = "0.11"
 xml-rs = "1.0.0"

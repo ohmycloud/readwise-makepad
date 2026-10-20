@@ -200,6 +200,21 @@ impl Db {
             .block_on(books::import_book(&self.pool, &self.data_dir, src))
     }
 
+    /// Load reader text, atomically migrating legacy PDF heading coordinates
+    /// before callers restore progress, bookmarks or highlights. Background only.
+    pub fn load_book_chapters(
+        &self,
+        id: &str,
+        path: &std::path::Path,
+    ) -> Result<books::epub_meta::LoadedChapters, String> {
+        if books::supported_format(path) == Some("pdf") {
+            self.rt
+                .block_on(books::pdf::load_reader_pages(&self.pool, id, path))
+        } else {
+            books::load_imported_chapters_with_toc(path)
+        }
+    }
+
     pub fn get_shelf_items(&self) -> Result<Vec<BookShelfItem>, String> {
         self.rt
             .block_on(books::get_shelf_items(&self.pool, &self.data_dir))
@@ -1136,15 +1151,21 @@ mod migration_tests {
             data_dir: std::path::PathBuf::new(),
         };
         let mut settings = db.load_reader_settings().unwrap();
-        settings.background = crate::settings::ReaderBackground::Bold;
         settings.bold_text = true;
         settings.spacing = crate::settings::ReaderSpacing::Custom(1.7);
         settings.character_spacing = -0.06;
         settings.word_spacing = -0.15;
         settings.margin = 7.0;
         settings.justify_text = true;
-        db.save_reader_settings(&settings).unwrap();
-        assert_eq!(db.load_reader_settings().unwrap(), settings);
+        for background in [
+            crate::settings::ReaderBackground::Quiet,
+            crate::settings::ReaderBackground::Sepia,
+            crate::settings::ReaderBackground::Snow,
+        ] {
+            settings.background = background;
+            db.save_reader_settings(&settings).unwrap();
+            assert_eq!(db.load_reader_settings().unwrap(), settings);
+        }
     }
 
     #[test]

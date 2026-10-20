@@ -75,7 +75,7 @@ pub struct BookShelfItem {
     pub author: String,
     /// 封面文件的绝对路径（无封面为 None）。
     pub cover_abs_path: Option<String>,
-    /// EPUB 文件的绝对路径。
+    /// EPUB / PDF 文件的绝对路径。
     pub file_abs_path: String,
     pub status: String,
     pub progress_current: i64,

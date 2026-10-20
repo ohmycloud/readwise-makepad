@@ -123,7 +123,7 @@ public class MakepadApp extends MakepadActivity {
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             Notification notification = new Notification.Builder(this, CHANNEL)
                     .setSmallIcon(android.R.drawable.stat_sys_upload)
-                    .setContentTitle(english ? "Receiving EPUB books" : "正在接收 EPUB 书籍")
+                    .setContentTitle(english ? "Receiving books" : "正在接收书籍")
                     .setContentText(english ? "Background receiving enabled · expires in 30 minutes"
                             : "可在后台接收 · 开启后 30 分钟到期")
                     .setContentIntent(reopen).setOngoing(true)
@@ -178,9 +178,10 @@ public class MakepadApp extends MakepadActivity {
     public void openEpubPicker() {
         Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         picker.addCategory(Intent.CATEGORY_OPENABLE);
-        picker.setType("application/epub+zip");
+        picker.setType("*/*");
         picker.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
                 "application/epub+zip",
+                "application/pdf",
                 "application/octet-stream",
                 "application/zip"
         });
@@ -248,11 +249,19 @@ public class MakepadApp extends MakepadActivity {
     private File copyToImportCache(Uri uri, File importDir, int index) throws Exception {
         String displayName = queryDisplayName(uri);
         if (displayName == null || displayName.trim().isEmpty()) {
-            displayName = "book.epub";
+            displayName = "application/pdf".equals(getContentResolver().getType(uri)) ? "book.pdf" : "book.epub";
         }
         displayName = displayName.replaceAll("[^\\p{L}\\p{N}._ -]", "_");
-        if (!displayName.toLowerCase(Locale.ROOT).endsWith(".epub")) {
-            displayName += ".epub";
+        String lowerName = displayName.toLowerCase(Locale.ROOT);
+        if (!lowerName.endsWith(".epub") && !lowerName.endsWith(".pdf")) {
+            String mime = getContentResolver().getType(uri);
+            if ("application/pdf".equals(mime)) {
+                displayName += ".pdf";
+            } else if ("application/epub+zip".equals(mime)) {
+                displayName += ".epub";
+            } else {
+                throw new IllegalArgumentException("仅支持 EPUB 和 PDF 文件");
+            }
         }
         File output = new File(
                 importDir,

@@ -29,13 +29,13 @@ unsafe fn selected_epub_paths(panel: ObjcId) -> DesktopImportAction {
         let path: ObjcId = msg_send![filenames, objectAtIndex: index];
         if path != nil {
             let path = nsstring_to_string(path);
-            if path.to_ascii_lowercase().ends_with(".epub") {
+            if readwise_core::books::supported_format(std::path::Path::new(&path)).is_some() {
                 paths.push(path);
             }
         }
     }
     if paths.is_empty() {
-        DesktopImportAction::Error("没有选择 EPUB 文件".to_string())
+        DesktopImportAction::Error("没有选择 EPUB / PDF 文件".to_string())
     } else {
         DesktopImportAction::Picked(paths)
     }
@@ -77,8 +77,9 @@ pub fn open_epub_picker(title: &str, prompt: &str) -> Result<(), String> {
         // available at runtime across every macOS version supported by the
         // locked Makepad revision, without adding a UniformTypeIdentifiers
         // framework dependency.
+        let types = [str_to_nsstring("epub"), str_to_nsstring("pdf")];
         let file_types: ObjcId =
-            msg_send![class!(NSArray), arrayWithObject: str_to_nsstring("epub")];
+            msg_send![class!(NSArray), arrayWithObjects: types.as_ptr() count: types.len()];
         let _: () = msg_send![panel, setAllowedFileTypes: file_types];
 
         // The callback can run after this function returns. Keep the panel

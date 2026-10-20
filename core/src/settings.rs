@@ -73,9 +73,10 @@ pub enum ReaderBackground {
     Original,
     #[default]
     Paper,
+    Quiet,
     Sepia,
     Sage,
-    Bold,
+    Snow,
     Night,
 }
 
@@ -85,9 +86,10 @@ impl ReaderBackground {
             Self::FollowTheme => "theme",
             Self::Original => "original",
             Self::Paper => "paper",
+            Self::Quiet => "quiet",
             Self::Sepia => "sepia",
             Self::Sage => "sage",
-            Self::Bold => "bold",
+            Self::Snow => "snow",
             Self::Night => "night",
         }
     }
@@ -96,9 +98,10 @@ impl ReaderBackground {
         match value {
             "theme" => Self::FollowTheme,
             "original" => Self::Original,
-            "sepia" => Self::Sepia,
+            "quiet" => Self::Quiet,
+            "sepia" | "bold" => Self::Sepia,
             "sage" => Self::Sage,
-            "bold" => Self::Bold,
+            "snow" => Self::Snow,
             "night" => Self::Night,
             _ => Self::Paper,
         }
@@ -461,13 +464,17 @@ mod tests {
     fn reader_background_uses_stable_storage_values() {
         for background in [
             ReaderBackground::FollowTheme,
+            ReaderBackground::Original,
             ReaderBackground::Paper,
+            ReaderBackground::Quiet,
             ReaderBackground::Sepia,
             ReaderBackground::Sage,
+            ReaderBackground::Snow,
             ReaderBackground::Night,
         ] {
             assert_eq!(ReaderBackground::from_str(background.as_str()), background);
         }
+        assert_eq!(ReaderBackground::from_str("bold"), ReaderBackground::Sepia);
         assert_eq!(
             ReaderBackground::from_str("unknown"),
             ReaderBackground::Paper

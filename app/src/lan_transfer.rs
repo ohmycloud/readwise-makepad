@@ -261,12 +261,13 @@ fn decoded_filename(value: &str) -> Result<String, TransferError> {
         || name
             .chars()
             .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
-        || !name.to_ascii_lowercase().ends_with(".epub")
+        || readwise_core::books::supported_format(Path::new(&name)).is_none()
         || name.eq_ignore_ascii_case(".epub")
+        || name.eq_ignore_ascii_case(".pdf")
     {
         return Err(TransferError::new(
             400,
-            "Please choose an EPUB file / 请选择 EPUB 文件",
+            "Please choose an EPUB or PDF file / 请选择 EPUB 或 PDF 文件",
         ));
     }
     Ok(name)
@@ -381,7 +382,7 @@ fn serve_connection(
     if size == 0 || size > MAX_UPLOAD_BYTES {
         return Err(TransferError::new(
             413,
-            "EPUB files must be between 1 byte and 200 MB / EPUB 最大 200 MB",
+            "Books must be between 1 byte and 200 MB / 书籍最大 200 MB",
         ));
     }
     let filename = decoded_filename(name)?;
@@ -546,7 +547,14 @@ mod tests {
             decoded_filename("%E4%B8%AD%E6%96%87%20book.EPUB").unwrap(),
             "中文 book.EPUB"
         );
+        assert_eq!(
+            decoded_filename("%E4%B8%AD%E6%96%87.PDF").unwrap(),
+            "中文.PDF"
+        );
         for name in [
+            "../a.pdf",
+            "..%2Fa.pdf",
+            ".pdf",
             "../a.epub",
             "..%2Fa.epub",
             "%5Ctest.epub",
@@ -618,6 +626,45 @@ mod tests {
         );
         assert!(failed.starts_with("HTTP/1.1 422"));
         assert_eq!(imported.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            fs::read_dir(root.0.join("transfer-cache").join(&receiver.id))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn pdf_upload_preserves_extension_and_waits_for_import_result() {
+        let root = temporary_root();
+        let receiver = LanTransfer::start_on(
+            &root.0,
+            false,
+            vec![Ipv4Addr::LOCALHOST],
+            |path| {
+                assert_eq!(path.file_name().unwrap(), "中文.PDF");
+                let bytes = fs::read(path).unwrap();
+                if bytes != b"%PDF-1.4\n\0\xff" {
+                    return Err("Invalid PDF".into());
+                }
+                Ok("PDF title".into())
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        let target = format!("/{}/upload?name=%E4%B8%AD%E6%96%87.PDF", receiver.id);
+        let body = b"%PDF-1.4\n\0\xff";
+        let response = request(
+            &receiver,
+            "POST",
+            &target,
+            &format!("Content-Length: {}\r\n", body.len()),
+            body,
+        );
+        assert!(response.starts_with("HTTP/1.1 201"), "{response}");
+        assert!(response.contains("PDF title"));
+        let response = request(&receiver, "POST", &target, "Content-Length: 3\r\n", b"bad");
+        assert!(response.starts_with("HTTP/1.1 422"), "{response}");
         assert_eq!(
             fs::read_dir(root.0.join("transfer-cache").join(&receiver.id))
                 .unwrap()
