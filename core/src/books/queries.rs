@@ -55,7 +55,15 @@ pub async fn import_book(
         super::pdf::load_imported_pages(&data_dir.join(&epub_rel))?;
     }
 
-    let cover_rel = if let Some((bytes, mime)) = &meta.cover {
+    let cover_rel = if format == "pdf" {
+        match super::pdf::cover::save(&data_dir.join(&epub_rel), &directory.path) {
+            Ok(()) => Some(format!("books/{id}/{}", super::pdf::cover::FILE)),
+            Err(error) => {
+                log::warn!("PDF 封面生成失败，保留文字封面: {error}");
+                None
+            }
+        }
+    } else if let Some((bytes, mime)) = &meta.cover {
         let rel = format!("books/{}/cover.{}", id, cover_ext(mime));
         fs::write(data_dir.join(&rel), bytes).map_err(|e| format!("保存封面失败: {}", e))?;
         Some(rel)
@@ -117,6 +125,62 @@ pub async fn import_book(
         created_at: now,
         updated_at: now,
     })
+}
+
+/// Run once after the initial shelf is shown, on a background thread. Only
+/// cover_path changes: reader coordinates, timestamps, status and source remain.
+pub async fn backfill_pdf_covers(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    mut ready: impl FnMut(String, String),
+) -> Result<usize, String> {
+    let rows =
+        sqlx::query("SELECT id, file_path, cover_path FROM books WHERE lower(format) = 'pdf'")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("读取 PDF 封面列表失败: {e}"))?;
+    let mut updated = 0;
+    for row in rows {
+        let id: String = row.get("id");
+        let previous: Option<String> = row.get("cover_path");
+        if previous.as_ref().is_some_and(|p| {
+            fs::metadata(data_dir.join(p)).is_ok_and(|m| m.is_file() && m.len() > 0)
+        }) {
+            continue;
+        }
+        // Legacy paths can be absolute. Always write into our own books/<id>,
+        // and reject IDs that could turn that destination into another path.
+        let mut components = Path::new(&id).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            continue;
+        }
+        let directory = data_dir.join("books").join(&id);
+        let relative = format!("books/{id}/{}", super::pdf::cover::FILE);
+        let source: String = row.get("file_path");
+        if let Err(error) = super::pdf::cover::save(&data_dir.join(source), &directory) {
+            log::warn!("补齐 PDF 封面失败 ({id}): {error}");
+            continue;
+        }
+        // A concurrently deleted book or changed/custom cover wins. Do not
+        // resurrect a row, overwrite its new cover, or touch reading state.
+        match sqlx::query("UPDATE books SET cover_path = ? WHERE id = ? AND cover_path IS ?")
+            .bind(&relative)
+            .bind(&id)
+            .bind(previous)
+            .execute(pool)
+            .await
+        {
+            Ok(result) if result.rows_affected() == 1 => {
+                updated += 1;
+                ready(id, data_dir.join(relative).to_string_lossy().into_owned());
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("保存 PDF 封面路径失败 ({id}): {error}"),
+        }
+    }
+    Ok(updated)
 }
 
 /// 书架列表：books LEFT JOIN book_status，封面/文件拼成绝对路径供 UI 直接用。

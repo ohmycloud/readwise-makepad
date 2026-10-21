@@ -220,6 +220,15 @@ impl Db {
             .block_on(books::get_shelf_items(&self.pool, &self.data_dir))
     }
 
+    /// Background-only; emits each repaired cover without reloading the shelf.
+    pub fn backfill_pdf_covers(&self, ready: impl FnMut(String, String)) -> Result<usize, String> {
+        self.rt.block_on(books::backfill_pdf_covers(
+            &self.pool,
+            &self.data_dir,
+            ready,
+        ))
+    }
+
     pub fn delete_book(&self, id: &str) -> Result<(), String> {
         self.rt
             .block_on(books::delete_book(&self.pool, &self.data_dir, id))

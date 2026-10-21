@@ -9,6 +9,7 @@ use std::{collections::HashMap, path::Path};
 const SNAPSHOT_FILE: &str = "pdf-text-v1.json";
 const SNAPSHOT_VERSION: u32 = 1;
 mod content;
+pub(crate) mod cover;
 mod headings;
 mod migration;
 mod structure;
@@ -72,7 +73,7 @@ pub fn parse_meta(path: &Path) -> Result<EpubMeta, String> {
             .ok()
             .and_then(|catalog| dictionary_text(&doc, &catalog, "Lang"))
             .unwrap_or_default(),
-        // No rasterizer: new PDFs use the shelf's normal text-cover fallback.
+        // Import generates the thumbnail separately, after text validation.
         cover: None,
     })
 }

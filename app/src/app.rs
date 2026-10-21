@@ -1199,8 +1199,10 @@ static LOCAL_AI_MANAGER: LazyLock<std::sync::Mutex<readwise_core::local_ai::Loca
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 static LOCAL_AI_CANCEL: AtomicBool = AtomicBool::new(false);
 
-/// 书架数据（UI 侧只读渲染，后台线程写）。
+/// 书架数据（后台加载，UI 投影封面完成通知）。
 static SHELF: LazyLock<RwLock<Vec<ShelfItem>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+static PDF_COVERS_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static SHELF_COVER_REVISION: AtomicUsize = AtomicUsize::new(0);
 
 /// 书架筛选后的 PortalList 投影。筛选变化时通过 revision 切换等价模板，
 /// 避免较短结果集复用上一筛选留下的卡片。
@@ -2295,6 +2297,43 @@ mod shelf_filter_tests {
             assert!((cover.x / cover.y - LIST_COVER_WIDTH_TO_HEIGHT).abs() < 0.001);
         }
         assert_eq!(shelf_list_cover_size(56.0, 390.0), dvec2(44.0, 56.0));
+    }
+
+    #[test]
+    fn repaired_cover_keeps_projection_order_revision_and_reading_status() {
+        let mut projection = ListProjection::default();
+        let mut pdf = book("pdf", &["Rust"]);
+        pdf.status = "reading".into();
+        pdf.progress_current = 78;
+        pdf.progress_total = 100;
+        projection.replace(vec![book("epub", &[]), pdf]);
+        let revision = projection.revision;
+        assert!(update_shelf_cover(
+            &mut projection.entries,
+            "pdf",
+            "/cover.png"
+        ));
+        assert_eq!(projection.revision, revision);
+        assert_eq!(projection.entries[0].id, "epub");
+        let pdf = &projection.entries[1];
+        assert_eq!(pdf.tags, ["Rust"]);
+        assert_eq!(
+            (&*pdf.status, pdf.progress_current, pdf.progress_total),
+            ("reading", 78, 100)
+        );
+        assert_eq!(pdf.cover_path.as_deref(), Some("/cover.png"));
+        // Regeneration at the same path still asks the Image to retry.
+        assert!(update_shelf_cover(
+            &mut projection.entries,
+            "pdf",
+            "/cover.png"
+        ));
+        assert!(!update_shelf_cover(
+            &mut projection.entries,
+            "deleted",
+            "/gone.png"
+        ));
+        assert_eq!(projection.entries.len(), 2);
     }
 
     #[test]
@@ -4871,6 +4910,10 @@ fn shelf_status(language: AppLanguage, status: &str, cur: i64, total: i64) -> St
 /// 书架加载结果（后台 → UI）。
 #[derive(Debug)]
 enum ShelfAction {
+    CoverReady {
+        book_id: String,
+        path: String,
+    },
     Loaded {
         items: usize,
         imported: usize,
@@ -5022,6 +5065,29 @@ fn spawn_load_shelf() {
             Err(e) => Cx::post_action(ShelfAction::Error(e)),
         }
     });
+}
+
+fn spawn_pdf_cover_backfill() {
+    if PDF_COVERS_SCHEDULED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let Some(db) = DB.get() else { return };
+        if let Err(error) = db.backfill_pdf_covers(|book_id, path| {
+            Cx::post_action(ShelfAction::CoverReady { book_id, path });
+        }) {
+            ::log::warn!("补齐 PDF 封面失败: {error}");
+        }
+    });
+}
+
+fn update_shelf_cover(entries: &mut [ShelfItem], book_id: &str, path: &str) -> bool {
+    let Some(book) = entries.iter_mut().find(|book| book.id == book_id) else {
+        return false;
+    };
+    // A missing file can be repaired at the same path; its image must retry too.
+    book.cover_path = Some(path.to_owned());
+    true
 }
 
 /// 后台删除书籍后刷新书架；删除失败时不再伪装成一次普通刷新。
@@ -12394,6 +12460,8 @@ struct BookShelf {
     #[rust]
     loaded_covers: HashMap<WidgetUid, Option<String>>,
     #[rust]
+    cover_revision: usize,
+    #[rust]
     projection_revision: usize,
     #[rust]
     alternate_template: bool,
@@ -12502,6 +12570,8 @@ impl Widget for BookShelf {
         let grid_geometry_changed = self.grid_columns != grid_columns
             || (self.grid_cover_height - grid_cover_height).abs() > 0.5;
         let language_changed = self.last_language != language;
+        let cover_revision = SHELF_COVER_REVISION.load(Ordering::Relaxed);
+        let covers_changed = self.cover_revision != cover_revision;
         self.last_language = language;
         if language_changed {
             // Existing cards have their own cached draw lists. Rebinding their
@@ -12518,6 +12588,10 @@ impl Widget for BookShelf {
         }
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_shelf_list().borrow_mut() {
+                if covers_changed {
+                    self.loaded_covers.clear();
+                }
+                self.cover_revision = cover_revision;
                 let item_count = if view_mode == LibraryViewMode::Grid {
                     shelf_grid_row_count(shelf.entries.len(), grid_columns)
                 } else {
@@ -12559,7 +12633,7 @@ impl Widget for BookShelf {
                         // Stable rows already have their cell visibility, cover
                         // geometry and labels. Avoid walking six nested card
                         // trees for every scroll frame.
-                        if !existed || language_changed || grid_geometry_changed {
+                        if !existed || language_changed || grid_geometry_changed || covers_changed {
                             for (column, cell_id) in [
                                 id!(grid_cell_0),
                                 id!(grid_cell_1),
@@ -12596,7 +12670,7 @@ impl Widget for BookShelf {
                                             cover.walk.height = Size::Fixed(grid_cover_height);
                                         }
                                     }
-                                    if !existed || language_changed {
+                                    if !existed || language_changed || covers_changed {
                                         self.bind_book_card(
                                             cx,
                                             &card,
@@ -12623,7 +12697,7 @@ impl Widget for BookShelf {
                                 }
                             }
                         }
-                        if !existed || language_changed {
+                        if !existed || language_changed || covers_changed {
                             self.bind_book_card(cx, &item, book, language, true);
                         }
                     }
@@ -20365,12 +20439,27 @@ impl MatchEvent for App {
             }
             if let Some(shelf) = action.downcast_ref::<ShelfAction>() {
                 match shelf {
+                    ShelfAction::CoverReady { book_id, path } => {
+                        update_shelf_cover(&mut SHELF.write().unwrap(), book_id, path);
+                        let changed = update_shelf_cover(
+                            &mut SHELF_VISIBLE.write().unwrap().entries,
+                            book_id,
+                            path,
+                        );
+                        if changed {
+                            // Cover-only projection: keep revision, filtering,
+                            // current row, scroll motion and reader state intact.
+                            SHELF_COVER_REVISION.fetch_add(1, Ordering::Relaxed);
+                            self.ui.widget(cx, ids!(book_shelf)).redraw(cx);
+                        }
+                    }
                     ShelfAction::Loaded {
                         items,
                         imported,
                         import_error,
                     } => {
                         self.shelf_ready = true;
+                        spawn_pdf_cover_backfill();
                         if !INITIAL_LIBRARY_READY_LOGGED.swap(true, Ordering::Relaxed) {
                             if let Some(elapsed) = startup_elapsed_ms() {
                                 ::log::info!("Startup: library projection ready in {elapsed}ms");
