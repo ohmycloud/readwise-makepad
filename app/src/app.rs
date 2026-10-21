@@ -2335,6 +2335,39 @@ mod shelf_filter_tests {
             &Some("/covers/other.png".to_string())
         ));
     }
+
+    #[test]
+    fn post_aligned_shelf_rows_rebuild_nested_batches_without_global_redraw() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut card = DrawList2d::new(&mut cx);
+        let mut placeholder = DrawList2d::new(&mut cx);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &event);
+        let mut cx = Cx2d::new(&mut draw);
+        cx.begin_root_turtle(dvec2(400.0, 600.0), Layout::flow_down());
+        let walk = Walk::fixed(300.0, 120.0);
+
+        // An upward probe uses the same temporary walk on successive frames,
+        // even though ShelfList will align it to a different final position.
+        assert!(cx.will_redraw(&mut card, walk));
+        assert!(cx.will_redraw(&mut placeholder, walk));
+        assert!(!cx.will_redraw(&mut card, walk));
+        assert!(!cx.will_redraw(&mut placeholder, walk));
+        cx.with_force_redraw(|cx| {
+            assert!(cx.will_redraw(&mut card, walk));
+            cx.with_force_redraw(|cx| {
+                assert!(cx.will_redraw(&mut placeholder, walk));
+                assert!(cx.will_redraw_check_axis(&mut placeholder, 120.0, Vec2Index::Y));
+            });
+            assert!(cx.will_redraw(&mut card, walk));
+        });
+        // Other surfaces still use their draw caches in this very frame.
+        assert!(!cx.will_redraw(&mut card, walk));
+        assert!(!cx.will_redraw(&mut placeholder, walk));
+        assert!(!cx.draw_event.redraw_all);
+        assert!(!cx.new_draw_event.redraw_all);
+        cx.end_turtle();
+    }
 }
 
 #[cfg(test)]
@@ -12332,7 +12365,12 @@ impl Widget for BookShelf {
                             self.bind_book_card(cx, &item, book, language, true);
                         }
                     }
-                    item.draw_all_unscoped(cx);
+                    // ShelfList aligns upward-probed rows after drawing. A
+                    // cached card can match its old temporary walk while its
+                    // final position has changed, leaving images/text behind.
+                    // Rebuild only these visible rows, including nested batches;
+                    // image textures and offscreen virtualization stay cached.
+                    cx.with_force_redraw(|cx| item.draw_all_unscoped(cx));
                     if view_mode == LibraryViewMode::List {
                         // The info area is current only after drawing. Cached
                         // heights let reused cards render their cover in this

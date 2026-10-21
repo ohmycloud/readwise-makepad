@@ -23,6 +23,7 @@ pub struct Cx2d<'a, 'b> {
     pub(crate) align_list: Vec<AlignEntry>,
     pub(crate) draw_call_parent_stack: Vec<u64>,
     pub(crate) draw_call_parent_next: u64,
+    force_redraw: bool,
 }
 
 impl<'a, 'b> Deref for Cx2d<'a, 'b> {
@@ -54,6 +55,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             align_list: Vec::with_capacity(4096),
             draw_call_parent_stack,
             draw_call_parent_next: 2,
+            force_redraw: false,
         }
     }
 
@@ -127,8 +129,10 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             draw_list_2d.dirty_check_rect = rect;
             return true;
         }
-        self.draw_event
-            .draw_list_will_redraw(self, draw_list_2d.draw_list.id())
+        self.force_redraw
+            || self
+                .draw_event
+                .draw_list_will_redraw(self, draw_list_2d.draw_list.id())
     }
 
     pub fn will_redraw_check_axis(
@@ -143,7 +147,21 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             draw_list_2d.dirty_check_rect.size.set_index(axis, size);
             return true;
         }
-        self.draw_event
-            .draw_list_will_redraw(self, draw_list_2d.draw_list.id())
+        self.force_redraw
+            || self
+                .draw_event
+                .draw_list_will_redraw(self, draw_list_2d.draw_list.id())
+    }
+
+    /// Rebuild draw lists whose geometry will be aligned after drawing. Their
+    /// temporary walk can match a previous frame while the final position and
+    /// clip differ, so the normal walk-based cache check is insufficient.
+    /// The override includes nested draw lists and lasts only for this call.
+    pub fn with_force_redraw<R>(&mut self, draw: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.force_redraw;
+        self.force_redraw = true;
+        let result = draw(self);
+        self.force_redraw = previous;
+        result
     }
 }
