@@ -60,6 +60,9 @@ impl AppUiIndex {
     pub fn label(&self, cx: &Cx, path: &[LiveId]) -> LabelRef {
         self.widget(cx, path).as_label()
     }
+    pub fn view(&self, cx: &Cx, path: &[LiveId]) -> ViewRef {
+        self.widget(cx, path).as_view()
+    }
     pub fn check_box(&self, cx: &Cx, path: &[LiveId]) -> CheckBoxRef {
         self.widget(cx, path).as_check_box()
     }

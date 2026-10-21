@@ -3,6 +3,7 @@ use crate::chapter_image::ChapterImageAction;
 use crate::reader_book_pages::BookPages;
 use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
 use crate::reader_paint::apply_widget_paint;
+use crate::reader_scroll::{ScrollBoundaryTurn, ScrollIndicator};
 use crate::reader_settings_panel::{FontMenuTap, ReaderSettingsTab};
 use crate::reader_touch::{DoubleTap, ListTap, TapOutcome, ToolbarTap};
 use crate::reader_word::word_range_at;
@@ -18,6 +19,7 @@ use makepad_widgets::makepad_draw::text::layouter::LaidoutText;
 use makepad_widgets::makepad_draw::turtle::RowAlign;
 use makepad_widgets::makepad_platform::event::{TouchPoint, TouchState, WindowDragQueryResponse};
 use makepad_widgets::*;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
@@ -73,6 +75,27 @@ fn app_action_batch_is_passive(actions: &Actions, on_reader_page: bool) -> bool 
     })
 }
 
+/// Preserve progress handling for reader scrolling without searching every
+/// unrelated button. A click or data notice in the same batch still runs fully.
+fn reader_scroll_notices_only(actions: &Actions) -> bool {
+    app_action_batch_is_passive(actions, false)
+        && actions.iter().any(|action| {
+            action.as_widget_action().is_some_and(|widget| {
+                matches!(
+                    widget.action.downcast_ref::<PortalListAction>(),
+                    Some(PortalListAction::Scroll)
+                )
+            })
+        })
+}
+
+fn reader_boundary_notices_only(actions: &Actions) -> bool {
+    !actions.is_empty()
+        && actions
+            .iter()
+            .all(|action| action.downcast_ref::<ScrollBoundaryTurn>().is_some())
+}
+
 fn reader_settings_notices_only(actions: &Actions) -> bool {
     !actions.is_empty()
         && actions
@@ -114,6 +137,37 @@ mod passive_action_tests {
         let actions = vec![widget_action(PortalListAction::Scroll)];
         assert!(app_action_batch_is_passive(&actions, false));
         assert!(!app_action_batch_is_passive(&actions, true));
+        assert!(reader_scroll_notices_only(&actions));
+        let mut mixed = actions;
+        mixed.push(widget_action(ButtonAction::Clicked(Default::default())));
+        assert!(!reader_scroll_notices_only(&mixed));
+        let notices: Vec<Action> = vec![Box::new(ReaderSettingsAction::Saved)];
+        assert!(!reader_scroll_notices_only(&notices));
+    }
+
+    #[test]
+    fn boundary_shortcut_preserves_mixed_clicks_and_data_actions() {
+        let boundary = || {
+            Box::new(ScrollBoundaryTurn {
+                chapter: 0,
+                content_version: 1,
+                forward: true,
+            }) as Action
+        };
+        assert!(reader_boundary_notices_only(&vec![boundary(), boundary()]));
+        assert!(!reader_boundary_notices_only(&vec![]));
+        assert!(!reader_boundary_notices_only(&vec![
+            boundary(),
+            widget_action(ButtonAction::Clicked(Default::default()))
+        ]));
+        assert!(!reader_boundary_notices_only(&vec![
+            boundary(),
+            Box::new(ReaderSettingsAction::Saved)
+        ]));
+        assert!(!reader_boundary_notices_only(&vec![
+            boundary(),
+            widget_action(PortalListAction::Scroll)
+        ]));
     }
 
     #[test]
@@ -274,14 +328,6 @@ fn mobile_reader_button_size(width: f64, insets: SafeAreaInsets) -> f64 {
 
 fn reader_customise_rect(size: DVec2, insets: SafeAreaInsets) -> Rect {
     crate::reader_settings_panel::popover_layout(size, insets, None, ReaderSettingsTab::Theme).0
-}
-
-fn reader_font_display_label(language: AppLanguage, font: ReaderFont) -> &'static str {
-    if font == ReaderFont::Original {
-        crate::i18n::text(language, "reader_font_original")
-    } else {
-        font.label()
-    }
 }
 
 fn library_surface_visibility(visible_count: usize) -> (bool, bool) {
@@ -2931,6 +2977,83 @@ fn apply_reader_surface_palette(cx: &mut Cx, widget: WidgetRef, color: Vec4f, bo
 
 fn apply_reader_label_palette(cx: &mut Cx, widget: WidgetRef, color: Vec4f) {
     apply_widget_paint(cx, widget, &[(ids!(draw_text.color), color)], &[]);
+}
+
+// DropDown caches its detached popup by template identity. Reuse templates
+// by scene and item geometry so reopening never retains an old palette,
+// mixes font/column menu layouts, or creates unbounded popup instances.
+#[derive(Clone, Default)]
+struct ReaderDropdownPopupPalettes(Rc<RefCell<HashMap<Vec<u32>, ScriptObjectRef>>>);
+
+fn apply_reader_dropdown_popup_palette(
+    cx: &mut Cx,
+    mut widget: WidgetRef,
+    palette: ReaderScenePalette,
+    width: f64,
+    item_height: f64,
+    item_padding: Inset,
+) {
+    if widget.is_empty() {
+        return;
+    }
+    let ReaderScenePalette {
+        surface,
+        text,
+        field,
+        border,
+        accent,
+        hover,
+        ..
+    } = palette;
+    let mut key = [surface, text, field, border, accent, hover]
+        .into_iter()
+        .flat_map(|c| [c.x.to_bits(), c.y.to_bits(), c.z.to_bits(), c.w.to_bits()])
+        .collect::<Vec<_>>();
+    key.extend(
+        [
+            width as f32,
+            item_height as f32,
+            item_padding.left as f32,
+            item_padding.right as f32,
+            item_padding.top as f32,
+            item_padding.bottom as f32,
+        ]
+        .map(f32::to_bits),
+    );
+    let cache = cx.global::<ReaderDropdownPopupPalettes>().0.clone();
+    let cached = cache.borrow().get(&key).cloned();
+    let template = if let Some(template) = cached {
+        template
+    } else {
+        let value = script_eval!(cx, {
+            mod.widgets.PopupMenuFlat{
+                width: #(width)
+                draw_bg +: {color: #(surface) border_color: #(border)}
+                menu_item: mod.widgets.PopupMenuItem{
+                    height: #(item_height)
+                    padding: #(item_padding)
+                    draw_bg +: {
+                        color: #(surface) color_hover: #(hover) color_active: #(field)
+                        mark_color_active: #(accent)
+                    }
+                    draw_text +: {color: #(text) color_hover: #(text) color_active: #(text)}
+                }
+            }
+        });
+        let Some(object) = value.as_object() else {
+            return;
+        };
+        let template = cx.with_vm(|vm| vm.bx.heap.new_object_ref(object));
+        cache.borrow_mut().insert(key, template.clone());
+        template
+    };
+    cx.with_vm(|vm| {
+        let packet = vm.bx.heap.new_object();
+        vm.bx
+            .heap
+            .set_value_def(packet, id!(popup_menu).into(), template.as_object().into());
+        widget.script_apply(vm, &Apply::Animate, &mut Scope::empty(), packet.into());
+    });
 }
 
 #[cfg(test)]
@@ -6359,6 +6482,16 @@ script_mod! {
         font_active_bold_italic: theme.font_bold_italic{}
         html_default_inset: theme.space_1
         draw_reader_selection.color: #0000
+        draw_scroll_indicator +: {
+            color: #0000
+            pixel: fn() {
+                let p = self.pos * self.rect_size
+                let r = self.rect_size.x * 0.5
+                let y = clamp(p.y, r, max(r, self.rect_size.y - r))
+                let a = 1.0 - smoothstep(-0.5, 0.5, length(vec2(p.x - r, p.y - y)) - r)
+                return Pal.premul(vec4(self.color.xyz, self.color.w * a))
+            }
+        }
         draw_page_turn: mod.draw.DrawReaderPageTurn{}
         list_host := View{
         width: Fill height: Fill
@@ -6374,7 +6507,7 @@ script_mod! {
             drag_scrolling: #(cfg!(any(target_os = "android", target_os = "ios")))
             padding: Inset{ left: 32 right: 32 top: 8 bottom: 8 }
             spacing: 6
-            scroll_bar: ScrollBar{}
+            scroll_bar: ScrollBar{bar_size: 0.0}
             Para := View{
                 width: Fill height: Fit
                 para_html := Html{
@@ -7099,6 +7232,11 @@ script_mod! {
                                         draw_bg.shadow_offset: vec2(0, 4)
                                         selection_scroll := ScrollYView{
                                             width: Fill height: Fill
+                                            scroll_bars +: {scroll_bar_y +: {draw_bg +: {
+                                                color: #0000 color_hover: #0000 color_drag: #0000
+                                                border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
+                                                border_size: 0.0
+                                            }}}
                                             selection_content := View{
                                                 width: Fill height: Fit flow: Down spacing: 4
                                                 selection_actions := View{
@@ -7195,6 +7333,11 @@ script_mod! {
                                         draw_bg.shadow_offset: vec2(0, 3)
                                         selection_more_scroll := ScrollYView{
                                             width: Fill height: Fill
+                                            scroll_bars +: {scroll_bar_y +: {draw_bg +: {
+                                                color: #0000 color_hover: #0000 color_drag: #0000
+                                                border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
+                                                border_size: 0.0
+                                            }}}
                                             selection_more_content := View{
                                                 width: Fill height: Fit flow: Down spacing: 2
                                                 selection_more_define := mod.widgets.SelectionMenuItem{
@@ -8236,18 +8379,18 @@ script_mod! {
                                 flow: Down spacing: 12 padding: 16
                                 draw_bg.color: theme.color_bg_container
                                 draw_bg.border_radius: 14.0
-                                library_import_title := Label{width: Fill text: "导入书籍" draw_text.text_style.font_size: 16}
+                                library_import_title := Label{width: Fill height: 28 padding: 0 text: "导入书籍" draw_text.text_style.font_size: 16}
                                 library_import_scroll := ScrollYView{
                                     width: Fill height: Fill flow: Down spacing: 12
                                     library_import_choices := View{
                                         width: Fill height: Fit flow: Down spacing: 12
-                                        library_import_local := Button{
+                                        library_import_local := ButtonFlat{
                                             visible: #(cfg!(any(target_os = "android", target_os = "ios", target_os = "macos")))
-                                            width: Fill height: 44 text: "本机文件"
+                                            width: Fill height: 44 margin: 0 text: "本机文件"
                                         }
                                         library_import_lan := ButtonFlat{
                                             visible: #(cfg!(not(target_os = "ios")))
-                                            width: Fill height: 44 text: "局域网传书"
+                                            width: Fill height: 44 margin: 0 text: "局域网传书"
                                         }
                                     }
                                     library_import_receiver := View{
@@ -8276,14 +8419,15 @@ script_mod! {
                                         library_import_restart := ButtonFlat{visible: false width: Fill height: 40 text: "重新开启"}
                                     }
                                     library_import_status := TextBox{
+                                        visible: false
                                         width: Fill height: Fit padding: 0
                                         flow: Flow.Right{wrap: true}
-                                        text: "从本机文件导入，或通过局域网从电脑传书。"
+                                        text: ""
                                         draw_text.text_style.font_size: 10
                                     }
                                 }
                                 library_import_stop := ButtonFlat{visible: false width: Fill height: 40 text: "停止接收"}
-                                library_import_close := ButtonFlat{width: Fill height: 40 text: "关闭界面"}
+                                library_import_close := ButtonFlat{width: Fill height: 44 margin: 0 text: "关闭界面"}
                             }
                         }
                     }
@@ -8597,27 +8741,33 @@ script_mod! {
                             // without resizing any settings section or shrinking text.
                             reader_customise_font_menu := RoundedShadowView{
                                 visible: false width: 180 height: 264
-                                new_batch: true flow: Down padding: 4
+                                new_batch: true flow: Down padding: 3
                                 draw_bg.color: theme.color_bg_container
-                                draw_bg.border_radius: 6.0
-                                draw_bg.shadow_color: #0003
-                                draw_bg.shadow_radius: 12.0
+                                draw_bg.border_radius: 3.0
+                                draw_bg.border_size: 0.75
+                                draw_bg.shadow_color: #0000
+                                draw_bg.shadow_radius: 0.0
                                 reader_customise_font_scroll := ScrollYView{
                                     width: Fill height: Fill flow: Down spacing: 0
-                                    reader_font_canela := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Canela"}
-                                    reader_font_original := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Original"}
-                                    reader_font_athelas := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Athelas"}
-                                    reader_font_avenir := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Avenir Next"}
-                                    reader_font_charter := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Charter"}
-                                    reader_font_georgia := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Georgia"}
-                                    reader_font_iowan := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Iowan"}
-                                    reader_font_palatino := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Palatino"}
-                                    reader_font_proxima := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Proxima Nova"}
-                                    reader_font_publico := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Publico"}
-                                    reader_font_san_francisco := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "San Francisco"}
-                                    reader_font_new_york := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "New York"}
-                                    reader_font_seravek := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Seravek"}
-                                    reader_font_times := ButtonFlat{width: Fill height: 44 margin: 0 enable_long_press: true text: "Times New Roman"}
+                                    scroll_bars +: {scroll_bar_y +: {draw_bg +: {
+                                        color: #0000 color_hover: #0000 color_drag: #0000
+                                        border_color: #0000 border_color_hover: #0000 border_color_drag: #0000
+                                        border_size: 0.0
+                                    }}}
+                                    reader_font_canela := mod.widgets.ReaderFontMenuItem{text: "Canela"}
+                                    reader_font_original := mod.widgets.ReaderFontMenuItem{text: "Original"}
+                                    reader_font_athelas := mod.widgets.ReaderFontMenuItem{text: "Athelas"}
+                                    reader_font_avenir := mod.widgets.ReaderFontMenuItem{text: "Avenir Next"}
+                                    reader_font_charter := mod.widgets.ReaderFontMenuItem{text: "Charter"}
+                                    reader_font_georgia := mod.widgets.ReaderFontMenuItem{text: "Georgia"}
+                                    reader_font_iowan := mod.widgets.ReaderFontMenuItem{text: "Iowan"}
+                                    reader_font_palatino := mod.widgets.ReaderFontMenuItem{text: "Palatino"}
+                                    reader_font_proxima := mod.widgets.ReaderFontMenuItem{text: "Proxima Nova"}
+                                    reader_font_publico := mod.widgets.ReaderFontMenuItem{text: "Publico"}
+                                    reader_font_san_francisco := mod.widgets.ReaderFontMenuItem{text: "San Francisco"}
+                                    reader_font_new_york := mod.widgets.ReaderFontMenuItem{text: "New York"}
+                                    reader_font_seravek := mod.widgets.ReaderFontMenuItem{text: "Seravek"}
+                                    reader_font_times := mod.widgets.ReaderFontMenuItem{text: "Times New Roman"}
                                 }
                             }
                         }
@@ -8901,6 +9051,14 @@ struct ChapterList {
     #[live]
     draw_reader_selection: DrawColor,
     #[live]
+    draw_scroll_indicator: DrawColor,
+    #[rust]
+    scroll_indicator: ScrollIndicator,
+    #[rust]
+    scroll_indicator_frame: NextFrame,
+    #[rust]
+    scroll_indicator_position: Option<(usize, f64)>,
+    #[live]
     draw_page_turn: DrawReaderPageTurn,
     #[rust]
     page_turn: PageTurn,
@@ -8955,6 +9113,7 @@ struct ReaderPagedState {
     active: bool,
     signature: u64,
     content_version: u64,
+    scroll_chapter: Option<usize>,
     layout: crate::reader_columns::ColumnLayout,
     metrics: Vec<Option<crate::reader_columns::BlockMetrics>>,
     anchor: crate::reader_columns::PageAnchor,
@@ -9524,6 +9683,7 @@ impl ChapterList {
             self.item_layout_widths.clear();
             self.hit_runs.clear();
             self.text_maps.clear();
+            self.scroll_indicator_position = None;
         }
         if let Some(source) = self.pager.requested_source.take() {
             self.pager.pending_source = Some(source);
@@ -9538,6 +9698,16 @@ impl ChapterList {
         self.pager.pending_turn = None;
         self.pager.turn_history.clear();
         self.pager.measure_frame = NextFrame::default();
+        if self.pager.pending_source.is_none() {
+            if let Some((block, scroll)) = crate::reader_scroll::seek_large_scroll(
+                &self.pager.metrics,
+                list_ref.first_id(),
+                list_ref.scroll_position(),
+                viewport.size.y,
+            ) {
+                list_ref.set_first_id_and_scroll(block, scroll);
+            }
+        }
         self.view.view(cx, ids!(list_host)).set_visible(cx, true);
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
@@ -9604,6 +9774,42 @@ impl ChapterList {
                 self.pager.pending_source = None;
                 self.pager.measure_frame = cx.new_next_frame();
             }
+        }
+        self.pager.scroll_chapter = Some(CURRENT_CHAPTER.load(Ordering::Relaxed));
+        let position = (list_ref.first_id(), list_ref.scroll_position());
+        if self
+            .scroll_indicator_position
+            .is_some_and(|last| last != position)
+        {
+            self.scroll_indicator.moved(cx.time());
+            self.scroll_indicator_frame = cx.new_next_frame();
+        }
+        self.scroll_indicator_position = Some(position);
+        let (offset, total) =
+            crate::reader_scroll::scroll_extent(&self.pager.metrics, position.0, position.1);
+        if total > viewport.size.y + 0.5 {
+            let height = 36.0_f64.min((viewport.size.y - 16.0).max(0.0));
+            let progress = (offset / (total - viewport.size.y)).clamp(0.0, 1.0);
+            let mut color = reader_scene_palette(
+                *READER_BACKGROUND.read().unwrap(),
+                *READER_THEME.read().unwrap(),
+            )
+            .text;
+            color.w = self.scroll_indicator.opacity(cx.time()) * 0.45;
+            self.draw_scroll_indicator.color = color;
+            self.draw_scroll_indicator.new_draw_call(cx);
+            self.draw_scroll_indicator.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(
+                        viewport.pos.x + viewport.size.x - 9.0,
+                        viewport.pos.y
+                            + 8.0
+                            + progress * (viewport.size.y - 16.0 - height).max(0.0),
+                    ),
+                    size: dvec2(5.0, height),
+                },
+            );
         }
         DrawStep::done()
     }
@@ -11141,8 +11347,20 @@ impl ChapterList {
 impl Widget for ChapterList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let viewport = cx.peek_walk_turtle(walk);
+        if !viewport.size.x.is_finite()
+            || !viewport.size.y.is_finite()
+            || viewport.size.x <= 0.0
+            || viewport.size.y <= 0.0
+        {
+            // Hidden reader surfaces must not render paragraphs or replace
+            // their measured geometry with a zero-width scrolling layout.
+            return DrawStep::done();
+        }
         let mode = *READER_TURN_MODE.read().unwrap();
         if self.turn_mode != mode {
+            self.scroll_indicator = Default::default();
+            self.scroll_indicator_frame = NextFrame::default();
+            self.scroll_indicator_position = None;
             self.page_turn.cancel();
             self.pager.pending_turn = None;
             if self.turn_mode.is_paged() != mode.is_paged() {
@@ -11202,6 +11420,23 @@ impl Widget for ChapterList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.scroll_indicator_frame.is_event(event).is_some() {
+            // Update just the overlay instance. Fading must not re-layout text
+            // or repeatedly rebuild paragraph widgets after scrolling stops.
+            let opacity = self.scroll_indicator.opacity(cx.seconds_since_app_start());
+            self.draw_scroll_indicator.color.w = opacity * 0.45;
+            let color = self.draw_scroll_indicator.color;
+            self.draw_scroll_indicator.draw_vars.set_instance_on_area(
+                cx,
+                id!(color),
+                &[color.x, color.y, color.z, color.w],
+            );
+            self.scroll_indicator_frame = if opacity > 0.0 {
+                cx.new_next_frame()
+            } else {
+                NextFrame::default()
+            };
+        }
         if self.reader_tap_timer.is_event(event).is_some() {
             self.reader_tap_timer = Timer::empty();
             let context = (
@@ -11229,6 +11464,9 @@ impl Widget for ChapterList {
         }
         if reader_colour_panel_blocks_event(READER_CUSTOMISE_OPEN.load(Ordering::Acquire), event) {
             self.cancel_reader_tap(cx);
+            if let Event::Scroll(scroll) = event {
+                self.pager.scroll_gesture.block_scroll(scroll);
+            }
             return;
         }
         self.page_turn.handle_event(cx, event, self.view.area());
@@ -11265,10 +11503,17 @@ impl Widget for ChapterList {
                     | Event::TouchUpdate(_)
                     | Event::LongPress(_)
             ))
-            || ((reader_info_open || SELECTION_POPUP_POINTER.load(Ordering::Relaxed))
-                && matches!(event, Event::Scroll(_)))
+            || (matches!(event, Event::Scroll(_))
+                && (reader_info_open
+                    || SELECTION_POPUP_POINTER.load(Ordering::Relaxed)
+                    || !cx.is_scrolling_allowed_within(&self.view.area())))
         {
             self.cancel_reader_tap(cx);
+            if let Event::Scroll(scroll) = event {
+                // Observe every blocked packet so a trackpad gesture cannot
+                // re-arm when its pointer/inertia leaves the overlay.
+                self.pager.scroll_gesture.block_scroll(scroll);
+            }
             return;
         }
         let mut tap_outcome = self.word_tap.track(event, self.reader_rect(cx));
@@ -11290,11 +11535,21 @@ impl Widget for ChapterList {
         }
         if !self.pager.active && !self.selecting {
             if let Event::Scroll(e) = event {
-                let turn = self.pager.scroll_gesture.on_scroll(e);
                 if self.reader_rect(cx).contains(e.abs)
                     && e.scroll.y.abs() > e.scroll.x.abs()
                     && !e.handled_y.get()
                 {
+                    let chapter = CURRENT_CHAPTER.load(Ordering::Relaxed);
+                    let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
+                    if self.pager.scroll_chapter != Some(chapter)
+                        || self.pager.content_version != content_version
+                    {
+                        // The boundary action already changed chapter; wait
+                        // for its first draw instead of reading the old list's
+                        // at_end flag and queuing another chapter jump.
+                        e.handled_y.set(true);
+                        return;
+                    }
                     let list = self.view.portal_list(cx, ids!(list));
                     let down = e.scroll.y > 0.0;
                     let boundary = if down {
@@ -11302,9 +11557,16 @@ impl Widget for ChapterList {
                     } else {
                         list.first_id() == 0 && list.scroll_position() >= -0.5
                     };
-                    if boundary && turn.is_some() {
+                    let turn = self.pager.scroll_gesture.on_continuous_scroll(e, boundary);
+                    if boundary {
                         e.handled_y.set(true);
-                        Cx::post_action(ReaderPageTurn(down));
+                        if let Some(forward) = turn {
+                            Cx::post_action(ScrollBoundaryTurn {
+                                chapter,
+                                content_version,
+                                forward,
+                            });
+                        }
                         return;
                     }
                 }
@@ -12788,9 +13050,21 @@ impl App {
             (size.x - insets.left - insets.right).max(1.0),
             (size.y - insets.top - insets.bottom).max(1.0),
         );
+        // Match the chooser's 16px padding, 28px title, 44px buttons and
+        // 12px gaps, so the scrolling body leaves no blank row before Close.
+        let choice_count = usize::from(cfg!(any(
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos"
+        ))) + usize::from(cfg!(not(target_os = "ios")));
+        let preferred_height = if self.lan_transfer_mode {
+            460.0
+        } else {
+            116.0 + 56.0 * choice_count as f64
+        };
         let card = dvec2(
             (available.x - 24.0).clamp(1.0, 480.0),
-            (available.y - 24.0).clamp(1.0, if self.lan_transfer_mode { 460.0 } else { 280.0 }),
+            (available.y - 24.0).clamp(1.0, preferred_height),
         );
         let content = self.ui.widget(cx, ids!(library_import_modal.content));
         if let Some(mut view) = content.borrow_mut::<View>() {
@@ -12842,6 +13116,9 @@ impl App {
         self.ui
             .widget(cx, ids!(library_import_status))
             .set_text(cx, &self.lan_transfer_status);
+        self.ui
+            .widget(cx, ids!(library_import_status))
+            .set_visible(cx, !self.lan_transfer_status.is_empty());
         self.configure_library_import_layout(cx);
         if self.import_dialog_open && !self.ui.modal(cx, ids!(library_import_modal)).is_open() {
             self.ui.modal(cx, ids!(library_import_modal)).open(cx);
@@ -12863,11 +13140,7 @@ impl App {
             self.lan_transfer_mode = true;
         } else {
             self.lan_transfer_mode = false;
-            self.lan_transfer_status = localized(
-                "从本机文件导入，或通过局域网从电脑传书。",
-                "Import files from this device, or transfer books over Wi-Fi.",
-            )
-            .into();
+            self.lan_transfer_status.clear();
         }
         self.sync_library_import_dialog(cx);
     }
@@ -14584,15 +14857,10 @@ impl ReaderControls<'_> {
         self.ui.widget(cx, ids!(reader_customise_card)).redraw(cx);
     }
 
-    fn sync_reader_customise_font_labels(
-        &self,
-        cx: &mut Cx,
-        language: AppLanguage,
-        font: ReaderFont,
-    ) {
+    fn sync_reader_customise_font_labels(&self, cx: &mut Cx, font: ReaderFont) {
         self.ui
             .widget(cx, ids!(reader_customise_font_choice))
-            .set_text(cx, reader_font_display_label(language, font));
+            .set_text(cx, font.label());
         let settings = self
             .reader_customise_draft
             .clone()
@@ -14620,14 +14888,22 @@ impl ReaderControls<'_> {
             .zip(ReaderFont::ALL)
         {
             let button = self.ui.widget(cx, &[id]);
-            button.set_text(cx, reader_font_display_label(language, option));
-            apply_reader_button_palette(cx, button.clone(), palette);
-            let border = if font == option { 1.0 } else { 0.0 };
+            button.set_text(cx, option.label());
+            let selected = if font == option { 1.0 } else { 0.0 };
             apply_widget_paint(
                 cx,
                 button,
-                &[(ids!(draw_bg.border_color), palette.accent)],
-                &[(ids!(draw_bg.border_size), border)],
+                &[
+                    (ids!(draw_bg.color), palette.surface),
+                    (ids!(draw_bg.color_hover), palette.hover),
+                    (ids!(draw_bg.color_down), palette.pressed),
+                    (ids!(draw_bg.border_color), palette.accent),
+                    (ids!(draw_text.color), palette.text),
+                    (ids!(draw_text.color_hover), palette.text),
+                    (ids!(draw_text.color_down), palette.text),
+                    (ids!(draw_text.color_focus), palette.text),
+                ],
+                &[(ids!(draw_bg.border_size), selected)],
             );
         }
     }
@@ -14727,7 +15003,7 @@ impl ReaderControls<'_> {
         self.ui
             .slider(cx, ids!(reader_customise_gloss_size_slider))
             .set_value(cx, settings.gloss_font_size as f64);
-        self.sync_reader_customise_font_labels(cx, app_language(), font);
+        self.sync_reader_customise_font_labels(cx, font);
         self.ui
             .drop_down(cx, ids!(reader_customise_columns_choice))
             .set_selected_item(
@@ -14738,6 +15014,19 @@ impl ReaderControls<'_> {
                     ReaderColumns::Auto => 2,
                 },
             );
+        apply_reader_dropdown_popup_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_customise_columns_choice)),
+            palette,
+            180.0,
+            22.0,
+            Inset {
+                left: 12.0,
+                right: 8.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+        );
         apply_reader_surface_palette(
             cx,
             self.ui.widget(cx, ids!(reader_preview)),
@@ -14972,6 +15261,19 @@ impl ReaderControls<'_> {
         ] {
             apply_library_control_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
+        apply_reader_dropdown_popup_palette(
+            cx,
+            self.ui.widget(cx, ids!(reader_font_choice)),
+            palette,
+            190.0,
+            24.0,
+            Inset {
+                left: 15.0,
+                right: 3.0,
+                top: 3.0,
+                bottom: 3.0,
+            },
+        );
         for id in [
             id!(profile_title),
             id!(reading_home_title),
@@ -15076,6 +15378,7 @@ impl ReaderControls<'_> {
             id!(word_card),
             id!(indicator_bg),
             id!(library_rename_card),
+            id!(library_import_card),
             id!(reader_customise_card),
         ] {
             apply_reader_surface_palette(
@@ -15132,6 +15435,7 @@ impl ReaderControls<'_> {
             id!(reader_search_title),
             id!(card_word),
             id!(library_rename_title),
+            id!(library_import_title),
             id!(reader_turn_mode_label),
             id!(reader_customise_gloss_title),
             id!(reader_customise_layout_title),
@@ -15157,6 +15461,8 @@ impl ReaderControls<'_> {
             id!(reader_search_hint),
             id!(card_hint),
             id!(library_rename_status),
+            id!(library_import_instructions),
+            id!(library_import_status),
             id!(reader_scroll_hint),
             id!(gloss_color_title),
             id!(gloss_color_name),
@@ -15311,6 +15617,13 @@ impl ReaderControls<'_> {
             id!(library_mark_finished),
             id!(library_rename_book),
             id!(library_delete_book),
+            id!(library_import_local),
+            id!(library_import_lan),
+            id!(library_import_copy),
+            id!(library_import_background),
+            id!(library_import_restart),
+            id!(library_import_stop),
+            id!(library_import_close),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), popup_button_palette);
         }
@@ -15335,6 +15648,7 @@ impl ReaderControls<'_> {
             id!(reader_chat_input),
             id!(reader_search_input),
             id!(library_rename_input),
+            id!(library_import_urls),
         ] {
             apply_reader_input_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
@@ -15605,7 +15919,6 @@ impl ReaderControls<'_> {
         );
         self.sync_reader_customise_font_labels(
             cx,
-            language,
             self.reader_customise_draft
                 .as_ref()
                 .map(|draft| draft.font)
@@ -15923,10 +16236,13 @@ impl App {
                         .clipped_rect(cx);
                     let can_begin = !self.virtual_keyboard_open
                         && self.on_reader_page
+                        && self.word_card_anchor.is_none()
                         && !self.toc_open
                         && !self.note_open
                         && !self.bookmarks_open
+                        && !self.search_open
                         && !self.reader_ai_open
+                        && !self.ui.modal(cx, ids!(reader_image_modal)).is_open()
                         && SEL_RANGE.read().unwrap().is_none()
                         && SELECTED_TEXT.read().unwrap().is_empty()
                         && chapter_rect.contains(touch.abs);
@@ -17455,65 +17771,11 @@ impl App {
     }
 
     fn current_reader_progress_snapshot(&self, cx: &mut Cx) -> Option<ReaderProgressSnapshot> {
-        let (book_id, chapter_count) = {
-            let guard = CURRENT_BOOK.read().unwrap();
-            let book = guard.as_ref()?;
-            (book.id.clone(), book.chapters.len())
-        };
-        let list = self
-            .ui
-            .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list));
-        let block_count = PARAGRAPHS.read().unwrap().len();
-        let block = list.first_id().min(block_count.saturating_sub(1));
-        let scroll = list.scroll_position();
-        let scroll = if scroll.is_finite() { scroll } else { 0.0 };
-        let source = self
-            .ui
-            .widget(cx, ids!(chapter_list))
-            .borrow::<ChapterList>()
-            .and_then(|reader| {
-                reader
-                    .source_anchor(block, scroll)
-                    .map(|(_, source)| source)
-            });
-        CURRENT_READER_BLOCK.store(block, Ordering::Relaxed);
-        CURRENT_READER_SCROLL_BITS.store(scroll.to_bits(), Ordering::Relaxed);
-        CURRENT_READER_SOURCE.store(source.unwrap_or(usize::MAX), Ordering::Relaxed);
-        Some(ReaderProgressSnapshot {
-            book_id,
-            chapter_count,
-            location: ReaderLocation {
-                chapter: self.chapter_idx.min(chapter_count.saturating_sub(1)),
-                block,
-                scroll,
-                source,
-            },
-        })
+        self.reader_controls().current_reader_progress_snapshot(cx)
     }
 
     fn refresh_bookmark_button(&self, cx: &mut Cx) {
-        let Some(snapshot) = self.current_reader_progress_snapshot(cx) else {
-            return;
-        };
-        let marked = READER_BOOKMARKS.read().unwrap().iter().any(|bookmark| {
-            bookmark_covers_location(
-                ReaderLocation::decode(&bookmark.location, snapshot.chapter_count),
-                snapshot.location,
-            )
-        });
-        self.ui
-            .widget(cx, ids!(reader_bookmark_btn))
-            .set_visible(cx, !marked);
-        self.ui
-            .widget(cx, ids!(reader_bookmark_filled_btn))
-            .set_visible(cx, marked);
-        self.ui
-            .widget(cx, ids!(titlebar_bookmark_btn))
-            .set_visible(cx, !marked);
-        self.ui
-            .widget(cx, ids!(titlebar_bookmark_filled_btn))
-            .set_visible(cx, marked);
+        self.reader_controls().refresh_bookmark_button(cx)
     }
 
     fn toggle_reader_bookmark(&mut self, cx: &mut Cx) {
@@ -17577,6 +17839,57 @@ impl App {
         self.reading_progress_save_timer = cx.start_timeout(0.75);
     }
 
+    fn handle_reader_scroll_notice(&mut self, cx: &mut Cx, actions: &Actions) {
+        if !self.on_reader_page || CURRENT_BOOK.read().unwrap().is_none() {
+            return;
+        }
+        let list = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list));
+        if !list.scrolled(actions) {
+            return;
+        }
+        if self.compact_layout && self.reader_toolbar_visible {
+            self.set_reader_toolbar_visible(cx, false);
+        }
+        if self.card.is_some() || self.word_card_anchor.is_some() {
+            self.close_word_card(cx);
+        }
+        self.update_progress_label(cx);
+        self.debounce_reader_progress_save(cx);
+    }
+
+    fn handle_scroll_boundary(&mut self, cx: &mut Cx, turn: &ScrollBoundaryTurn) {
+        if !self.on_reader_page
+            || READER_TURN_MODE.read().unwrap().is_paged()
+            || self.reader_page_navigation_blocked(cx)
+        {
+            return;
+        }
+        let chapters = CURRENT_BOOK
+            .read()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |book| book.chapters.len());
+        let Some(target) = turn.target(
+            self.chapter_idx,
+            READER_CONTENT_VERSION.load(Ordering::Relaxed),
+            chapters,
+        ) else {
+            return;
+        };
+        self.set_chapter_at(
+            cx,
+            target,
+            if turn.forward { 0 } else { usize::MAX },
+            0.0,
+            false,
+        );
+        self.update_progress_label(cx);
+        self.debounce_reader_progress_save(cx);
+    }
+
     fn flush_reader_progress(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.reading_progress_save_timer);
         self.reading_progress_save_timer = Timer::default();
@@ -17617,19 +17930,40 @@ impl App {
             block.min(chunks.len().saturating_sub(1))
         };
         let restored_scroll = if scroll.is_finite() { scroll } else { 0.0 };
-        self.clear_reader_selection(cx);
-        self.close_word_card(cx);
-        self.close_note_composer(cx);
+        let mut ui = AppUiIndex::default();
+        ui.begin_projection(&self.ui);
+        let chapter_list = ui.widget(cx, ids!(chapter_list));
+        // Continuous scrolling crosses every PDF source page. Closed overlays
+        // have nothing to clear: looking up their many hidden controls here
+        // stalls each boundary. Still cancel pending taps/selection gestures.
+        if self.selection_popup_anchor.is_some()
+            || self.pending_selection_popup_layout
+            || self.selection_ai_open
+            || self.selection_more_open
+            || !self.selection_ai_draft.is_empty()
+            || SEL_RANGE.read().unwrap().is_some()
+            || !SELECTED_TEXT.read().unwrap().is_empty()
+        {
+            self.clear_reader_selection(cx);
+        } else {
+            SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
+            if let Some(mut reader) = chapter_list.borrow_mut::<ChapterList>() {
+                reader.cancel_reader_tap(cx);
+                reader.reset_selection_gesture();
+            }
+        }
+        if self.card.is_some() || self.word_card_anchor.is_some() {
+            self.close_word_card(cx);
+        }
+        if self.note_open || !self.note_quote_text.is_empty() {
+            self.close_note_composer(cx);
+        }
         self.chapter_idx = idx;
         CURRENT_CHAPTER.store(idx, std::sync::atomic::Ordering::Relaxed);
         CURRENT_READER_BLOCK.store(restored_block, Ordering::Relaxed);
         CURRENT_READER_SCROLL_BITS.store(restored_scroll.to_bits(), Ordering::Relaxed);
         CURRENT_READER_SOURCE.store(usize::MAX, Ordering::Relaxed);
-        if let Some(mut reader) = self
-            .ui
-            .widget(cx, ids!(chapter_list))
-            .borrow_mut::<ChapterList>()
-        {
+        if let Some(mut reader) = chapter_list.borrow_mut::<ChapterList>() {
             reader.pager.requested_last_page = block == usize::MAX;
             reader.page_turn.finish();
             reader.pager.spread_ready = false;
@@ -17641,12 +17975,17 @@ impl App {
         replace_paragraphs(chunks);
         self.reader_page_span = 0;
         self.pending_reader_pagination_layout = true;
-        self.set_reader_title_text(cx, &format!("《{}》", title));
-        self.ui
-            .label(cx, ids!(chapter_pos))
+        let title = format!("《{}》", title);
+        for id in [
+            id!(title),
+            id!(mobile_reader_title),
+            id!(titlebar_reader_title),
+        ] {
+            ui.label(cx, &[id]).set_text(cx, &title);
+        }
+        ui.label(cx, ids!(chapter_pos))
             .set_text(cx, &format!("{}/{}", idx + 1, total));
-        self.ui
-            .widget(cx, ids!(chapter_list))
+        chapter_list
             .portal_list(cx, ids!(list))
             .set_first_id_and_scroll(restored_block, restored_scroll);
         if persist {
@@ -17693,73 +18032,7 @@ impl App {
         self.update_progress_label(cx);
     }
     fn update_reader_page_footer(&mut self, cx: &mut Cx) {
-        let paged_mode = READER_TURN_MODE.read().unwrap().is_paged();
-        self.ui
-            .view(cx, ids!(reader_footer))
-            .set_visible(cx, paged_mode);
-        if !paged_mode {
-            return;
-        }
-        let widget = self.ui.widget(cx, ids!(chapter_list));
-        let (visible_pages, summary) = widget
-            .borrow::<ChapterList>()
-            .map(|reader| {
-                let pager = &reader.pager;
-                (
-                    pager.visible_pages,
-                    (pager.active && pager.spread_ready)
-                        .then(|| {
-                            reader.book_pages.summary(
-                                self.chapter_idx,
-                                &pager.page_index,
-                                pager.anchor,
-                                pager.layout.count.max(1),
-                            )
-                        })
-                        .flatten(),
-                )
-            })
-            .unwrap_or((0, None));
-        self.ui
-            .view(cx, ids!(reader_page_second))
-            .set_visible(cx, visible_pages == 2);
-        for (offset, id) in [
-            id!(reader_page_indicator),
-            id!(reader_page_indicator_second),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if let Some(mut indicator) = self
-                .ui
-                .widget(cx, &[id])
-                .borrow_mut::<ReaderPageIndicator>()
-            {
-                match summary {
-                    Some(summary) if offset == 0 || offset < visible_pages => indicator.set_pages(
-                        cx,
-                        summary.current + offset,
-                        summary.total.unwrap_or(0),
-                    ),
-                    _ => indicator.set_pages(cx, 0, 0),
-                }
-            }
-        }
-        let pages_left = match summary.and_then(|summary| summary.pages_left_in_chapter) {
-            Some(left) if app_language() == AppLanguage::English => {
-                format!(
-                    "{} {} left in chapter",
-                    left,
-                    if left == 1 { "page" } else { "pages" }
-                )
-            }
-            Some(left) => format!("本章还剩 {left} 页"),
-            None if app_language() == AppLanguage::English => "Calculating pages…".to_string(),
-            None => "正在计算页码…".to_string(),
-        };
-        self.ui
-            .label(cx, ids!(reader_pages_left))
-            .set_text(cx, &pages_left);
+        self.reader_controls().update_reader_page_footer(cx)
     }
 
     fn invalidate_reader_pagination_layout(&mut self, cx: &mut Cx) {
@@ -17822,36 +18095,12 @@ impl App {
 
     /// 章内进度标签：`第x/y章 · z%`（z 按已读到的块估算）。
     fn update_progress_label(&mut self, cx: &mut Cx) {
-        let total_ch = {
-            let guard = CURRENT_BOOK.read().unwrap();
-            let Some(book) = guard.as_ref() else { return };
-            book.chapters.len()
-        };
-        let list = self
-            .ui
-            .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list));
-        CURRENT_READER_BLOCK.store(list.first_id(), Ordering::Relaxed);
-        CURRENT_READER_SCROLL_BITS.store(list.scroll_position().to_bits(), Ordering::Relaxed);
-        let blocks = PARAGRAPHS.read().unwrap().len().max(1);
-        let read_to = self
-            .ui
-            .widget(cx, ids!(chapter_list))
-            .borrow::<ChapterList>()
-            .filter(|reader| reader.pager.active)
-            .map(|reader| reader.pager.next.block + usize::from(reader.pager.next.y > 0.0))
-            .unwrap_or(list.first_id() + list.visible_items())
-            .min(blocks);
-        let pct = read_to * 100 / blocks;
-        let text = format!("{}/{} · {}%", self.chapter_idx + 1, total_ch, pct);
-        self.ui.label(cx, ids!(chapter_pos)).set_text(cx, &text);
-        self.update_reader_page_footer(cx);
-        self.refresh_bookmark_button(cx);
+        self.reader_controls().update_progress_label(cx)
     }
 
     /// 视口翻屏；到底/到顶时跨章。
     fn page_scroll(&mut self, cx: &mut Cx, down: bool) {
-        if READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
+        if self.reader_page_navigation_blocked(cx) {
             return;
         }
         if self.compact_layout {
@@ -17914,10 +18163,23 @@ impl App {
         self.debounce_reader_progress_save(cx);
     }
 
+    /// Overlay controls own navigation until dismissed; background page turns
+    /// must not close a card or silently change the text behind a popover.
+    fn reader_page_navigation_blocked(&self, cx: &Cx) -> bool {
+        self.word_card_anchor.is_some()
+            || self.toc_open
+            || self.bookmarks_open
+            || self.note_open
+            || self.search_open
+            || self.selection_popup_anchor.is_some()
+            || READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
+            || self.ui.modal(cx, ids!(reader_image_modal)).is_open()
+    }
+
     /// 阅读页快捷键：空格/PgDn/→ 下一屏，PgUp/← 上一屏，Shift+←/→ 跨章，Home 回章首。
     fn handle_reader_key(&mut self, cx: &mut Cx, ke: &KeyEvent) {
         if !self.on_reader_page
-            || READER_CUSTOMISE_OPEN.load(Ordering::Acquire)
+            || self.reader_page_navigation_blocked(cx)
             || self.text_input_has_focus(cx)
         {
             return;
@@ -19027,6 +19289,19 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if reader_boundary_notices_only(actions) {
+            for action in actions {
+                self.handle_scroll_boundary(
+                    cx,
+                    action.downcast_ref::<ScrollBoundaryTurn>().unwrap(),
+                );
+            }
+            return;
+        }
+        if self.on_reader_page && reader_scroll_notices_only(actions) {
+            self.handle_reader_scroll_notice(cx, actions);
+            return;
+        }
         if app_action_batch_is_passive(actions, self.on_reader_page) {
             return;
         }
@@ -19058,21 +19333,7 @@ impl MatchEvent for App {
         // the shelf-card loop. Preserve the state from the start of the batch
         // so that the same pointer release can never open a book underneath.
         let library_action_menu_was_open = self.library_action_book_id.is_some();
-        let chapter_list = self
-            .ui
-            .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list));
-        if self.on_reader_page
-            && CURRENT_BOOK.read().unwrap().is_some()
-            && chapter_list.scrolled(actions)
-        {
-            if self.compact_layout && self.reader_toolbar_visible {
-                self.set_reader_toolbar_visible(cx, false);
-            }
-            self.close_word_card(cx);
-            self.update_progress_label(cx);
-            self.debounce_reader_progress_save(cx);
-        }
+        self.handle_reader_scroll_notice(cx, actions);
         for action in actions {
             if let Some(transfer) = action.downcast_ref::<LanTransferAction>() {
                 if self
@@ -19135,6 +19396,10 @@ impl MatchEvent for App {
                 if self.on_reader_page && !READER_CUSTOMISE_OPEN.load(Ordering::Acquire) {
                     self.page_scroll(cx, turn.0);
                 }
+            }
+            if let Some(turn) = action.downcast_ref::<ScrollBoundaryTurn>() {
+                self.handle_scroll_boundary(cx, turn);
+                continue;
             }
             #[cfg(target_os = "macos")]
             if let Some(import_action) =
@@ -22601,6 +22866,11 @@ impl AppMain for App {
                     return;
                 }
                 true
+            } else if let Event::Scroll(scroll) = event {
+                // Wheel input has its own hit test. The press capture is
+                // deliberately cleared on release and cannot describe it.
+                current_clipped_rect(cx, self.ui.widget(cx, ids!(word_card)).area())
+                    .contains(scroll.abs)
             } else {
                 SELECTION_POPUP_POINTER.load(Ordering::Relaxed)
             }
@@ -23144,5 +23414,168 @@ impl AppMain for App {
         {
             SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
         }
+    }
+}
+
+// Progress is a small projection; resolve its fixed controls once per notice.
+impl ReaderControls<'_> {
+    fn current_reader_progress_snapshot(&self, cx: &mut Cx) -> Option<ReaderProgressSnapshot> {
+        let (book_id, chapter_count) = {
+            let guard = CURRENT_BOOK.read().unwrap();
+            let book = guard.as_ref()?;
+            (book.id.clone(), book.chapters.len())
+        };
+        let list = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list));
+        let block_count = PARAGRAPHS.read().unwrap().len();
+        let block = list.first_id().min(block_count.saturating_sub(1));
+        let scroll = list.scroll_position();
+        let scroll = if scroll.is_finite() { scroll } else { 0.0 };
+        let source = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow::<ChapterList>()
+            .and_then(|reader| {
+                reader
+                    .source_anchor(block, scroll)
+                    .map(|(_, source)| source)
+            });
+        CURRENT_READER_BLOCK.store(block, Ordering::Relaxed);
+        CURRENT_READER_SCROLL_BITS.store(scroll.to_bits(), Ordering::Relaxed);
+        CURRENT_READER_SOURCE.store(source.unwrap_or(usize::MAX), Ordering::Relaxed);
+        Some(ReaderProgressSnapshot {
+            book_id,
+            chapter_count,
+            location: ReaderLocation {
+                chapter: self.chapter_idx.min(chapter_count.saturating_sub(1)),
+                block,
+                scroll,
+                source,
+            },
+        })
+    }
+
+    fn refresh_bookmark_button(&self, cx: &mut Cx) {
+        let Some(snapshot) = self.current_reader_progress_snapshot(cx) else {
+            return;
+        };
+        let marked = READER_BOOKMARKS.read().unwrap().iter().any(|bookmark| {
+            bookmark_covers_location(
+                ReaderLocation::decode(&bookmark.location, snapshot.chapter_count),
+                snapshot.location,
+            )
+        });
+        self.ui
+            .widget(cx, ids!(reader_bookmark_btn))
+            .set_visible(cx, !marked);
+        self.ui
+            .widget(cx, ids!(reader_bookmark_filled_btn))
+            .set_visible(cx, marked);
+        self.ui
+            .widget(cx, ids!(titlebar_bookmark_btn))
+            .set_visible(cx, !marked);
+        self.ui
+            .widget(cx, ids!(titlebar_bookmark_filled_btn))
+            .set_visible(cx, marked);
+    }
+
+    fn update_reader_page_footer(&self, cx: &mut Cx) {
+        let paged_mode = READER_TURN_MODE.read().unwrap().is_paged();
+        self.ui
+            .view(cx, ids!(reader_footer))
+            .set_visible(cx, paged_mode);
+        if !paged_mode {
+            return;
+        }
+        let widget = self.ui.widget(cx, ids!(chapter_list));
+        let (visible_pages, summary) = widget
+            .borrow::<ChapterList>()
+            .map(|reader| {
+                let pager = &reader.pager;
+                (
+                    pager.visible_pages,
+                    (pager.active && pager.spread_ready)
+                        .then(|| {
+                            reader.book_pages.summary(
+                                self.chapter_idx,
+                                &pager.page_index,
+                                pager.anchor,
+                                pager.layout.count.max(1),
+                            )
+                        })
+                        .flatten(),
+                )
+            })
+            .unwrap_or((0, None));
+        self.ui
+            .view(cx, ids!(reader_page_second))
+            .set_visible(cx, visible_pages == 2);
+        for (offset, id) in [
+            id!(reader_page_indicator),
+            id!(reader_page_indicator_second),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(mut indicator) = self
+                .ui
+                .widget(cx, &[id])
+                .borrow_mut::<ReaderPageIndicator>()
+            {
+                match summary {
+                    Some(summary) if offset == 0 || offset < visible_pages => indicator.set_pages(
+                        cx,
+                        summary.current + offset,
+                        summary.total.unwrap_or(0),
+                    ),
+                    _ => indicator.set_pages(cx, 0, 0),
+                }
+            }
+        }
+        let pages_left = match summary.and_then(|summary| summary.pages_left_in_chapter) {
+            Some(left) if app_language() == AppLanguage::English => {
+                format!(
+                    "{} {} left in chapter",
+                    left,
+                    if left == 1 { "page" } else { "pages" }
+                )
+            }
+            Some(left) => format!("本章还剩 {left} 页"),
+            None if app_language() == AppLanguage::English => "Calculating pages…".to_string(),
+            None => "正在计算页码…".to_string(),
+        };
+        self.ui
+            .label(cx, ids!(reader_pages_left))
+            .set_text(cx, &pages_left);
+    }
+
+    fn update_progress_label(&self, cx: &mut Cx) {
+        let total_ch = {
+            let guard = CURRENT_BOOK.read().unwrap();
+            let Some(book) = guard.as_ref() else { return };
+            book.chapters.len()
+        };
+        let list = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .portal_list(cx, ids!(list));
+        CURRENT_READER_BLOCK.store(list.first_id(), Ordering::Relaxed);
+        CURRENT_READER_SCROLL_BITS.store(list.scroll_position().to_bits(), Ordering::Relaxed);
+        let blocks = PARAGRAPHS.read().unwrap().len().max(1);
+        let read_to = self
+            .ui
+            .widget(cx, ids!(chapter_list))
+            .borrow::<ChapterList>()
+            .filter(|reader| reader.pager.active)
+            .map(|reader| reader.pager.next.block + usize::from(reader.pager.next.y > 0.0))
+            .unwrap_or(list.first_id() + list.visible_items())
+            .min(blocks);
+        let pct = read_to * 100 / blocks;
+        let text = format!("{}/{} · {}%", self.chapter_idx + 1, total_ch, pct);
+        self.ui.label(cx, ids!(chapter_pos)).set_text(cx, &text);
+        self.update_reader_page_footer(cx);
+        self.refresh_bookmark_button(cx);
     }
 }

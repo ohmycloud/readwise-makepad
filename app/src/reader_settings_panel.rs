@@ -332,6 +332,33 @@ pub fn section_visible(
 script_mod! {
     use mod.prelude.widgets.*
 
+    mod.widgets.ReaderFontMenuItem = ButtonFlat{
+        width: Fill height: 24 margin: 0
+        align: Align{x: 0.0 y: 0.5}
+        padding: Inset{left: 15 right: 3 top: 3 bottom: 3}
+        enable_long_press: true
+        draw_bg +: {
+            // Match PopupMenuItem's checkmark and row highlight. Reuse the
+            // existing border_size uniform as the persistent selection flag.
+            border_size: 0.0
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 3.0)
+                sdf.fill_keep(self.color)
+                let highlight = mix(self.color_hover, self.color_down, self.down)
+                sdf.fill(vec4(highlight.xyz, highlight.w * max(self.border_size, self.hover)))
+                if self.border_size > 0.5 {
+                    let cy = self.rect_size.y * 0.5
+                    sdf.move_to(6.0, cy)
+                    sdf.line_to(8.0, cy + 3.0)
+                    sdf.line_to(11.0, cy - 3.0)
+                    sdf.stroke(self.border_color, 1.0)
+                }
+                return sdf.result
+            }
+        }
+    }
+
     mod.widgets.ReaderFontCaret = View{
         width: 10 height: 10 show_bg: true
         draw_bg +: {
