@@ -1,0 +1,42 @@
+
+=== a-honey.svg  (1293 bytes)
+viewBox 0 0 256 256 · aspect 1.0 (square)
+colours 3: #fff3dc #443125 #f3b44c · gradients 0 · anchors 65
+margins L0.0 R0.0 T0.0 B0.0 · bbox fill 1.0
+· INFO [strokes] 2 element(s) with strokes. Expand strokes to filled outlines in the master so the mark scales and cuts predictably (or document that it is a stroke-based variant).
+production-readiness score: 99/100 (heuristic)
+
+=== b-forest.svg  (1294 bytes)
+viewBox 0 0 256 256 · aspect 1.0 (square)
+colours 3: #1f6f63 #143f36 #f5f1e6 · gradients 0 · anchors 65
+margins L0.0 R0.0 T0.0 B0.0 · bbox fill 1.0
+· INFO [strokes] 2 element(s) with strokes. Expand strokes to filled outlines in the master so the mark scales and cuts predictably (or document that it is a stroke-based variant).
+production-readiness score: 99/100 (heuristic)
+
+=== c-cobalt.svg  (1292 bytes)
+viewBox 0 0 256 256 · aspect 1.0 (square)
+colours 3: #294db5 #182a56 #d5e8ff · gradients 0 · anchors 65
+margins L0.0 R0.0 T0.0 B0.0 · bbox fill 1.0
+· INFO [strokes] 2 element(s) with strokes. Expand strokes to filled outlines in the master so the mark scales and cuts predictably (or document that it is a stroke-based variant).
+production-readiness score: 99/100 (heuristic)
+
+=== d-terracotta.svg  (1298 bytes)
+viewBox 0 0 256 256 · aspect 1.0 (square)
+colours 3: #f8ddd2 #57332d #df8267 · gradients 0 · anchors 65
+margins L0.0 R0.0 T0.0 B0.0 · bbox fill 1.0
+· INFO [strokes] 2 element(s) with strokes. Expand strokes to filled outlines in the master so the mark scales and cuts predictably (or document that it is a stroke-based variant).
+production-readiness score: 99/100 (heuristic)
+
+=== e-lavender.svg  (1295 bytes)
+viewBox 0 0 256 256 · aspect 1.0 (square)
+colours 3: #eee7fa #46365c #b4a0dd · gradients 0 · anchors 65
+margins L0.0 R0.0 T0.0 B0.0 · bbox fill 1.0
+· INFO [strokes] 2 element(s) with strokes. Expand strokes to filled outlines in the master so the mark scales and cuts predictably (or document that it is a stroke-based variant).
+production-readiness score: 99/100 (heuristic)
+
+=== f-midnight.svg  (1295 bytes)
+viewBox 0 0 256 256 · aspect 1.0 (square)
+colours 2: #172c3c #f3c969 · gradients 0 · anchors 65
+margins L0.0 R0.0 T0.0 B0.0 · bbox fill 1.0
+· INFO [strokes] 2 element(s) with strokes. Expand strokes to filled outlines in the master so the mark scales and cuts predictably (or document that it is a stroke-based variant).
+production-readiness score: 99/100 (heuristic)

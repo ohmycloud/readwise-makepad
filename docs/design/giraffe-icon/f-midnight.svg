@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+<title id="title">ReadWise giraffe icon study — Midnight &amp; gold</title>
+<rect width="256" height="256" rx="56" fill="#172C3C"/>
+<g id="giraffe" stroke="#172C3C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3C969" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3C969" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3C969" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3C969"/>
+  <circle cx="149" cy="49" r="10" fill="#F3C969"/>
+  <path fill="#F3C969" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3C969" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F3C969"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+</g>
+</svg>

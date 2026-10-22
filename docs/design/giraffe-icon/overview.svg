@@ -1,0 +1,417 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1300" viewBox="0 0 1440 1300">
+<rect width="1440" height="1300" fill="#F5F3EE"/>
+<g font-family="PingFang SC, Noto Sans CJK SC, sans-serif">
+<text x="64" y="65" fill="#607066" font-size="14" font-weight="600">READWISE / ICON COLOUR STUDIES</text>
+<text x="64" y="118" fill="#303B35" font-size="38" font-weight="600">一位安静的阅读伙伴。</text>
+<text x="64" y="156" fill="#6A746C" font-size="17" font-weight="400">正面长颈鹿 · 圆润线条 · 统一造型，六种性格</text>
+<text x="1376" y="70" text-anchor="end" fill="#607066" font-size="14" font-weight="400">01 — 06</text>
+<rect x="64" y="194" width="416" height="474" rx="24" fill="#FFFFFF" stroke="#E4E5DF" stroke-width="1"/>
+<text x="90" y="234" fill="#303B35" font-size="20" font-weight="600">A · 蜂蜜奶油</text>
+<svg x="156" y="259" width="232" height="232" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#FFF3DC"/><g id="giraffe" stroke="#443125" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3B44C" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3B44C" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3B44C" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3B44C"/>
+  <circle cx="149" cy="49" r="10" fill="#F3B44C"/>
+  <path fill="#F3B44C" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3B44C" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#443125" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#443125" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#FFF3DC"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#443125" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#443125" stroke="none"/>
+</g></svg>
+<text x="90" y="525" fill="#69756D" font-size="15" font-weight="400">Honey &amp; cream</text>
+<circle cx="96" cy="552" r="6" fill="#FFF3DC" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="109" y="557" fill="#69756D" font-size="12" font-weight="400">#FFF3DC</text>
+<circle cx="222" cy="552" r="6" fill="#F3B44C" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="235" y="557" fill="#69756D" font-size="12" font-weight="400">#F3B44C</text>
+<circle cx="348" cy="552" r="6" fill="#443125" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="361" y="557" fill="#69756D" font-size="12" font-weight="400">#443125</text>
+<svg x="90" y="580" width="48" height="48" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#FFF3DC"/><g id="giraffe" stroke="#443125" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3B44C" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3B44C" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3B44C" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3B44C"/>
+  <circle cx="149" cy="49" r="10" fill="#F3B44C"/>
+  <path fill="#F3B44C" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3B44C" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#443125" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#443125" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#FFF3DC"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#443125" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#443125" stroke="none"/>
+</g></svg>
+<text x="90" y="649" fill="#788279" font-size="10" font-weight="400">48 px</text>
+<svg x="177" y="596" width="32" height="32" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#FFF3DC"/><g id="giraffe" stroke="#443125" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3B44C" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3B44C" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3B44C" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3B44C"/>
+  <circle cx="149" cy="49" r="10" fill="#F3B44C"/>
+  <path fill="#F3B44C" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3B44C" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#443125" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#443125" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#FFF3DC"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#443125" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#443125" stroke="none"/>
+</g></svg>
+<text x="177" y="649" fill="#788279" font-size="10" font-weight="400">32 px</text>
+<svg x="249" y="612" width="16" height="16" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#FFF3DC"/><g id="giraffe" stroke="#443125" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3B44C" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3B44C" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3B44C" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3B44C"/>
+  <circle cx="149" cy="49" r="10" fill="#F3B44C"/>
+  <path fill="#F3B44C" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3B44C" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#443125" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#443125" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#FFF3DC"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#443125" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#443125" stroke="none"/>
+</g></svg>
+<text x="249" y="649" fill="#788279" font-size="10" font-weight="400">16 px</text>
+<rect x="512" y="194" width="416" height="474" rx="24" fill="#FFFFFF" stroke="#1F6F63" stroke-width="2"/>
+<text x="538" y="234" fill="#303B35" font-size="20" font-weight="600">B · 森林米白</text>
+<text x="902" text-anchor="end" y="233" fill="#1F6F63" font-size="12" font-weight="600">推荐</text>
+<svg x="604" y="259" width="232" height="232" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#1F6F63"/><g id="giraffe" stroke="#143F36" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F5F1E6" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F5F1E6" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F5F1E6" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F5F1E6"/>
+  <circle cx="149" cy="49" r="10" fill="#F5F1E6"/>
+  <path fill="#F5F1E6" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F5F1E6" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#143F36" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#143F36" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F5F1E6"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#143F36" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#143F36" stroke="none"/>
+</g></svg>
+<text x="538" y="525" fill="#69756D" font-size="15" font-weight="400">Forest &amp; ivory</text>
+<circle cx="544" cy="552" r="6" fill="#1F6F63" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="557" y="557" fill="#69756D" font-size="12" font-weight="400">#1F6F63</text>
+<circle cx="670" cy="552" r="6" fill="#F5F1E6" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="683" y="557" fill="#69756D" font-size="12" font-weight="400">#F5F1E6</text>
+<circle cx="796" cy="552" r="6" fill="#143F36" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="809" y="557" fill="#69756D" font-size="12" font-weight="400">#143F36</text>
+<svg x="538" y="580" width="48" height="48" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#1F6F63"/><g id="giraffe" stroke="#143F36" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F5F1E6" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F5F1E6" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F5F1E6" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F5F1E6"/>
+  <circle cx="149" cy="49" r="10" fill="#F5F1E6"/>
+  <path fill="#F5F1E6" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F5F1E6" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#143F36" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#143F36" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F5F1E6"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#143F36" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#143F36" stroke="none"/>
+</g></svg>
+<text x="538" y="649" fill="#788279" font-size="10" font-weight="400">48 px</text>
+<svg x="625" y="596" width="32" height="32" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#1F6F63"/><g id="giraffe" stroke="#143F36" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F5F1E6" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F5F1E6" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F5F1E6" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F5F1E6"/>
+  <circle cx="149" cy="49" r="10" fill="#F5F1E6"/>
+  <path fill="#F5F1E6" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F5F1E6" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#143F36" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#143F36" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F5F1E6"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#143F36" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#143F36" stroke="none"/>
+</g></svg>
+<text x="625" y="649" fill="#788279" font-size="10" font-weight="400">32 px</text>
+<svg x="697" y="612" width="16" height="16" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#1F6F63"/><g id="giraffe" stroke="#143F36" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F5F1E6" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F5F1E6" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F5F1E6" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F5F1E6"/>
+  <circle cx="149" cy="49" r="10" fill="#F5F1E6"/>
+  <path fill="#F5F1E6" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F5F1E6" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#143F36" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#143F36" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F5F1E6"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#143F36" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#143F36" stroke="none"/>
+</g></svg>
+<text x="697" y="649" fill="#788279" font-size="10" font-weight="400">16 px</text>
+<rect x="960" y="194" width="416" height="474" rx="24" fill="#FFFFFF" stroke="#E4E5DF" stroke-width="1"/>
+<text x="986" y="234" fill="#303B35" font-size="20" font-weight="600">C · 钴蓝冰川</text>
+<svg x="1052" y="259" width="232" height="232" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#294DB5"/><g id="giraffe" stroke="#182A56" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#D5E8FF" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#D5E8FF" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#D5E8FF" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#D5E8FF"/>
+  <circle cx="149" cy="49" r="10" fill="#D5E8FF"/>
+  <path fill="#D5E8FF" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#D5E8FF" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#182A56" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#182A56" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#D5E8FF"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#182A56" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#182A56" stroke="none"/>
+</g></svg>
+<text x="986" y="525" fill="#69756D" font-size="15" font-weight="400">Cobalt &amp; ice</text>
+<circle cx="992" cy="552" r="6" fill="#294DB5" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="1005" y="557" fill="#69756D" font-size="12" font-weight="400">#294DB5</text>
+<circle cx="1118" cy="552" r="6" fill="#D5E8FF" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="1131" y="557" fill="#69756D" font-size="12" font-weight="400">#D5E8FF</text>
+<circle cx="1244" cy="552" r="6" fill="#182A56" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="1257" y="557" fill="#69756D" font-size="12" font-weight="400">#182A56</text>
+<svg x="986" y="580" width="48" height="48" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#294DB5"/><g id="giraffe" stroke="#182A56" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#D5E8FF" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#D5E8FF" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#D5E8FF" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#D5E8FF"/>
+  <circle cx="149" cy="49" r="10" fill="#D5E8FF"/>
+  <path fill="#D5E8FF" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#D5E8FF" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#182A56" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#182A56" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#D5E8FF"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#182A56" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#182A56" stroke="none"/>
+</g></svg>
+<text x="986" y="649" fill="#788279" font-size="10" font-weight="400">48 px</text>
+<svg x="1073" y="596" width="32" height="32" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#294DB5"/><g id="giraffe" stroke="#182A56" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#D5E8FF" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#D5E8FF" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#D5E8FF" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#D5E8FF"/>
+  <circle cx="149" cy="49" r="10" fill="#D5E8FF"/>
+  <path fill="#D5E8FF" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#D5E8FF" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#182A56" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#182A56" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#D5E8FF"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#182A56" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#182A56" stroke="none"/>
+</g></svg>
+<text x="1073" y="649" fill="#788279" font-size="10" font-weight="400">32 px</text>
+<svg x="1145" y="612" width="16" height="16" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#294DB5"/><g id="giraffe" stroke="#182A56" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#D5E8FF" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#D5E8FF" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#D5E8FF" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#D5E8FF"/>
+  <circle cx="149" cy="49" r="10" fill="#D5E8FF"/>
+  <path fill="#D5E8FF" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#D5E8FF" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#182A56" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#182A56" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#D5E8FF"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#182A56" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#182A56" stroke="none"/>
+</g></svg>
+<text x="1145" y="649" fill="#788279" font-size="10" font-weight="400">16 px</text>
+<rect x="64" y="692" width="416" height="474" rx="24" fill="#FFFFFF" stroke="#E4E5DF" stroke-width="1"/>
+<text x="90" y="732" fill="#303B35" font-size="20" font-weight="600">D · 陶土蜜桃</text>
+<svg x="156" y="757" width="232" height="232" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#F8DDD2"/><g id="giraffe" stroke="#57332D" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#DF8267" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#DF8267" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#DF8267" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#DF8267"/>
+  <circle cx="149" cy="49" r="10" fill="#DF8267"/>
+  <path fill="#DF8267" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#DF8267" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#57332D" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#57332D" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F8DDD2"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#57332D" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#57332D" stroke="none"/>
+</g></svg>
+<text x="90" y="1023" fill="#69756D" font-size="15" font-weight="400">Terracotta &amp; peach</text>
+<circle cx="96" cy="1050" r="6" fill="#F8DDD2" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="109" y="1055" fill="#69756D" font-size="12" font-weight="400">#F8DDD2</text>
+<circle cx="222" cy="1050" r="6" fill="#DF8267" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="235" y="1055" fill="#69756D" font-size="12" font-weight="400">#DF8267</text>
+<circle cx="348" cy="1050" r="6" fill="#57332D" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="361" y="1055" fill="#69756D" font-size="12" font-weight="400">#57332D</text>
+<svg x="90" y="1078" width="48" height="48" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#F8DDD2"/><g id="giraffe" stroke="#57332D" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#DF8267" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#DF8267" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#DF8267" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#DF8267"/>
+  <circle cx="149" cy="49" r="10" fill="#DF8267"/>
+  <path fill="#DF8267" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#DF8267" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#57332D" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#57332D" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F8DDD2"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#57332D" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#57332D" stroke="none"/>
+</g></svg>
+<text x="90" y="1147" fill="#788279" font-size="10" font-weight="400">48 px</text>
+<svg x="177" y="1094" width="32" height="32" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#F8DDD2"/><g id="giraffe" stroke="#57332D" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#DF8267" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#DF8267" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#DF8267" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#DF8267"/>
+  <circle cx="149" cy="49" r="10" fill="#DF8267"/>
+  <path fill="#DF8267" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#DF8267" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#57332D" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#57332D" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F8DDD2"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#57332D" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#57332D" stroke="none"/>
+</g></svg>
+<text x="177" y="1147" fill="#788279" font-size="10" font-weight="400">32 px</text>
+<svg x="249" y="1110" width="16" height="16" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#F8DDD2"/><g id="giraffe" stroke="#57332D" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#DF8267" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#DF8267" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#DF8267" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#DF8267"/>
+  <circle cx="149" cy="49" r="10" fill="#DF8267"/>
+  <path fill="#DF8267" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#DF8267" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#57332D" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#57332D" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F8DDD2"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#57332D" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#57332D" stroke="none"/>
+</g></svg>
+<text x="249" y="1147" fill="#788279" font-size="10" font-weight="400">16 px</text>
+<rect x="512" y="692" width="416" height="474" rx="24" fill="#FFFFFF" stroke="#E4E5DF" stroke-width="1"/>
+<text x="538" y="732" fill="#303B35" font-size="20" font-weight="600">E · 薰衣草雾</text>
+<svg x="604" y="757" width="232" height="232" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#EEE7FA"/><g id="giraffe" stroke="#46365C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#B4A0DD" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#B4A0DD" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#B4A0DD" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#B4A0DD"/>
+  <circle cx="149" cy="49" r="10" fill="#B4A0DD"/>
+  <path fill="#B4A0DD" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#B4A0DD" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#46365C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#46365C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#EEE7FA"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#46365C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#46365C" stroke="none"/>
+</g></svg>
+<text x="538" y="1023" fill="#69756D" font-size="15" font-weight="400">Lavender &amp; mist</text>
+<circle cx="544" cy="1050" r="6" fill="#EEE7FA" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="557" y="1055" fill="#69756D" font-size="12" font-weight="400">#EEE7FA</text>
+<circle cx="670" cy="1050" r="6" fill="#B4A0DD" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="683" y="1055" fill="#69756D" font-size="12" font-weight="400">#B4A0DD</text>
+<circle cx="796" cy="1050" r="6" fill="#46365C" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="809" y="1055" fill="#69756D" font-size="12" font-weight="400">#46365C</text>
+<svg x="538" y="1078" width="48" height="48" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#EEE7FA"/><g id="giraffe" stroke="#46365C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#B4A0DD" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#B4A0DD" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#B4A0DD" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#B4A0DD"/>
+  <circle cx="149" cy="49" r="10" fill="#B4A0DD"/>
+  <path fill="#B4A0DD" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#B4A0DD" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#46365C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#46365C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#EEE7FA"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#46365C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#46365C" stroke="none"/>
+</g></svg>
+<text x="538" y="1147" fill="#788279" font-size="10" font-weight="400">48 px</text>
+<svg x="625" y="1094" width="32" height="32" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#EEE7FA"/><g id="giraffe" stroke="#46365C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#B4A0DD" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#B4A0DD" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#B4A0DD" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#B4A0DD"/>
+  <circle cx="149" cy="49" r="10" fill="#B4A0DD"/>
+  <path fill="#B4A0DD" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#B4A0DD" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#46365C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#46365C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#EEE7FA"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#46365C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#46365C" stroke="none"/>
+</g></svg>
+<text x="625" y="1147" fill="#788279" font-size="10" font-weight="400">32 px</text>
+<svg x="697" y="1110" width="16" height="16" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#EEE7FA"/><g id="giraffe" stroke="#46365C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#B4A0DD" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#B4A0DD" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#B4A0DD" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#B4A0DD"/>
+  <circle cx="149" cy="49" r="10" fill="#B4A0DD"/>
+  <path fill="#B4A0DD" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#B4A0DD" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#46365C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#46365C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#EEE7FA"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#46365C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#46365C" stroke="none"/>
+</g></svg>
+<text x="697" y="1147" fill="#788279" font-size="10" font-weight="400">16 px</text>
+<rect x="960" y="692" width="416" height="474" rx="24" fill="#FFFFFF" stroke="#E4E5DF" stroke-width="1"/>
+<text x="986" y="732" fill="#303B35" font-size="20" font-weight="600">F · 午夜麦金</text>
+<svg x="1052" y="757" width="232" height="232" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#172C3C"/><g id="giraffe" stroke="#172C3C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3C969" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3C969" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3C969" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3C969"/>
+  <circle cx="149" cy="49" r="10" fill="#F3C969"/>
+  <path fill="#F3C969" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3C969" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F3C969"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+</g></svg>
+<text x="986" y="1023" fill="#69756D" font-size="15" font-weight="400">Midnight &amp; gold</text>
+<circle cx="992" cy="1050" r="6" fill="#172C3C" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="1005" y="1055" fill="#69756D" font-size="12" font-weight="400">#172C3C</text>
+<circle cx="1118" cy="1050" r="6" fill="#F3C969" stroke="#D6DAD3" stroke-width="0.6"/>
+<text x="1131" y="1055" fill="#69756D" font-size="12" font-weight="400">#F3C969</text>
+<svg x="986" y="1078" width="48" height="48" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#172C3C"/><g id="giraffe" stroke="#172C3C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3C969" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3C969" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3C969" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3C969"/>
+  <circle cx="149" cy="49" r="10" fill="#F3C969"/>
+  <path fill="#F3C969" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3C969" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F3C969"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+</g></svg>
+<text x="986" y="1147" fill="#788279" font-size="10" font-weight="400">48 px</text>
+<svg x="1073" y="1094" width="32" height="32" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#172C3C"/><g id="giraffe" stroke="#172C3C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3C969" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3C969" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3C969" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3C969"/>
+  <circle cx="149" cy="49" r="10" fill="#F3C969"/>
+  <path fill="#F3C969" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3C969" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F3C969"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+</g></svg>
+<text x="1073" y="1147" fill="#788279" font-size="10" font-weight="400">32 px</text>
+<svg x="1145" y="1110" width="16" height="16" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#172C3C"/><g id="giraffe" stroke="#172C3C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="#F3C969" d="M43 78 C64 73 83 79 94 98 C70 107 51 100 43 78 Z"/>
+  <path fill="#F3C969" d="M213 78 C192 73 173 79 162 98 C186 107 205 100 213 78 Z"/>
+  <path fill="#F3C969" d="M100 52 H114 V80 H100 Z M142 52 H156 V80 H142 Z"/>
+  <circle cx="107" cy="49" r="10" fill="#F3C969"/>
+  <circle cx="149" cy="49" r="10" fill="#F3C969"/>
+  <path fill="#F3C969" d="M102 76 H154 C168 76 175 85 173 99 L161 211 Q160 221 150 221 H106 Q96 221 95 211 L83 99 C81 85 88 76 102 76 Z"/>
+  <path d="M107 49 V81 M149 49 V81" fill="none" stroke="#F3C969" stroke-width="7"/>
+  <circle cx="108" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <circle cx="148" cy="122" r="6" fill="#172C3C" stroke="none"/>
+  <rect x="75" y="158" width="106" height="49" rx="24.5" fill="#F3C969"/>
+  <ellipse cx="96" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+  <ellipse cx="160" cy="182.5" rx="4.5" ry="6.5" fill="#172C3C" stroke="none"/>
+</g></svg>
+<text x="1145" y="1147" fill="#788279" font-size="10" font-weight="400">16 px</text>
+<text x="64" y="1244" fill="#303B35" font-size="17" font-weight="400">方向建议  /  B 森林米白：延续现有品牌；A 蜂蜜奶油：最贴近参考。</text>
+<text x="64" y="1277" fill="#788279" font-size="13" font-weight="400">配色概念稿 · 未替换应用资源 · 图形已重绘；参考素材的授权与商标近似性仍需正式核查。</text>
+</g></svg>
