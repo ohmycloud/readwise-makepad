@@ -15,16 +15,21 @@ const FILE: &str = "pdf-headings-v2.json";
 const MARKER: &str = "pdf_heading_projection_v2";
 const PACK: i64 = 1_000_000;
 
+#[path = "reflow_migration.rs"]
+mod reflow_migration;
+#[path = "reflow_v8_migration.rs"]
+mod reflow_v8_migration;
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;
+pub(crate) use reflow_v8_migration::load_reader_pages;
 
 #[derive(Serialize, Deserialize)]
 struct Projection {
     source_snapshot: String,
     snapshot: Snapshot,
     maps: Vec<Vec<BlockTarget>>,
-    /// Only v6 reordered pages need source text for exact range migration.
+    /// Reordered v6/v7 pages need source text for exact range migration.
     /// Omit entirely for historical projections to keep their tokens stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_texts: Option<Vec<Option<Vec<String>>>>,
@@ -39,11 +44,13 @@ impl Projection {
         {
             return Err(invalid());
         }
-        if self.snapshot.extractor == super::TOC_EXTRACTOR
-            && self
-                .source_texts
-                .as_ref()
-                .is_none_or(|s| s.len() != original.pages.len())
+        if matches!(
+            self.snapshot.extractor.as_str(),
+            super::TOC_EXTRACTOR | super::REFLOW_EXTRACTOR | super::EXTENDED_REFLOW_EXTRACTOR
+        ) && self
+            .source_texts
+            .as_ref()
+            .is_none_or(|s| s.len() != original.pages.len())
         {
             return Err(invalid());
         }
@@ -58,6 +65,37 @@ impl Projection {
             let new = super::super::epub_meta::split_blocks(new);
             if old.len() != map.len() {
                 return Err(invalid());
+            }
+            if matches!(
+                self.snapshot.extractor.as_str(),
+                super::REFLOW_EXTRACTOR | super::EXTENDED_REFLOW_EXTRACTOR
+            ) {
+                if self
+                    .source_texts
+                    .as_ref()
+                    .and_then(|s| s.get(page))
+                    .is_some_and(Option::is_some)
+                {
+                    self.validate_reflow_page(page, &old, &new)?;
+                } else if original.pages[page] != self.snapshot.pages[page]
+                    || map
+                        .iter()
+                        .zip(&old)
+                        .enumerate()
+                        .any(|(block, (target, html))| {
+                            target.block != block
+                                || target.prefix != 0
+                                || target.layout_changed
+                                || target.offsets.is_some()
+                                || target.old_len
+                                    != crate::vocab::annotate::rendered_text(html).len()
+                        })
+                {
+                    // Fallback pages must be EXACT identities, not legacy
+                    // single-block maps masquerading as v7 packed points.
+                    return Err(invalid());
+                }
+                continue;
             }
             let reordered = self.snapshot.extractor == super::TOC_EXTRACTOR
                 && self
@@ -163,8 +201,80 @@ impl Projection {
         Ok(())
     }
 
+    /// v7 may split one old paragraph across several output blocks. Offsets
+    /// encode (block, UTF-8 byte), rather than assuming a single destination.
+    fn validate_reflow_page(
+        &self,
+        page: usize,
+        old: &[String],
+        new: &[String],
+    ) -> Result<(), String> {
+        let invalid = || "PDF 重排字形坐标不一致，原标注保持不变".to_string();
+        let source: Vec<_> = old
+            .iter()
+            .map(|b| crate::vocab::annotate::rendered_text(b))
+            .collect();
+        if self
+            .source_texts
+            .as_ref()
+            .and_then(|s| s.get(page))
+            .and_then(Option::as_ref)
+            != Some(&source)
+        {
+            return Err(invalid());
+        }
+        let target: Vec<_> = new
+            .iter()
+            .map(|b| crate::vocab::annotate::rendered_text(b))
+            .collect();
+        let mut covered = std::collections::HashSet::new();
+        for (block, text) in source.iter().enumerate() {
+            let map = &self.maps[page][block];
+            let offsets = map.offsets.as_ref().ok_or_else(invalid)?;
+            if map.old_len != text.len()
+                || offsets.len() != text.len() + 1
+                || self.point(page, block, 0)? != (map.block, map.prefix)
+            {
+                return Err(invalid());
+            }
+            for (byte, ch) in text.char_indices() {
+                let point = self.point(page, block, byte)?;
+                let out = target.get(point.0).ok_or_else(invalid)?;
+                if !out.is_char_boundary(point.1) {
+                    return Err(invalid());
+                }
+                if ch.is_whitespace() {
+                    continue;
+                }
+                if !covered.insert(point)
+                    || out.get(point.1..point.1 + ch.len_utf8())
+                        != Some(&text[byte..byte + ch.len_utf8()])
+                {
+                    return Err(invalid());
+                }
+                for k in 0..ch.len_utf8() {
+                    if self.point(page, block, byte + k)? != (point.0, point.1 + k) {
+                        return Err(invalid());
+                    }
+                }
+            }
+            let end = self.point(page, block, text.len())?;
+            if !target.get(end.0).is_some_and(|s| s.is_char_boundary(end.1)) {
+                return Err(invalid());
+            }
+        }
+        for (block, text) in target.iter().enumerate() {
+            for (byte, ch) in text.char_indices() {
+                if !ch.is_whitespace() && !covered.contains(&(block, byte)) {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn reordered_range(&self, chapter: usize, start: i64, end: i64) -> Result<(i64, i64), String> {
-        let invalid = || "PDF 目录重排无法保持此高亮的连续范围，原标注保持不变".to_string();
+        let invalid = || "PDF 文本重排无法保持此高亮的连续范围，原标注保持不变".to_string();
         let source = self
             .source_texts
             .as_ref()
@@ -191,13 +301,14 @@ impl Projection {
             } else {
                 text.len()
             };
-            let target = &self.maps[chapter][block];
-            let offsets = target.offsets.as_ref().ok_or_else(invalid)?;
+            if lo > hi || !text.is_char_boundary(lo) || !text.is_char_boundary(hi) {
+                return Err(invalid());
+            }
             for (byte, ch) in text
                 .char_indices()
                 .filter(|(b, c)| *b >= lo && *b < hi && !c.is_whitespace())
             {
-                let point = (target.block, offsets[byte]);
+                let point = self.point(chapter, block, byte)?;
                 selected.insert(point);
                 from = from.min(point);
                 to = to.max((point.0, point.1 + ch.len_utf8()));
@@ -239,6 +350,16 @@ impl Projection {
             .offsets
             .as_ref()
             .map_or(target.prefix + byte, |map| map[byte]);
+        if matches!(
+            self.snapshot.extractor.as_str(),
+            super::REFLOW_EXTRACTOR | super::EXTENDED_REFLOW_EXTRACTOR
+        ) && target.offsets.is_some()
+        {
+            return Ok((
+                offset / super::reflow::POINT_PACK,
+                offset % super::reflow::POINT_PACK,
+            ));
+        }
         Ok((target.block, offset))
     }
 
@@ -768,7 +889,7 @@ async fn load_v5_pages(
 const TOC_FILE: &str = "pdf-toc-v6.json";
 const TOC_MARKER: &str = "pdf_toc_projection_v6";
 
-pub(crate) async fn load_reader_pages(
+async fn load_v6_pages(
     pool: &SqlitePool,
     book_id: &str,
     path: &Path,

@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 #[path = "lists_migration_tests.rs"]
 mod lists;
+#[path = "reflow_migration_tests.rs"]
+mod reflow;
+#[path = "reflow_v8_migration_tests.rs"]
+mod reflow_v8;
 #[path = "structure_migration_tests.rs"]
 mod structure;
 #[path = "toc_migration_tests.rs"]

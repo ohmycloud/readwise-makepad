@@ -134,7 +134,7 @@ pub(crate) fn fixture() -> Vec<u8> {
 #[test]
 fn new_imports_preserve_contents_rows_before_the_prose_pipeline() {
     let snapshot = super::super::extract(fixture(), "test".into()).unwrap();
-    assert_eq!(snapshot.extractor, super::super::TOC_EXTRACTOR);
+    assert_eq!(snapshot.extractor, super::super::EXTENDED_REFLOW_EXTRACTOR);
     let text = rendered_text(&snapshot.pages[0]);
     assert!(
         text.contains("1.1 Alpha topic 4\n1.2 Beta topic 6"),

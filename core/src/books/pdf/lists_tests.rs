@@ -132,7 +132,7 @@ pub(crate) fn fixture() -> Vec<u8> {
 #[test]
 fn new_imports_convert_symbol_font_bullets() {
     let snapshot = super::super::extract(fixture(), "test".into()).unwrap();
-    assert_eq!(snapshot.extractor, super::super::TOC_EXTRACTOR);
+    assert_eq!(snapshot.extractor, super::super::EXTENDED_REFLOW_EXTRACTOR);
     assert!(
         !snapshot.pages[0].contains(PRIVATE_BULLET),
         "{}",

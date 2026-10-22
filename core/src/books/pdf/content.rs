@@ -14,7 +14,7 @@ pub(super) fn escape(text: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
-fn monospace(span: &TextSpan) -> bool {
+pub(super) fn monospace(span: &TextSpan) -> bool {
     let name = span.font_name.to_ascii_lowercase();
     span.is_monospace
         || [

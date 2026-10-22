@@ -9,7 +9,8 @@ pub(super) struct BlockTarget {
     pub block: usize,
     pub prefix: usize,
     pub old_len: usize,
-    /// Optional insertion-only UTF-8 byte map for restored code whitespace.
+    /// Versioned UTF-8 map: v3–v6 offsets within `block`; v7 packs chapter
+    /// points as block * 1_000_000 + byte, allowing one old block to split.
     /// Omit on legacy projections so their serialized migration token is stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offsets: Option<Vec<usize>>,

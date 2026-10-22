@@ -13,6 +13,8 @@ pub(crate) mod cover;
 mod headings;
 mod lists;
 mod migration;
+mod reflow;
+mod reflow_v8;
 mod structure;
 mod toc;
 pub(crate) use migration::load_reader_pages;
@@ -23,6 +25,8 @@ const CONTENT_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v3";
 const STRUCTURE_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v4";
 const LIST_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v5";
 const TOC_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v6";
+const REFLOW_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v7";
+const EXTENDED_REFLOW_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v8";
 const NO_TEXT: &str = "PDF 没有可提取的文本层（可能是扫描件），请先进行 OCR 后重新导入";
 
 fn open(bytes: Vec<u8>) -> Result<PdfDocument, String> {
@@ -204,7 +208,8 @@ fn extract_with_assets(
             let (html, _) = content::repair(&doc, page, &html, directory)?;
             let (html, _) = structure::repair(&doc, page, &html)?;
             let (html, _) = lists::repair(&doc, page, &html)?;
-            html
+            let html = reflow::repair(&doc, page, &html)?.map_or(html, |fixed| fixed.html);
+            reflow_v8::repair(&doc, page, &html)?.map_or(html, |fixed| fixed.html)
         };
         let text = crate::vocab::annotate::rendered_text(&html);
         if text.chars().any(|c| !c.is_whitespace()) {
@@ -241,7 +246,7 @@ fn extract_with_assets(
     Ok(Snapshot {
         version: SNAPSHOT_VERSION,
         fingerprint,
-        extractor: TOC_EXTRACTOR.into(),
+        extractor: EXTENDED_REFLOW_EXTRACTOR.into(),
         pages,
         toc,
     })

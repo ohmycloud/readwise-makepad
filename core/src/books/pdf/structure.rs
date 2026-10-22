@@ -25,7 +25,7 @@ fn color(c: &TextChar) -> [u8; 3] {
 /// A wrapped annotation without QuadPoints may bound entire lines, including
 /// unrelated black prose. Use actual glyph colors (span merging loses them),
 /// and let smaller annotations win. Never invent a word-based link boundary.
-fn refine_links(links: &[(Rect, String)], chars: &[TextChar]) -> Vec<(Rect, String)> {
+pub(super) fn refine_links(links: &[(Rect, String)], chars: &[TextChar]) -> Vec<(Rect, String)> {
     let mut colors = BTreeMap::<[u8; 3], usize>::new();
     for c in chars.iter().filter(|c| !c.char.is_whitespace()) {
         *colors.entry(color(c)).or_default() += 1;
