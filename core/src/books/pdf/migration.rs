@@ -24,6 +24,10 @@ struct Projection {
     source_snapshot: String,
     snapshot: Snapshot,
     maps: Vec<Vec<BlockTarget>>,
+    /// Only v6 reordered pages need source text for exact range migration.
+    /// Omit entirely for historical projections to keep their tokens stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_texts: Option<Vec<Option<Vec<String>>>>,
 }
 
 impl Projection {
@@ -35,17 +39,42 @@ impl Projection {
         {
             return Err(invalid());
         }
-        for ((old, new), map) in original
+        if self.snapshot.extractor == super::TOC_EXTRACTOR
+            && self
+                .source_texts
+                .as_ref()
+                .is_none_or(|s| s.len() != original.pages.len())
+        {
+            return Err(invalid());
+        }
+        for (page, ((old, new), map)) in original
             .pages
             .iter()
             .zip(&self.snapshot.pages)
             .zip(&self.maps)
+            .enumerate()
         {
             let old = super::super::epub_meta::split_blocks(old);
             let new = super::super::epub_meta::split_blocks(new);
             if old.len() != map.len() {
                 return Err(invalid());
             }
+            let reordered = self.snapshot.extractor == super::TOC_EXTRACTOR
+                && self
+                    .source_texts
+                    .as_ref()
+                    .and_then(|s| s.get(page))
+                    .is_some_and(Option::is_some);
+            if reordered
+                && self.source_texts.as_ref().unwrap()[page].as_ref().unwrap()
+                    != &old
+                        .iter()
+                        .map(|b| crate::vocab::annotate::rendered_text(b))
+                        .collect::<Vec<_>>()
+            {
+                return Err(invalid());
+            }
+            let mut covered = std::collections::HashSet::new();
             for (block, target) in old.iter().zip(map) {
                 let text = crate::vocab::annotate::rendered_text(block);
                 let new_text = new
@@ -60,6 +89,37 @@ impl Projection {
                     return Err(invalid());
                 }
                 if let Some(offsets) = &target.offsets {
+                    if reordered {
+                        if offsets.len() != text.len() + 1
+                            || offsets.first().copied() != Some(target.prefix)
+                            || offsets.iter().any(|p| *p > new_text.len())
+                        {
+                            return Err(invalid());
+                        }
+                        for (byte, ch) in text.char_indices() {
+                            if !new_text.is_char_boundary(offsets[byte]) {
+                                return Err(invalid());
+                            }
+                            if ch.is_whitespace() {
+                                continue;
+                            }
+                            if !covered.insert((target.block, offsets[byte])) {
+                                return Err(invalid());
+                            }
+                            for k in 0..ch.len_utf8() {
+                                if new_text.as_bytes().get(offsets[byte + k])
+                                    != text.as_bytes().get(byte + k)
+                                    || offsets[byte + k] != offsets[byte] + k
+                                {
+                                    return Err(invalid());
+                                }
+                            }
+                        }
+                        if !new_text.is_char_boundary(*offsets.last().unwrap()) {
+                            return Err(invalid());
+                        }
+                        continue;
+                    }
                     if offsets.len() != text.len() + 1
                         || offsets.first().copied() != Some(target.prefix)
                         || offsets.windows(2).any(|w| w[0] >= w[1])
@@ -81,12 +141,89 @@ impl Projection {
                     {
                         return Err(invalid());
                     }
-                } else if new_text.get(target.prefix..end) != Some(text.as_str()) {
+                } else if new_text.get(target.prefix..end) != Some(text.as_str())
+                    && !(self.snapshot.extractor == super::LIST_EXTRACTOR
+                        && target.prefix == 0
+                        && target.old_len == new_text.len()
+                        && super::lists::valid_text_change(&text, &new_text))
+                {
                     return Err(invalid());
+                }
+            }
+            if reordered {
+                for (index, block) in new.iter().enumerate() {
+                    for (byte, ch) in crate::vocab::annotate::rendered_text(block).char_indices() {
+                        if !ch.is_whitespace() && !covered.contains(&(index, byte)) {
+                            return Err(invalid());
+                        }
+                    }
                 }
             }
         }
         Ok(())
+    }
+
+    fn reordered_range(&self, chapter: usize, start: i64, end: i64) -> Result<(i64, i64), String> {
+        let invalid = || "PDF 目录重排无法保持此高亮的连续范围，原标注保持不变".to_string();
+        let source = self
+            .source_texts
+            .as_ref()
+            .and_then(|s| s.get(chapter))
+            .and_then(Option::as_ref)
+            .ok_or_else(invalid)?;
+        let first = (start / PACK) as usize;
+        let last = (end / PACK) as usize;
+        if first > last || last >= source.len() {
+            return Err(invalid());
+        }
+        let mut selected = std::collections::HashSet::new();
+        let mut from = (usize::MAX, usize::MAX);
+        let mut to = (0, 0);
+        for block in first..=last {
+            let text = &source[block];
+            let lo = if block == first {
+                (start % PACK) as usize
+            } else {
+                0
+            };
+            let hi = if block == last {
+                (end % PACK) as usize
+            } else {
+                text.len()
+            };
+            let target = &self.maps[chapter][block];
+            let offsets = target.offsets.as_ref().ok_or_else(invalid)?;
+            for (byte, ch) in text
+                .char_indices()
+                .filter(|(b, c)| *b >= lo && *b < hi && !c.is_whitespace())
+            {
+                let point = (target.block, offsets[byte]);
+                selected.insert(point);
+                from = from.min(point);
+                to = to.max((point.0, point.1 + ch.len_utf8()));
+            }
+        }
+        if selected.is_empty() {
+            return Err(invalid());
+        }
+        let blocks = super::super::epub_meta::split_blocks(&self.snapshot.pages[chapter]);
+        for block in from.0..=to.0 {
+            let text = crate::vocab::annotate::rendered_text(&blocks[block]);
+            for (byte, ch) in text.char_indices() {
+                let point = (block, byte);
+                if point >= from && point < to && !ch.is_whitespace() && !selected.contains(&point)
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        if from.1 >= PACK as usize || to.1 >= PACK as usize {
+            return Err(invalid());
+        }
+        Ok((
+            from.0 as i64 * PACK + from.1 as i64,
+            to.0 as i64 * PACK + to.1 as i64,
+        ))
     }
 
     fn point(&self, chapter: usize, block: usize, byte: usize) -> Result<(usize, usize), String> {
@@ -185,6 +322,7 @@ fn prepare(path: &Path, data: &[u8], mut snapshot: Snapshot) -> Result<Projectio
         source_snapshot,
         snapshot,
         maps,
+        source_texts: None,
     };
     let data =
         serde_json::to_vec(&projection).map_err(|e| format!("编码 PDF 标题快照失败: {e}"))?;
@@ -313,8 +451,27 @@ async fn apply_projection(
                         _ => Ok(value),
                     }
                 };
-                let start = rebase(note.get("norm_start"), false)?;
-                let end = rebase(note.get("norm_end"), true)?;
+                let raw_start: Option<i64> = note.get("norm_start");
+                let raw_end: Option<i64> = note.get("norm_end");
+                let (start, end) = if let (Some(chapter), Some(start), Some(end)) =
+                    (chapter, raw_start, raw_end)
+                {
+                    if start >= 0
+                        && end >= 0
+                        && projection
+                            .source_texts
+                            .as_ref()
+                            .and_then(|s| s.get(chapter))
+                            .is_some_and(Option::is_some)
+                    {
+                        let (start, end) = projection.reordered_range(chapter, start, end)?;
+                        (Some(start), Some(end))
+                    } else {
+                        (rebase(raw_start, false)?, rebase(raw_end, true)?)
+                    }
+                } else {
+                    (rebase(raw_start, false)?, rebase(raw_end, true)?)
+                };
                 sqlx::query("UPDATE book_notes SET cfi = ?, norm_start = ?, norm_end = ? WHERE id = ? AND book_id = ?")
                     .bind(cfi).bind(start).bind(end).bind(note.get::<String, _>("id")).bind(book_id)
                     .execute(&mut *tx).await.map_err(|e| e.to_string())?;
@@ -405,6 +562,7 @@ async fn load_v3_pages(
                 source_snapshot,
                 snapshot: repaired,
                 maps,
+                source_texts: None,
             };
             projection.validate(&snapshot)?;
             let data = serde_json::to_vec(&projection).map_err(|e| e.to_string())?;
@@ -427,7 +585,7 @@ async fn load_v3_pages(
 const STRUCTURE_FILE: &str = "pdf-structure-v4.json";
 const STRUCTURE_MARKER: &str = "pdf_structure_projection_v4";
 
-pub(crate) async fn load_reader_pages(
+async fn load_v4_pages(
     pool: &SqlitePool,
     book_id: &str,
     path: &Path,
@@ -497,6 +655,7 @@ pub(crate) async fn load_reader_pages(
                 source_snapshot,
                 snapshot,
                 maps,
+                source_texts: None,
             };
             projection.validate(&base)?;
             let tmp = directory.join(format!(".pdf-structure-{}.tmp", uuid::Uuid::new_v4()));
@@ -511,5 +670,219 @@ pub(crate) async fn load_reader_pages(
     };
     super::content::ensure_assets(path, &projection.snapshot.clone().into_chapters())?;
     let loaded = apply_projection(pool, book_id, projection, STRUCTURE_MARKER).await?;
+    Ok(super::content::resolve_assets(loaded, path))
+}
+
+const LIST_FILE: &str = "pdf-lists-v5.json";
+const LIST_MARKER: &str = "pdf_list_projection_v5";
+
+async fn load_v5_pages(
+    pool: &SqlitePool,
+    book_id: &str,
+    path: &Path,
+) -> Result<LoadedChapters, String> {
+    let directory = path.parent().ok_or("PDF 目录无效")?;
+    let metadata: Option<String> =
+        sqlx::query_scalar("SELECT metadata FROM book_status WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .flatten();
+    let committed = metadata
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .is_some_and(|m| m.get(LIST_MARKER).is_some());
+    if committed && !directory.join(SNAPSHOT_FILE).is_file() {
+        return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
+    }
+    let loaded = load_imported_pages(path)?;
+    let bytes = std::fs::read(directory.join(SNAPSHOT_FILE)).map_err(|e| e.to_string())?;
+    let mut base: Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if base.extractor == super::LIST_EXTRACTOR {
+        let has_older_marker = metadata
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .is_some_and(|m| {
+                [MARKER, CONTENT_MARKER, STRUCTURE_MARKER, LIST_MARKER]
+                    .iter()
+                    .any(|key| m.get(*key).is_some())
+            });
+        if has_older_marker {
+            return Err("PDF 原始文本快照已被替换，原标注保持不变".into());
+        }
+        return Ok(loaded);
+    }
+    load_v4_pages(pool, book_id, path).await?;
+    if base.extractor != super::STRUCTURE_EXTRACTOR {
+        let data = std::fs::read(directory.join(STRUCTURE_FILE)).map_err(|e| e.to_string())?;
+        let projection: Projection = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+        base = projection.snapshot;
+    }
+    let source_snapshot = fingerprint(&serde_json::to_vec(&base).map_err(|e| e.to_string())?);
+    let cache = directory.join(LIST_FILE);
+    let projection = match std::fs::read(&cache) {
+        Ok(data) => {
+            let projection: Projection = serde_json::from_slice(&data)
+                .map_err(|e| format!("PDF 列表快照损坏，原标注保持不变: {e}"))?;
+            if projection.source_snapshot != source_snapshot
+                || projection.snapshot.fingerprint != base.fingerprint
+                || projection.snapshot.extractor != super::LIST_EXTRACTOR
+            {
+                return Err("PDF 列表快照与原快照不一致，原标注保持不变".into());
+            }
+            projection.validate(&base)?;
+            projection
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let doc = open(read_pdf(path)?)?;
+            let mut snapshot = base.clone();
+            let mut maps = Vec::new();
+            for (page, html) in snapshot.pages.iter_mut().enumerate() {
+                let (new, map) = super::lists::repair(&doc, page, html)?;
+                *html = new;
+                maps.push(map);
+            }
+            snapshot.extractor = super::LIST_EXTRACTOR.into();
+            let projection = Projection {
+                source_snapshot,
+                snapshot,
+                maps,
+                source_texts: None,
+            };
+            projection.validate(&base)?;
+            let tmp = directory.join(format!(".pdf-lists-{}.tmp", uuid::Uuid::new_v4()));
+            let data = serde_json::to_vec(&projection).map_err(|e| e.to_string())?;
+            if let Err(e) = std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, &cache)) {
+                let _ = std::fs::remove_file(tmp);
+                return Err(format!("保存 PDF 列表快照失败: {e}"));
+            }
+            projection
+        }
+        Err(e) => return Err(format!("读取 PDF 列表快照失败: {e}")),
+    };
+    let loaded = apply_projection(pool, book_id, projection, LIST_MARKER).await?;
+    Ok(super::content::resolve_assets(loaded, path))
+}
+
+const TOC_FILE: &str = "pdf-toc-v6.json";
+const TOC_MARKER: &str = "pdf_toc_projection_v6";
+
+pub(crate) async fn load_reader_pages(
+    pool: &SqlitePool,
+    book_id: &str,
+    path: &Path,
+) -> Result<LoadedChapters, String> {
+    let directory = path.parent().ok_or("PDF 目录无效")?;
+    let metadata: Option<String> =
+        sqlx::query_scalar("SELECT metadata FROM book_status WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .flatten();
+    let committed = metadata
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .is_some_and(|m| m.get(TOC_MARKER).is_some());
+    if committed && !directory.join(SNAPSHOT_FILE).is_file() {
+        return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
+    }
+    let loaded = load_imported_pages(path)?;
+    let bytes = std::fs::read(directory.join(SNAPSHOT_FILE)).map_err(|e| e.to_string())?;
+    let mut base: Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if base.extractor == super::TOC_EXTRACTOR {
+        let has_older_marker = metadata
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .is_some_and(|m| {
+                [
+                    MARKER,
+                    CONTENT_MARKER,
+                    STRUCTURE_MARKER,
+                    LIST_MARKER,
+                    TOC_MARKER,
+                ]
+                .iter()
+                .any(|key| m.get(*key).is_some())
+            });
+        if has_older_marker {
+            return Err("PDF 原始文本快照已被替换，原标注保持不变".into());
+        }
+        return Ok(loaded);
+    }
+    load_v5_pages(pool, book_id, path).await?;
+    if base.extractor != super::LIST_EXTRACTOR {
+        let data = std::fs::read(directory.join(LIST_FILE)).map_err(|e| e.to_string())?;
+        let projection: Projection = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+        base = projection.snapshot;
+    }
+    let source_snapshot = fingerprint(&serde_json::to_vec(&base).map_err(|e| e.to_string())?);
+    let cache = directory.join(TOC_FILE);
+    let projection = match std::fs::read(&cache) {
+        Ok(data) => {
+            let projection: Projection = serde_json::from_slice(&data)
+                .map_err(|e| format!("PDF 目录快照损坏，原标注保持不变: {e}"))?;
+            if projection.source_snapshot != source_snapshot
+                || projection.snapshot.fingerprint != base.fingerprint
+                || projection.snapshot.extractor != super::TOC_EXTRACTOR
+            {
+                return Err("PDF 目录快照与原快照不一致，原标注保持不变".into());
+            }
+            projection.validate(&base)?;
+            projection
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let doc = open(read_pdf(path)?)?;
+            let mut snapshot = base.clone();
+            let mut maps = Vec::new();
+            let mut source_texts = Vec::new();
+            for (page, html) in snapshot.pages.iter_mut().enumerate() {
+                let blocks = super::super::epub_meta::split_blocks(html);
+                if let Some((new, map)) = super::toc::repair(&doc, page, html)? {
+                    source_texts.push(Some(
+                        blocks
+                            .iter()
+                            .map(|b| crate::vocab::annotate::rendered_text(b))
+                            .collect(),
+                    ));
+                    *html = new;
+                    maps.push(map);
+                } else {
+                    source_texts.push(None);
+                    maps.push(
+                        blocks
+                            .iter()
+                            .enumerate()
+                            .map(|(block, b)| BlockTarget {
+                                block,
+                                prefix: 0,
+                                old_len: crate::vocab::annotate::rendered_text(b).len(),
+                                offsets: None,
+                                layout_changed: false,
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            snapshot.extractor = super::TOC_EXTRACTOR.into();
+            let projection = Projection {
+                source_snapshot,
+                snapshot,
+                maps,
+                source_texts: Some(source_texts),
+            };
+            projection.validate(&base)?;
+            let tmp = directory.join(format!(".pdf-toc-{}.tmp", uuid::Uuid::new_v4()));
+            let data = serde_json::to_vec(&projection).map_err(|e| e.to_string())?;
+            if let Err(e) = std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, &cache)) {
+                let _ = std::fs::remove_file(tmp);
+                return Err(format!("保存 PDF 目录快照失败: {e}"));
+            }
+            projection
+        }
+        Err(e) => return Err(format!("读取 PDF 目录快照失败: {e}")),
+    };
+    let loaded = apply_projection(pool, book_id, projection, TOC_MARKER).await?;
     Ok(super::content::resolve_assets(loaded, path))
 }

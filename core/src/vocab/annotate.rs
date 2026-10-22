@@ -297,9 +297,17 @@ fn annotate_text(
     out.push_str(&text[last..]);
 }
 
+fn is_line_break_tag(inner: &str) -> bool {
+    inner
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .eq_ignore_ascii_case("br")
+}
+
 /// 把 TextFlow UTF-8 字节区间 [start, end) 包成 <mark> 段（高亮渲染用）。
 /// 计数规则与 TextFlow 选区一致：标签不计、实体按解码后文本字节数计、
-/// <ruby> 内只计词部（SEP 前）。
+/// <ruby> 内只计词部（SEP 前），<br> 计一个换行字节。
 /// 跨标签的区间按文本节点拆成多个 <mark> 段。
 pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
     if ranges.is_empty() {
@@ -330,6 +338,9 @@ pub fn inject_marks(html: &str, ranges: &[(usize, usize)]) -> String {
             out.push_str(tag);
             // ruby 内文特殊：词部参与计数与高亮，SEP 后释义原样跳过
             let inner = &tag[1..tag.len() - 1];
+            if is_line_break_tag(inner) {
+                text_pos += 1;
+            }
             if inner
                 .trim_start_matches('/')
                 .to_lowercase()
@@ -566,6 +577,9 @@ pub fn inject_colored_marks(html: &str, ranges: &[(usize, usize, &str)]) -> Stri
             let tag = &rest[..=gt_rel];
             out.push_str(tag);
             let inner = &tag[1..tag.len() - 1];
+            if is_line_break_tag(inner) {
+                text_pos += 1;
+            }
             if inner
                 .trim_start_matches('/')
                 .to_lowercase()
@@ -619,6 +633,37 @@ pub fn inject_colored_marks(html: &str, ranges: &[(usize, usize, &str)]) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_breaks_keep_highlights_ruby_and_copy_in_the_same_utf8_space() {
+        let html =
+            "<p>• First.<br/>• 中文<br class=\"line\"/>• <ruby>reader\u{E000}读者</ruby></p>";
+        let text = rendered_text(html);
+        let chinese = text.find("中文").unwrap();
+        let reader = text.find("reader").unwrap();
+        let plain = inject_marks(html, &[(chinese, chinese + "中文".len())]);
+        assert!(plain.contains("<mark>中文</mark>"), "{plain}");
+        let colored = inject_colored_marks(
+            html,
+            &[
+                (chinese, chinese + "中文".len(), "yellow"),
+                (reader, reader + 6, "cyan"),
+            ],
+        );
+        assert!(
+            colored.contains("<mark>中文\u{E001}yellow</mark>"),
+            "{colored}"
+        );
+        assert!(
+            colored.contains("<ruby>reader\u{E000}读者\u{E001}cyan</ruby>"),
+            "{colored}"
+        );
+        assert_eq!(rendered_text(&colored), text);
+        assert_eq!(
+            rendered_text_for_range(&[html.into()], ((0, chinese), (0, reader + 6))),
+            "中文\n• reader"
+        );
+    }
 
     fn ctx() -> (HashMap<String, String>, HashSet<String>) {
         let mut g = HashMap::new();

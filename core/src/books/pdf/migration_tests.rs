@@ -2,8 +2,12 @@ use super::*;
 use crate::{books::epub_meta::split_blocks, Db};
 use std::path::PathBuf;
 
+#[path = "lists_migration_tests.rs"]
+mod lists;
 #[path = "structure_migration_tests.rs"]
 mod structure;
+#[path = "toc_migration_tests.rs"]
+mod toc;
 
 struct Case {
     root: PathBuf,

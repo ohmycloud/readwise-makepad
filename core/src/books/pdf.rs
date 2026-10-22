@@ -11,14 +11,18 @@ const SNAPSHOT_VERSION: u32 = 1;
 mod content;
 pub(crate) mod cover;
 mod headings;
+mod lists;
 mod migration;
 mod structure;
+mod toc;
 pub(crate) use migration::load_reader_pages;
 
 const LEGACY_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v1";
 const EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v2";
 const CONTENT_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v3";
 const STRUCTURE_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v4";
+const LIST_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v5";
+const TOC_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v6";
 const NO_TEXT: &str = "PDF 没有可提取的文本层（可能是扫描件），请先进行 OCR 后重新导入";
 
 fn open(bytes: Vec<u8>) -> Result<PdfDocument, String> {
@@ -190,12 +194,18 @@ fn extract_with_assets(
             .to_html(page, &options)
             .map_err(|e| format!("提取 PDF 第 {} 页失败: {e}", page + 1))?;
         let html = expand_text_ligatures(&sanitize_for_reader(&html.replace('\0', "")));
-        let spans = doc
-            .extract_spans(page)
-            .map_err(|e| format!("读取 PDF 第 {} 页行坐标失败: {e}", page + 1))?;
-        let (html, _) = headings::repair(&html, &spans);
-        let (html, _) = content::repair(&doc, page, &html, directory)?;
-        let (html, _) = structure::repair(&doc, page, &html)?;
+        let html = if let Some((toc, _)) = toc::repair(&doc, page, &html)? {
+            toc
+        } else {
+            let spans = doc
+                .extract_spans(page)
+                .map_err(|e| format!("读取 PDF 第 {} 页行坐标失败: {e}", page + 1))?;
+            let (html, _) = headings::repair(&html, &spans);
+            let (html, _) = content::repair(&doc, page, &html, directory)?;
+            let (html, _) = structure::repair(&doc, page, &html)?;
+            let (html, _) = lists::repair(&doc, page, &html)?;
+            html
+        };
         let text = crate::vocab::annotate::rendered_text(&html);
         if text.chars().any(|c| !c.is_whitespace()) {
             has_text = true;
@@ -231,7 +241,7 @@ fn extract_with_assets(
     Ok(Snapshot {
         version: SNAPSHOT_VERSION,
         fingerprint,
-        extractor: STRUCTURE_EXTRACTOR.into(),
+        extractor: TOC_EXTRACTOR.into(),
         pages,
         toc,
     })
