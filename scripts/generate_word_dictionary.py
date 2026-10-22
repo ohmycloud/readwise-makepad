@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+from gloss_brackets import correct_source_brackets
+
 
 def main():
     if len(sys.argv) != 3:
@@ -17,7 +19,9 @@ def main():
     with Path(sys.argv[1]).open(encoding="utf-8-sig", newline="") as source:
         for row in csv.DictReader(source):
             word = row["word"].strip().lower()
-            translation = row["translation"].replace("\\n", "\n").strip()
+            translation = correct_source_brackets(
+                word, row["translation"].replace("\\n", "\n").strip()
+            )
             if word in wanted and word not in entries and translation:
                 entries[word] = [row["phonetic"].strip(), translation]
     Path(sys.argv[2]).write_text(

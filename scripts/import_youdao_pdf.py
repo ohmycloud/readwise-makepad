@@ -25,6 +25,8 @@ from pathlib import Path
 import pymupdf
 
 from generate_starter_glossary import short_gloss
+from gloss_brackets import correct_source_brackets
+from vocab_glosses import deduplicate_glosses
 
 ROOT = Path(__file__).resolve().parents[1]
 CJK = re.compile(r"[\u3400-\u9fff]")
@@ -287,12 +289,14 @@ def import_entries(
     outcomes = []
     for lemma, entries in grouped.items():
         # Prefer a definition of the lemma itself over an inflected form. All
-        # source definitions remain in the full gloss and the per-row audit.
+        # distinct definitions remain in the full gloss; originals stay in the audit.
         ordered = sorted(
             entries, key=lambda e: (e.word.lower() != lemma, not bool(e.gloss))
         )
         primary = ordered[0]
-        gloss = "\n".join(dict.fromkeys(e.gloss for e in ordered if e.gloss)) or None
+        gloss = deduplicate_glosses(
+            correct_source_brackets(lemma, e.gloss) for e in ordered
+        )[0] or None
         if lemma not in existing:
             outcome = "new_words"
             if apply:

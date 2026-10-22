@@ -7,6 +7,14 @@ import re
 import sys
 from pathlib import Path
 
+from gloss_brackets import (
+    balanced_brackets,
+    first_sense,
+    normalize_bracket_pairs,
+    without_bracket_notes,
+    without_leading_notes,
+)
+
 
 CJK = re.compile(r"[\u3400-\u9fff]")
 POS = re.compile(
@@ -21,9 +29,13 @@ def short_gloss(raw: str) -> str | None:
     candidates = [line.strip() for line in lines if CJK.search(line)]
     candidates.sort(key=lambda line: line.startswith(("[网络]", "【网络】")))
     for line in candidates:
+        line = normalize_bracket_pairs(line)
         line = BRACKET_TAG.sub("", line)
         line = POS.sub("", line)
-        line = re.split(r"[；;,，]", line, maxsplit=1)[0].strip(" ，。,.；;")
+        line = BRACKET_TAG.sub("", line)
+        line = without_leading_notes(first_sense(line)).strip(" ，。,.；;")
+        if len(line) > 12 or not balanced_brackets(line):
+            line = without_bracket_notes(line).strip(" ，。,.；;")
         if CJK.search(line):
             return line[:12]
     return None

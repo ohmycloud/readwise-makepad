@@ -93,7 +93,7 @@ class PdfImportTests(unittest.TestCase):
         entries = [
             Entry("a.pdf", 1, 1, "uncovered", "", "揭露"),
             Entry("a.pdf", 1, 2, "hollow", "[ipa]", "adj.空心的；凹陷的"),
-            Entry("b.pdf", 1, 1, "Hollow", "", "adj.空心的；凹陷的"),
+            Entry("b.pdf", 1, 1, "Hollow", "", "adj. 空心的;凹陷的"),
             Entry("b.pdf", 1, 2, "vibrate", "", "v.振动；摇摆"),
             Entry("b.pdf", 1, 3, "sacred", "", "adj.神圣的"),
             Entry("b.pdf", 1, 4, "a big no-no", "", ""),
@@ -117,6 +117,10 @@ class PdfImportTests(unittest.TestCase):
         self.assertEqual(connection.execute("SELECT count(*) FROM custom_words").fetchone()[0], len(grouped))
         self.assertEqual(connection.execute("SELECT gloss,source FROM custom_words WHERE lemma='hollow'").fetchone(), ("空心的", "youdao"))
         self.assertEqual(connection.execute("SELECT source FROM custom_words WHERE lemma='sacred'").fetchone(), ("youdao",))
+        self.assertEqual(
+            connection.execute("SELECT gloss FROM vocab_book WHERE lemma='hollow'").fetchone(),
+            ("adj.空心的；凹陷的",),
+        )
         self.assertEqual(
             preserved,
             connection.execute(
