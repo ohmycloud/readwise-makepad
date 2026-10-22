@@ -21,6 +21,70 @@ impl AppLanguage {
     }
 }
 
+/// Reader's self-assessed CEFR proficiency, independent of the UI language.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EnglishLevel {
+    #[default]
+    A1,
+    A2,
+    B1,
+    B2,
+    C1,
+    C2,
+    /// User-selected vocabulary, not an additional CEFR proficiency level.
+    C3,
+}
+
+impl EnglishLevel {
+    pub const ALL: [Self; 7] = [
+        Self::A1,
+        Self::A2,
+        Self::B1,
+        Self::B2,
+        Self::C1,
+        Self::C2,
+        Self::C3,
+    ];
+
+    /// Local difficulty bands above this threshold receive glosses.
+    /// C3 is membership-based rather than a difficulty threshold.
+    pub fn annotation_threshold(self) -> Option<u8> {
+        match self {
+            Self::A1 => Some(1),
+            Self::A2 => Some(2),
+            Self::B1 => Some(3),
+            Self::B2 => Some(4),
+            Self::C1 => Some(5),
+            Self::C2 => Some(6),
+            Self::C3 => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::A1 => "A1",
+            Self::A2 => "A2",
+            Self::B1 => "B1",
+            Self::B2 => "B2",
+            Self::C1 => "C1",
+            Self::C2 => "C2",
+            Self::C3 => "C3",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "A2" => Self::A2,
+            "B1" => Self::B1,
+            "B2" => Self::B2,
+            "C1" => Self::C1,
+            "C2" => Self::C2,
+            "C3" => Self::C3,
+            _ => Self::A1,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LibraryViewMode {
     #[default]
@@ -327,6 +391,7 @@ impl ReaderSpacing {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReaderSettings {
     pub language: AppLanguage,
+    pub english_level: EnglishLevel,
     pub library_view_mode: LibraryViewMode,
     pub theme: ReaderTheme,
     pub background: ReaderBackground,
@@ -356,6 +421,7 @@ impl Default for ReaderSettings {
     fn default() -> Self {
         Self {
             language: AppLanguage::Chinese,
+            english_level: EnglishLevel::default(),
             library_view_mode: LibraryViewMode::List,
             theme: ReaderTheme::Dark,
             background: ReaderBackground::Paper,
@@ -421,6 +487,17 @@ impl ReaderSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn english_levels_use_stable_cefr_codes_and_default_to_a1() {
+        let codes = EnglishLevel::ALL.map(EnglishLevel::as_str);
+        assert_eq!(codes, ["A1", "A2", "B1", "B2", "C1", "C2", "C3"]);
+        for level in EnglishLevel::ALL {
+            assert_eq!(EnglishLevel::from_str(level.as_str()), level);
+        }
+        assert_eq!(EnglishLevel::from_str("unknown"), EnglishLevel::A1);
+        assert_eq!(ReaderSettings::default().english_level, EnglishLevel::A1);
+    }
 
     #[test]
     fn reader_columns_round_trip_and_unknown_defaults_to_auto() {

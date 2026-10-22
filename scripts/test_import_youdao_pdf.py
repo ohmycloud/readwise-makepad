@@ -59,6 +59,21 @@ class PdfImportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "row accounting mismatch"):
                 parse_pdf(path)
 
+    def test_legacy_database_preview_does_not_create_custom_table_and_apply_backfills_it(self):
+        connection = sqlite3.connect(":memory:", isolation_level=None)
+        self.addCleanup(connection.close)
+        connection.executescript((ROOT / "core/src/schema.sql").read_text())
+        connection.execute("DROP TABLE custom_words")
+        grouped = group_entries([Entry("a.pdf", 1, 1, "forests", "", "n.森林")])
+        preview, _ = import_entries(connection, grouped, False)
+        self.assertEqual(preview["new_custom_words"], 1)
+        self.assertEqual(connection.execute("PRAGMA table_info(custom_words)").fetchall(), [])
+        connection.execute("BEGIN IMMEDIATE")
+        actual, _ = import_entries(connection, grouped, True)
+        connection.commit()
+        self.assertEqual(preview, actual)
+        self.assertEqual(connection.execute("SELECT lemma,gloss,source FROM custom_words").fetchall(), [("forest", "森林", "youdao")])
+
     def test_import_preserves_progress_fills_missing_glosses_and_is_idempotent(self):
         connection = sqlite3.connect(":memory:", isolation_level=None)
         self.addCleanup(connection.close)
@@ -98,6 +113,10 @@ class PdfImportTests(unittest.TestCase):
         self.assertEqual(preview, actual)
         self.assertEqual(actual["new_words"], 4)
         self.assertEqual(actual["filled_glosses"], 1)
+        self.assertEqual(actual["new_custom_words"], len(grouped))
+        self.assertEqual(connection.execute("SELECT count(*) FROM custom_words").fetchone()[0], len(grouped))
+        self.assertEqual(connection.execute("SELECT gloss,source FROM custom_words WHERE lemma='hollow'").fetchone(), ("空心的", "youdao"))
+        self.assertEqual(connection.execute("SELECT source FROM custom_words WHERE lemma='sacred'").fetchone(), ("youdao",))
         self.assertEqual(
             preserved,
             connection.execute(
@@ -128,6 +147,8 @@ class PdfImportTests(unittest.TestCase):
         self.assertEqual(repeated["new_words"], 0)
         self.assertEqual(repeated["filled_glosses"], 0)
         self.assertEqual(repeated["new_reader_glosses"], 0)
+        self.assertEqual(repeated["new_custom_words"], 0)
+        self.assertEqual(repeated["filled_custom_glosses"], 0)
 
 
 if __name__ == "__main__":

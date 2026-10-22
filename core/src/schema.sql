@@ -216,5 +216,13 @@ CREATE TABLE IF NOT EXISTS vocab_book (
     updated_at INTEGER NOT NULL
 );
 
+-- C3 membership is separate from lexical difficulty and review progress.
+CREATE TABLE IF NOT EXISTS custom_words (
+    lemma TEXT PRIMARY KEY,
+    gloss TEXT,
+    source TEXT NOT NULL DEFAULT 'youdao',
+    created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_vocab_book_status ON vocab_book(status);
 CREATE INDEX IF NOT EXISTS idx_vocab_book_created ON vocab_book(created_at DESC);

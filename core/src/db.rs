@@ -24,8 +24,8 @@ struct DefaultSkill {
     is_active: bool,
 }
 
-/// 1 = 老 Tauri 版基线；2 = app_settings + book_notes 归一化高亮位置列。
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+/// 1 = 老 Tauri 版基线；2 = app_settings + book_notes 高亮位置；3 = C3 词库。
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
     (
@@ -146,6 +146,7 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
     ("book_words", &["book_id", "lemma", "context_sentence"]),
     ("book_glosses", &["book_id", "lemma", "gloss", "created_at"]),
     ("known_words", &["lemma", "source", "created_at"]),
+    ("custom_words", &["lemma", "gloss", "source", "created_at"]),
     (
         "vocab_book",
         &[
@@ -403,6 +404,9 @@ impl Db {
                     "reader.language" => {
                         settings.language = crate::settings::AppLanguage::from_str(&value)
                     }
+                    "reader.english_level" => {
+                        settings.english_level = crate::settings::EnglishLevel::from_str(&value)
+                    }
                     "reader.library_view_mode" => {
                         settings.library_view_mode =
                             crate::settings::LibraryViewMode::from_str(&value)
@@ -505,6 +509,7 @@ impl Db {
             let highlight_color_slot = settings.highlight_color_slot.to_string();
             let values = [
                 ("reader.language", language),
+                ("reader.english_level", settings.english_level.as_str()),
                 ("reader.library_view_mode", library_view_mode),
                 ("reader.theme", theme),
                 ("reader.background", background),
@@ -812,39 +817,68 @@ impl Db {
         ))
     }
 
-    /// 注音上下文：全局释义 +（可选）本书语境释义覆盖，以及已认识词集合。
+    /// 注音上下文：常规词库与 C3 导入词库分开；已认识词在两种模式下均排除。
     pub fn gloss_context(
         &self,
         book_id: Option<&str>,
     ) -> Result<
         (
-            std::collections::HashMap<String, String>,
+            vocab::reader_lexicon::ReaderLexicon,
             std::collections::HashSet<String>,
         ),
         String,
     > {
         self.rt.block_on(async {
+            use vocab::reader_lexicon::ReaderLexicon;
+            let custom = sqlx::query("SELECT lemma, gloss FROM custom_words")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| format!("读取自定义词库失败: {e}"))?;
+            let mut lexicon = ReaderLexicon::builtin();
+            let mut custom_members = HashSet::new();
+            for row in custom {
+                let lemma: String = row.get("lemma");
+                let gloss: Option<String> = row.get("gloss");
+                let gloss = gloss
+                    .filter(|g| !g.trim().is_empty())
+                    .or_else(|| lexicon.standard.get(&lemma).cloned());
+                custom_members.insert(lemma.clone());
+                if let Some(gloss) = gloss {
+                    lexicon.custom.insert(lemma, gloss);
+                }
+            }
             let rows = sqlx::query("SELECT lemma, gloss FROM word_glosses")
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| format!("读取全局释义失败: {}", e))?;
-            let mut glosses: std::collections::HashMap<String, String> = rows
-                .iter()
-                .map(|r| {
-                    use sqlx::Row;
-                    (r.get("lemma"), r.get("gloss"))
-                })
-                .collect();
+            for row in rows {
+                let lemma: String = row.get("lemma");
+                let gloss: String = row.get("gloss");
+                if gloss.trim().is_empty() {
+                    continue;
+                }
+                // Imported-only words belong to C3, but overlap with the
+                // built-in dictionary remains available at normal levels.
+                if !custom_members.contains(&lemma) || ReaderLexicon::is_builtin(&lemma) {
+                    lexicon.standard.insert(lemma.clone(), gloss.clone());
+                }
+                if custom_members.contains(&lemma) {
+                    lexicon.custom.entry(lemma).or_insert(gloss);
+                }
+            }
             if let Some(id) = book_id {
                 for g in vocab::get_book_glosses(&self.pool, id).await? {
-                    glosses.insert(g.lemma, g.gloss);
+                    if lexicon.custom.contains_key(&g.lemma) {
+                        lexicon.custom.insert(g.lemma.clone(), g.gloss.clone());
+                    }
+                    lexicon.standard.insert(g.lemma, g.gloss);
                 }
             }
             let known: std::collections::HashSet<String> = vocab::get_known_words(&self.pool)
                 .await?
                 .into_iter()
                 .collect();
-            Ok((glosses, known))
+            Ok((lexicon, known))
         })
     }
 }
@@ -1056,6 +1090,75 @@ async fn initialize_default_skills(pool: &SqlitePool) -> Result<(), String> {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn custom_import_membership_is_independent_of_difficulty_and_known_status() {
+        use crate::settings::EnglishLevel;
+        let (rt, pool) = runtime_and_pool();
+        rt.block_on(initialize_schema(&pool)).unwrap();
+        rt.block_on(async {
+            sqlx::query("INSERT INTO custom_words VALUES ('forest','自定义森林','youdao',1), ('customonly','自定义词','youdao',1), ('emptyword',NULL,'youdao',1)")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO word_glosses VALUES ('customonly','旧全局释义',5,1), ('solitude','孤独',3,1)")
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO known_words VALUES ('forest','marked',1)")
+                .execute(&pool).await.unwrap();
+        });
+        let db = Db {
+            rt,
+            pool,
+            data_dir: Default::default(),
+        };
+        let (lexicon, known) = db.gloss_context(None).unwrap();
+        assert!(known.contains("forest"));
+        assert_eq!(
+            lexicon.select(EnglishLevel::C3).get("forest").unwrap(),
+            "自定义森林"
+        );
+        assert!(lexicon.select(EnglishLevel::C3).contains_key("customonly"));
+        assert!(!lexicon.select(EnglishLevel::A1).contains_key("customonly"));
+        assert!(!lexicon.select(EnglishLevel::C3).contains_key("solitude"));
+        let html = vocab::annotate::annotate_html(
+            "<p>forest customonly solitude.</p>",
+            &lexicon.select(EnglishLevel::C3),
+            &known,
+        );
+        assert!(!html.contains("<ruby>forest"));
+        assert!(html.contains("<ruby>customonly"));
+        assert!(!html.contains("<ruby>solitude"));
+    }
+
+    #[test]
+    fn english_levels_persist_and_missing_or_invalid_values_default_to_a1() {
+        use crate::settings::{AppLanguage, EnglishLevel};
+        let (rt, pool) = runtime_and_pool();
+        rt.block_on(initialize_schema(&pool)).unwrap();
+        let db = Db {
+            rt,
+            pool,
+            data_dir: std::path::PathBuf::new(),
+        };
+        let mut settings = db.load_reader_settings().unwrap();
+        assert_eq!(settings.english_level, EnglishLevel::A1);
+        settings.language = AppLanguage::English;
+        for level in EnglishLevel::ALL {
+            settings.english_level = level;
+            db.save_reader_settings(&settings).unwrap();
+            assert_eq!(db.load_reader_settings().unwrap(), settings);
+        }
+        db.rt
+            .block_on(
+                sqlx::query(
+                    "UPDATE app_settings SET value = 'invalid' WHERE key = 'reader.english_level'",
+                )
+                .execute(&db.pool),
+            )
+            .unwrap();
+        assert_eq!(
+            db.load_reader_settings().unwrap().english_level,
+            EnglishLevel::A1
+        );
+    }
 
     #[test]
     fn reader_turn_modes_persist_without_changing_columns_and_default_to_curl() {

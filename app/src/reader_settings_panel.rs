@@ -260,25 +260,20 @@ pub fn font_option_ids() -> [LiveId; 14] {
     ]
 }
 
-/// A separate scrollable font menu must also fit short landscape viewports.
+/// Always unfold below the field, independent of the selected font. In short
+/// viewports shrink the scroll viewport, never flip the menu above the field.
 pub fn font_menu_rect(size: DVec2, insets: SafeAreaInsets, input: Rect) -> Rect {
     let left = insets.left + 12.0;
     let right = (size.x - insets.right - 12.0).max(left + 1.0);
     let top = insets.top + 12.0;
     let bottom = (size.y - insets.bottom - 12.0).max(top + 1.0);
     let width = 180.0_f64.min(right - left);
-    let below = (bottom - input.pos.y - input.size.y - 4.0).max(1.0);
-    let above = (input.pos.y - 4.0 - top).max(1.0);
-    let down = below >= 100.0 || below >= above;
-    let height = 264.0_f64.min(if down { below } else { above });
+    let menu_top = input.pos.y + input.size.y + 4.0;
+    let height = 264.0_f64.min((bottom - menu_top).max(1.0));
     Rect {
         pos: dvec2(
             (input.pos.x + input.size.x - width).clamp(left, right - width),
-            if down {
-                input.pos.y + input.size.y + 4.0
-            } else {
-                input.pos.y - 4.0 - height
-            },
+            menu_top,
         ),
         size: dvec2(width, height),
     }
@@ -603,10 +598,27 @@ mod tests {
                     size: dvec2(180.0, 32.0),
                 },
             );
-            assert!(r.pos.y >= 12.0 && r.pos.y + r.size.y <= 358.0);
+            assert_eq!(r.pos.y, y + 32.0 + 4.0);
+            assert!(r.pos.y + r.size.y <= 358.0);
             assert!(r.pos.x >= 56.0 && r.pos.x + r.size.x <= 788.0);
             assert!(r.size.y < 14.0 * 44.0); // overflowing options belong in the scroll view
         }
+    }
+
+    #[test]
+    fn every_native_dropdown_unfolds_below_input_not_selected_item() {
+        let source = include_str!("app.rs");
+        let mut controls = Vec::new();
+        for block in source.split(" := DropDown{").skip(1) {
+            let properties = block.split("labels:").next().unwrap();
+            assert!(
+                properties
+                    .contains("popup_menu_position: mod.widgets.PopupMenuPosition.BelowInput"),
+                "every dropdown must opt out of Makepad's OnSelected default"
+            );
+            controls.push(properties);
+        }
+        assert_eq!(controls.len(), 4, "audit newly added dropdowns too");
     }
 
     #[test]

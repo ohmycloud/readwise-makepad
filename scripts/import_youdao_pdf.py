@@ -264,7 +264,8 @@ def import_entries(
     connection: sqlite3.Connection, grouped: dict[str, list[Entry]], apply: bool
 ) -> tuple[dict, list[dict]]:
     counts = dict(
-        new_words=0, filled_glosses=0, unchanged_words=0, new_reader_glosses=0
+        new_words=0, filled_glosses=0, unchanged_words=0, new_reader_glosses=0,
+        new_custom_words=0, filled_custom_glosses=0,
     )
     existing = {
         r[0]: r[1] for r in connection.execute("SELECT lemma, gloss FROM vocab_book")
@@ -273,6 +274,15 @@ def import_entries(
     reader_glosses = {
         r[0] for r in connection.execute("SELECT lemma FROM word_glosses")
     }
+    # Older databases have no provenance for previous Youdao imports. Re-import
+    # adds C3 membership without relabelling difficulty or resetting progress.
+    has_custom = bool(connection.execute("PRAGMA table_info(custom_words)").fetchall())
+    custom = dict(connection.execute("SELECT lemma, gloss FROM custom_words")) if has_custom else {}
+    if apply and not has_custom:
+        connection.execute(
+            "CREATE TABLE custom_words (lemma TEXT PRIMARY KEY, gloss TEXT, "
+            "source TEXT NOT NULL DEFAULT 'youdao', created_at INTEGER NOT NULL)"
+        )
     now = time.time_ns() // 1_000_000
     outcomes = []
     for lemma, entries in grouped.items():
@@ -324,6 +334,17 @@ def import_entries(
             if re.fullmatch(r"[a-z]+(?:['-][a-z]+)*", lemma)
             else None
         )
+        if lemma not in custom:
+            counts["new_custom_words"] += 1
+            if apply:
+                connection.execute(
+                    "INSERT INTO custom_words (lemma,gloss,source,created_at) VALUES (?,?,'youdao',?)",
+                    (lemma, brief, now),
+                )
+        elif not (custom[lemma] or "").strip() and brief:
+            counts["filled_custom_glosses"] += 1
+            if apply:
+                connection.execute("UPDATE custom_words SET gloss=? WHERE lemma=?", (brief, lemma))
         if brief and lemma not in reader_glosses:
             counts["new_reader_glosses"] += 1
             if apply:

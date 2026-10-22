@@ -29,6 +29,7 @@ use std::time::Instant;
 
 type AiSettings = readwise_core::ai::AiSettings;
 type AppLanguage = readwise_core::settings::AppLanguage;
+type EnglishLevel = readwise_core::settings::EnglishLevel;
 type LibraryViewMode = readwise_core::settings::LibraryViewMode;
 type LocalAiSettings = readwise_core::local_ai::LocalAiSettings;
 type LocalAiSession = readwise_core::local_ai::LocalAiSession;
@@ -2683,6 +2684,31 @@ static READER_CONTENT_VERSION: AtomicU64 = AtomicU64::new(0);
 static APP_LANGUAGE: LazyLock<RwLock<AppLanguage>> =
     LazyLock::new(|| RwLock::new(AppLanguage::Chinese));
 
+static ENGLISH_LEVEL: LazyLock<RwLock<EnglishLevel>> =
+    LazyLock::new(|| RwLock::new(EnglishLevel::default()));
+
+fn english_level_labels(language: AppLanguage) -> Vec<String> {
+    [
+        "english_level_a1",
+        "english_level_a2",
+        "english_level_b1",
+        "english_level_b2",
+        "english_level_c1",
+        "english_level_c2",
+        "english_level_c3",
+    ]
+    .map(|key| crate::i18n::text(language, key).to_string())
+    .to_vec()
+}
+
+fn english_level_menu_width(size: DVec2, safe: SafeAreaInsets) -> f64 {
+    if size.x > 0.0 {
+        (size.x - safe.left - safe.right - 48.0).clamp(1.0, 180.0)
+    } else {
+        180.0
+    }
+}
+
 fn app_language() -> AppLanguage {
     *APP_LANGUAGE.read().unwrap()
 }
@@ -3195,6 +3221,8 @@ struct OpenBook {
     /// 直接缓存 PortalList 所需的块，避免每次设置刷新或旋转恢复都重新 split_blocks。
     glossed_chapter_chunks: Vec<Option<Vec<String>>>,
     glosses: HashMap<String, String>,
+    lexicon: readwise_core::vocab::reader_lexicon::ReaderLexicon,
+    english_level: EnglishLevel,
     known_words: HashSet<String>,
     /// EPUB navigation entries, including anchors within a spine document.
     toc: Vec<readwise_core::books::epub_meta::TocEntry>,
@@ -3203,6 +3231,19 @@ struct OpenBook {
 }
 
 impl OpenBook {
+    fn set_english_level(&mut self, level: EnglishLevel) -> bool {
+        if self.english_level == level {
+            return false;
+        }
+        self.english_level = level;
+        self.glosses = self.lexicon.select(level);
+        // A deliberate level switch changes annotation geometry. This is NOT
+        // the mark-known path, which retains every visited chapter's ruby slots.
+        self.glossed_chapter_chunks.fill(None);
+        READER_BOOK_PAGINATION_REVISION.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
     fn chapter_chunks(&mut self, idx: usize, gloss_enabled: bool) -> Option<Vec<String>> {
         let raw = self.chapters.get(idx)?;
         if !gloss_enabled || self.glosses.is_empty() {
@@ -3393,6 +3434,8 @@ mod lazy_gloss_tests {
                 ("solitude".to_string(), "孤独".to_string()),
                 ("murmur".to_string(), "低语".to_string()),
             ]),
+            lexicon: Default::default(),
+            english_level: EnglishLevel::A1,
             known_words: HashSet::new(),
             toc: Vec::new(),
             highlights: HashMap::new(),
@@ -3471,6 +3514,59 @@ mod lazy_gloss_tests {
         // Old image-reader page bookmarks still address the same original page.
         assert_eq!(ReaderLocation::decode("v3:1:0:0", 2).chapter, 1);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn proficiency_switches_rebuild_visited_and_background_chunks_consistently() {
+        use readwise_core::vocab::reader_lexicon::ReaderLexicon;
+        let mut book = book();
+        book.chapters = vec!["<p>forest murmur solitude vigil abjure.</p>".into(); 2];
+        book.lexicon = ReaderLexicon::builtin();
+        book.lexicon.custom = HashMap::from([("forest".into(), "森林".into())]);
+        book.glosses = book.lexicon.select(EnglishLevel::A1);
+        let raw = book.chapters.clone();
+        let first = book.chapter_chunks(0, true).unwrap();
+        let _ = book.chapter_chunks(1, true).unwrap();
+        assert!(!book.set_english_level(EnglishLevel::A1));
+        assert_eq!(book.glossed_chapter_chunks[0].as_ref(), Some(&first));
+        assert!(book.set_english_level(EnglishLevel::B2));
+        assert!(book.glossed_chapter_chunks.iter().all(Option::is_none));
+        let b2 = book.chapter_chunks(0, true).unwrap();
+        assert!(b2.join("").contains("<ruby>vigil"));
+        assert!(!b2.join("").contains("<ruby>solitude"));
+        for index in 0..2 {
+            let prepared = pagination_chapter_chunks(
+                &raw[index],
+                book.glossed_chapter_chunks[index].clone(),
+                true,
+                &book.glosses,
+                &book.known_words,
+            );
+            assert_eq!(book.chapter_chunks(index, true).unwrap(), prepared);
+        }
+        assert!(book.set_english_level(EnglishLevel::C3));
+        let custom = book.chapter_chunks(0, true).unwrap();
+        assert_eq!(custom.join("").matches("<ruby>").count(), 1);
+        assert!(custom.join("").contains("<ruby>forest"));
+        book.mark_word_known("forest");
+        let silent = book.chapter_chunks(0, true).unwrap();
+        assert!(silent.join("").contains(&format!(
+            "<ruby>forest{}</ruby>",
+            readwise_core::vocab::annotate::RUBY_SEP
+        )));
+        assert_eq!(
+            readwise_core::vocab::annotate::rendered_text(&custom.join("")),
+            readwise_core::vocab::annotate::rendered_text(&silent.join(""))
+        );
+        assert!(!book.set_english_level(EnglishLevel::C3));
+        assert_eq!(book.chapter_chunks(0, true).unwrap(), silent);
+        assert!(book.set_english_level(EnglishLevel::A1));
+        assert!(!book
+            .chapter_chunks(1, true)
+            .unwrap()
+            .join("")
+            .contains("<ruby>forest"));
+        assert_eq!(book.chapters, raw);
     }
 
     #[test]
@@ -4443,10 +4539,12 @@ fn spawn_open_book(item: ShelfItem) {
             .get()
             .and_then(|db| db.get_bookmarks(&item.id).ok())
             .unwrap_or_default();
-        let (glosses, known_words) = DB
+        let (lexicon, known_words) = DB
             .get()
             .and_then(|db| db.gloss_context(Some(&item.id)).ok())
             .unwrap_or_default();
+        let english_level = *ENGLISH_LEVEL.read().unwrap();
+        let glosses = lexicon.select(english_level);
         let gloss_count = glosses.len();
         let mut book = OpenBook {
             id: item.id,
@@ -4457,6 +4555,8 @@ fn spawn_open_book(item: ShelfItem) {
             figure_targets,
             toc: loaded.toc,
             glosses,
+            lexicon,
+            english_level,
             known_words,
             highlights,
         };
@@ -4473,7 +4573,11 @@ fn spawn_open_book(item: ShelfItem) {
         {
             return;
         }
-        *CURRENT_BOOK.write().unwrap() = Some(book);
+        let mut current = CURRENT_BOOK.write().unwrap();
+        // The reader may change level while EPUB/DB work is in flight.
+        book.set_english_level(*ENGLISH_LEVEL.read().unwrap());
+        *current = Some(book);
+        drop(current);
         drop(requested_item);
         Cx::post_action(ReaderAction::Opened {
             request_id,
@@ -4558,6 +4662,8 @@ mod highlight_overlap_tests {
             figure_targets: Vec::new(),
             glossed_chapter_chunks: Vec::new(),
             glosses: HashMap::new(),
+            lexicon: Default::default(),
+            english_level: EnglishLevel::A1,
             known_words: HashSet::new(),
             toc: Vec::new(),
             highlights: HashMap::from([(
@@ -5283,7 +5389,8 @@ fn reader_colour_panel_blocks_event(panel_open: bool, event: &Event) -> bool {
 
 /// Page geometry is independent of scene/annotation paints and UI preferences.
 fn reader_settings_change_requires_layout(current: &ReaderSettings, next: &ReaderSettings) -> bool {
-    current.font != next.font
+    current.english_level != next.english_level
+        || current.font != next.font
         || current.font_size != next.font_size
         || current.bold_text != next.bold_text
         || current.spacing != next.spacing
@@ -5364,6 +5471,60 @@ mod customise_highlight_tests {
             next.language = AppLanguage::English;
             next.library_view_mode = LibraryViewMode::Grid;
             assert!(!reader_settings_change_requires_layout(&current, &next));
+        }
+    }
+
+    #[test]
+    fn english_level_dropdown_labels_keep_all_seven_levels_in_storage_order() {
+        let chinese = english_level_labels(AppLanguage::Chinese);
+        assert_eq!(
+            chinese,
+            [
+                "A1-入门",
+                "A2-初级",
+                "B1-中级",
+                "B2-中高级",
+                "C1-高级",
+                "C2-精通",
+                "C3-自定义"
+            ]
+        );
+        for language in [AppLanguage::Chinese, AppLanguage::English] {
+            let labels = english_level_labels(language);
+            assert_eq!(labels.len(), EnglishLevel::ALL.len());
+            for (label, level) in labels.iter().zip(EnglishLevel::ALL) {
+                assert!(label.starts_with(level.as_str()));
+            }
+            assert!(!crate::i18n::text(language, "english_level").contains("CEFR"));
+        }
+    }
+
+    #[test]
+    fn english_level_dropdown_menu_fits_narrow_safe_viewports() {
+        assert_eq!(
+            english_level_menu_width(dvec2(320.0, 568.0), SafeAreaInsets::default()),
+            180.0
+        );
+        let safe = SafeAreaInsets {
+            left: 44.0,
+            right: 44.0,
+            top: 0.0,
+            bottom: 20.0,
+        };
+        assert_eq!(english_level_menu_width(dvec2(844.0, 390.0), safe), 180.0);
+        assert_eq!(english_level_menu_width(dvec2(300.0, 568.0), safe), 164.0);
+    }
+
+    #[test]
+    fn english_level_changes_invalidate_layout_only_when_level_changes() {
+        let current = ReaderSettings::default();
+        for level in EnglishLevel::ALL {
+            let mut next = current.clone();
+            next.english_level = level;
+            assert_eq!(
+                reader_settings_change_requires_layout(&current, &next),
+                level != current.english_level
+            );
         }
     }
 
@@ -5522,6 +5683,7 @@ fn current_reader_settings() -> ReaderSettings {
 
     ReaderSettings {
         language: *APP_LANGUAGE.read().unwrap(),
+        english_level: *ENGLISH_LEVEL.read().unwrap(),
         library_view_mode: *LIBRARY_VIEW_MODE.read().unwrap(),
         theme: *READER_THEME.read().unwrap(),
         background: *READER_BACKGROUND.read().unwrap(),
@@ -6856,6 +7018,7 @@ script_mod! {
                                         draw_text.text_style.font_size: 9
                                     }
                                     library_tag_filter := DropDown{
+                                        popup_menu_position: mod.widgets.PopupMenuPosition.BelowInput
                                         width: 180 height: 32
                                         // DropDown defaults to TopLeft for Fit height.
                                         // Center the label within our fixed-height field.
@@ -8116,6 +8279,29 @@ script_mod! {
                                 language_chinese := RadioButtonTabFlat{text: "中文"}
                                 language_english := RadioButtonTabFlat{text: "英文"}
                             }
+                            english_level_section := View{
+                                width: Fill height: Fit
+                                flow: Down spacing: 8
+                                english_level_row := View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 12
+                                    align: Align{y: 0.5}
+                                    english_level_label := Label{text: "英文水平"}
+                                    english_level_choice := DropDown{
+                                        popup_menu_position: mod.widgets.PopupMenuPosition.BelowInput
+                                        width: Fill{max: 180} height: 32
+                                        align: Align{x: 0.0 y: 0.5}
+                                        padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
+                                        labels: ["A1-入门", "A2-初级", "B1-中级", "B2-中高级", "C1-高级", "C2-精通", "C3-自定义"]
+                                    }
+                                }
+                                english_level_hint := Label{
+                                    width: Fill height: Fit
+                                    text: "水平越高，注音越少；C3 仅注音有道导入词。已认识词不注音。"
+                                    draw_text.color: theme.color_label_inner_inactive
+                                    draw_text.text_style.font_size: 9
+                                }
+                            }
                             theme_row := View{
                                 width: Fill height: Fit
                                 flow: Right spacing: 12
@@ -8164,6 +8350,7 @@ script_mod! {
                                 align: Align{y: 0.5}
                                 font_family_label := Label{text: "正文字体"}
                                 reader_font_choice := DropDown{
+                                    popup_menu_position: mod.widgets.PopupMenuPosition.BelowInput
                                     width: 190 height: 32
                                     align: Align{x: 0.0 y: 0.5}
                                     padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
@@ -15327,6 +15514,7 @@ impl ReaderControls<'_> {
             id!(reader_turn_scroll),
             id!(reader_background_theme),
             id!(reader_font_choice),
+            id!(english_level_choice),
             id!(reader_spacing_default),
             id!(reader_spacing_comfortable),
             id!(reader_spacing_relaxed),
@@ -15335,6 +15523,22 @@ impl ReaderControls<'_> {
         ] {
             apply_library_control_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
+        apply_reader_dropdown_popup_palette(
+            cx,
+            self.ui.widget(cx, ids!(english_level_choice)),
+            palette,
+            english_level_menu_width(
+                cx.display_context.screen_size,
+                cx.display_context.safe_area_insets,
+            ),
+            24.0,
+            Inset {
+                left: 15.0,
+                right: 3.0,
+                top: 3.0,
+                bottom: 3.0,
+            },
+        );
         apply_reader_dropdown_popup_palette(
             cx,
             self.ui.widget(cx, ids!(reader_font_choice)),
@@ -15779,6 +15983,18 @@ impl App {
 }
 
 impl ReaderControls<'_> {
+    fn sync_english_level_controls(&self, cx: &mut Cx, level: EnglishLevel) {
+        let choice = self.ui.drop_down(cx, ids!(english_level_choice));
+        choice.set_labels(cx, english_level_labels(app_language()));
+        choice.set_selected_item(
+            cx,
+            EnglishLevel::ALL
+                .iter()
+                .position(|candidate| *candidate == level)
+                .unwrap_or(0),
+        );
+    }
+
     fn sync_app_language_controls(&self, cx: &mut Cx, language: AppLanguage) {
         self.ui.radio_button(cx, ids!(language_chinese)).set_active(
             cx,
@@ -16052,6 +16268,11 @@ impl ReaderControls<'_> {
         set_text!(language_label, "language");
         set_text!(language_chinese, "chinese");
         set_text!(language_english, "english");
+        set_text!(english_level_label, "english_level");
+        self.ui
+            .drop_down(cx, ids!(english_level_choice))
+            .set_labels(cx, english_level_labels(language));
+        set_text!(english_level_hint, "english_level_hint");
         set_text!(theme_label, "appearance_theme");
         set_text!(theme_dark, "dark");
         set_text!(theme_light, "light");
@@ -18387,6 +18608,10 @@ impl App {
         let scene_changed = *READER_THEME.read().unwrap() != settings.theme
             || *READER_BACKGROUND.read().unwrap() != settings.background;
         *APP_LANGUAGE.write().unwrap() = settings.language;
+        *ENGLISH_LEVEL.write().unwrap() = settings.english_level;
+        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+            book.set_english_level(settings.english_level);
+        }
         *LIBRARY_VIEW_MODE.write().unwrap() = settings.library_view_mode;
         *READER_THEME.write().unwrap() = settings.theme;
         *READER_BACKGROUND.write().unwrap() = settings.background;
@@ -18438,6 +18663,8 @@ impl App {
         self.sync_reader_turn_controls(cx, settings.turn_mode);
         self.apply_reader_background(cx, settings.background);
         self.sync_app_language_controls(cx, settings.language);
+        self.reader_controls()
+            .sync_english_level_controls(cx, settings.english_level);
         self.apply_ui_language(cx, settings.language);
         self.sync_reader_font_controls(cx, settings.font);
         self.sync_reader_spacing_controls(cx, settings.spacing);
@@ -18453,6 +18680,27 @@ impl App {
         if scene_changed {
             self.apply_runtime_theme(cx, settings.theme);
         }
+    }
+
+    fn set_english_level(&mut self, cx: &mut Cx, level: EnglishLevel) {
+        if *ENGLISH_LEVEL.read().unwrap() == level {
+            self.reader_controls()
+                .sync_english_level_controls(cx, level);
+            return;
+        }
+        *ENGLISH_LEVEL.write().unwrap() = level;
+        let changed = CURRENT_BOOK
+            .write()
+            .unwrap()
+            .as_mut()
+            .is_some_and(|book| book.set_english_level(level));
+        self.reader_controls()
+            .sync_english_level_controls(cx, level);
+        self.close_word_card(cx);
+        if changed {
+            self.refresh_current_chapter(cx);
+        }
+        self.persist_reader_settings(cx);
     }
 
     fn persist_reader_settings(&mut self, cx: &mut Cx) {
@@ -21799,6 +22047,15 @@ impl MatchEvent for App {
                     AppLanguage::English
                 },
             );
+        }
+        if let Some(index) = self
+            .ui
+            .drop_down(cx, ids!(english_level_choice))
+            .selected(actions)
+        {
+            if let Some(level) = EnglishLevel::ALL.get(index).copied() {
+                self.set_english_level(cx, level);
+            }
         }
         if let Some(index) = self
             .ui
