@@ -1,0 +1,126 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-2022
+          - platform: linux
+            runner: ubuntu-22.04
+          - platform: macos-arm64
+            runner: macos-14
+          - platform: macos-x86_64
+            runner: macos-15-intel
+          - platform: android
+            runner: ubuntu-22.04
+          - platform: ios
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate release version
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          version = tomllib.load(open('app/Cargo.toml', 'rb'))['package']['version']
+          ref = os.environ['RELEASE_REF']
+          if ref.startswith('refs/tags/') and ref != 'refs/tags/v' + version:
+              raise SystemExit('Tag must match app/Cargo.toml: v' + version)
+          PY
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake clang pkg-config libssl-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libasound2-dev libpulse-dev libudev-dev
+      - name: Install locked Makepad release tools
+        run: |
+          python3 scripts/install_release_tools.py
+          echo "$GITHUB_WORKSPACE/target/release-tools/installed/bin" >> "$GITHUB_PATH"
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Build Windows
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: ./scripts/package_windows.ps1
+      - name: Build Linux
+        if: matrix.platform == 'linux'
+        run: bash scripts/package_linux.sh
+      - name: Build macOS
+        if: startsWith(matrix.platform, 'macos-')
+        run: bash scripts/package_macos.sh
+      - name: Build Android
+        if: matrix.platform == 'android'
+        run: |
+          cargo makepad android --abi=aarch64 install-toolchain --full-ndk
+          cargo fetch --locked --target aarch64-linux-android
+          bash scripts/package_android.sh
+      - name: Build iOS device IPA
+        if: matrix.platform == 'ios'
+        run: |
+          cargo makepad apple ios install-toolchain
+          cargo fetch --locked --target aarch64-apple-ios
+          bash scripts/package_ios.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            target/dist/*.zip
+            target/dist/*.tar.gz
+            target/dist/*.apk
+            target/dist/*.ipa
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Create checksums and draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat > RELEASE-NOTES.md <<'EOF'
+          ReadWise for Windows x64, Linux x86_64, macOS arm64/x86_64, Android arm64 and iOS arm64.
+
+          Linux requires Ubuntu 22.04 or a compatible runtime with OpenSSL 3, X11/OpenGL and audio libraries.
+          Windows is unsigned; macOS is ad-hoc signed and not notarized.
+          Android APK uses the Makepad development signing key and is for testing.
+          iOS IPA is an unsigned device build; sign with your Apple certificate and provisioning profile before installation. It is not an App Store/TestFlight upload.
+          Verify downloads with SHA256SUMS.txt.
+          EOF
+          gh release create "$RELEASE_TAG" --draft --title "ReadWise $RELEASE_TAG" --notes-file RELEASE-NOTES.md
+          gh release upload "$RELEASE_TAG" ./*.zip ./*.tar.gz ./*.apk ./*.ipa SHA256SUMS.txt --clobber
