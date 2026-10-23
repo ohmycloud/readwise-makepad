@@ -388,6 +388,32 @@ impl ReaderSpacing {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderTextWidth {
+    Narrow,
+    #[default]
+    Even,
+    Wide,
+}
+
+impl ReaderTextWidth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Narrow => "narrow",
+            Self::Even => "even",
+            Self::Wide => "wide",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "narrow" => Self::Narrow,
+            "wide" => Self::Wide,
+            _ => Self::Even,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReaderSettings {
     pub language: AppLanguage,
@@ -405,6 +431,8 @@ pub struct ReaderSettings {
     /// Percentage adjustment to the default reader margin, from -10 to 10.
     pub margin: f32,
     pub justify_text: bool,
+    pub text_width: ReaderTextWidth,
+    pub indent_paragraphs: bool,
     pub font_size: Option<f32>,
     pub gloss_enabled: bool,
     pub gloss_font_size: f32,
@@ -434,6 +462,8 @@ impl Default for ReaderSettings {
             word_spacing: 0.0,
             margin: 0.0,
             justify_text: false,
+            text_width: ReaderTextWidth::Even,
+            indent_paragraphs: false,
             font_size: None,
             gloss_enabled: true,
             gloss_font_size: 7.5,
@@ -477,6 +507,31 @@ impl ReaderSettings {
         self.selection_color_slot = self.selection_color_slot.min(7);
         self.highlight_color_slot = self.highlight_color_slot.min(7);
         self
+    }
+
+    /// Reset only the Text tab; appearance, annotations and other preferences stay intact.
+    pub fn reset_text(&mut self) {
+        let default = Self::default();
+        self.font = default.font;
+        self.font_size = default.font_size;
+        self.bold_text = default.bold_text;
+        self.spacing = default.spacing;
+        self.text_width = default.text_width;
+        self.justify_text = default.justify_text;
+        self.indent_paragraphs = default.indent_paragraphs;
+        self.columns = default.columns;
+        self.character_spacing = default.character_spacing;
+        self.word_spacing = default.word_spacing;
+        self.margin = default.margin;
+    }
+
+    pub fn text_margin_pixels(width: ReaderTextWidth, margin_percent: f32) -> f32 {
+        let base = match width {
+            ReaderTextWidth::Narrow => 52.0,
+            ReaderTextWidth::Even => 28.0,
+            ReaderTextWidth::Wide => 16.0,
+        };
+        base * (1.0 + margin_percent.clamp(-10.0, 10.0) / 100.0)
     }
 
     pub fn margin_pixels(margin_percent: f32) -> f32 {
@@ -627,6 +682,49 @@ mod tests {
         );
         assert_eq!(ReaderSpacing::Default.plain_line_spacing(), 1.55);
         assert_eq!(ReaderSpacing::from_value(9.0).plain_line_spacing(), 2.5);
+    }
+
+    #[test]
+    fn text_width_presets_round_trip_and_reset_does_not_touch_other_tabs() {
+        for width in [
+            ReaderTextWidth::Narrow,
+            ReaderTextWidth::Even,
+            ReaderTextWidth::Wide,
+        ] {
+            assert_eq!(ReaderTextWidth::from_str(width.as_str()), width);
+        }
+        assert_eq!(ReaderTextWidth::from_str("unknown"), ReaderTextWidth::Even);
+        assert!(
+            ReaderSettings::text_margin_pixels(ReaderTextWidth::Narrow, 0.0)
+                > ReaderSettings::text_margin_pixels(ReaderTextWidth::Even, 0.0)
+        );
+        assert!(
+            ReaderSettings::text_margin_pixels(ReaderTextWidth::Even, 0.0)
+                > ReaderSettings::text_margin_pixels(ReaderTextWidth::Wide, 0.0)
+        );
+        let mut settings = ReaderSettings {
+            background: ReaderBackground::Sage,
+            gloss_enabled: false,
+            gloss_font_size: 9.0,
+            highlight_color_slot: 7,
+            selection_color_slot: 6,
+            text_width: ReaderTextWidth::Narrow,
+            indent_paragraphs: true,
+            justify_text: true,
+            font_size: Some(20.0),
+            spacing: ReaderSpacing::Comfortable,
+            ..ReaderSettings::default()
+        };
+        let mut expected = settings.clone();
+        expected.text_width = ReaderTextWidth::Even;
+        expected.indent_paragraphs = false;
+        expected.justify_text = false;
+        expected.font_size = None;
+        expected.spacing = ReaderSpacing::Default;
+        settings.reset_text();
+        assert_eq!(settings, expected);
+        settings.reset_text();
+        assert_eq!(settings, expected);
     }
 
     #[test]

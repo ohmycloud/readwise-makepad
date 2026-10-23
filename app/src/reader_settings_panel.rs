@@ -281,7 +281,7 @@ pub fn font_menu_rect(size: DVec2, insets: SafeAreaInsets, input: Rect) -> Rect 
 
 /// Only top-level scroll children belong here. Nested colour controls follow
 /// their section owner; enabling annotations must not expose them in other tabs.
-pub fn section_widgets() -> [(LiveId, ReaderSettingsTab); 19] {
+pub fn section_widgets() -> [(LiveId, ReaderSettingsTab); 21] {
     use ReaderSettingsTab::*;
     [
         (id!(reader_customise_theme_section), Theme),
@@ -294,7 +294,9 @@ pub fn section_widgets() -> [(LiveId, ReaderSettingsTab); 19] {
         (id!(reader_customise_word_row), Text),
         (id!(reader_customise_margin_row), Text),
         (id!(reader_customise_columns_row), Text),
-        (id!(reader_customise_justify), Text),
+        (id!(reader_customise_align_row), Text),
+        (id!(reader_customise_paragraph_row), Text),
+        (id!(reader_customise_text_reset), Text),
         (id!(reader_preview), Annotations),
         (id!(reader_customise_gloss_title), Annotations),
         (id!(reader_customise_gloss_enable), Annotations),
@@ -303,6 +305,78 @@ pub fn section_widgets() -> [(LiveId, ReaderSettingsTab); 19] {
         (id!(reader_customise_gloss_bg_row), Annotations),
         (id!(reader_customise_word_color_row), Annotations),
         (id!(reader_customise_word_bg_row), Annotations),
+    ]
+}
+
+/// Stable choices shared by action handling, localization and selected paints.
+#[derive(Clone, Copy, Debug)]
+pub enum TextChoice {
+    Spacing(f32),
+    Width(readwise_core::settings::ReaderTextWidth),
+    Justify(bool),
+    Indent(bool),
+}
+
+impl TextChoice {
+    pub fn selected(self, settings: &readwise_core::settings::ReaderSettings) -> bool {
+        match self {
+            Self::Spacing(value) => (settings.spacing.plain_line_spacing() - value).abs() < 0.005,
+            Self::Width(width) => settings.text_width == width,
+            Self::Justify(justify) => settings.justify_text == justify,
+            Self::Indent(indent) => settings.indent_paragraphs == indent,
+        }
+    }
+
+    pub fn apply(self, settings: &mut readwise_core::settings::ReaderSettings) {
+        match self {
+            Self::Spacing(value) => {
+                settings.spacing = readwise_core::settings::ReaderSpacing::from_value(value)
+            }
+            Self::Width(width) => settings.text_width = width,
+            Self::Justify(justify) => settings.justify_text = justify,
+            Self::Indent(indent) => settings.indent_paragraphs = indent,
+        }
+    }
+}
+
+pub fn text_choices() -> [(LiveId, &'static str, TextChoice); 10] {
+    use readwise_core::settings::ReaderTextWidth::*;
+    use TextChoice::*;
+    [
+        (
+            id!(reader_spacing_snug),
+            "reader_spacing_snug",
+            Spacing(1.3),
+        ),
+        (id!(reader_spacing_even), "reader_text_even", Spacing(1.55)),
+        (
+            id!(reader_spacing_airy),
+            "reader_spacing_airy",
+            Spacing(1.85),
+        ),
+        (
+            id!(reader_width_narrow),
+            "reader_width_narrow",
+            Width(Narrow),
+        ),
+        (id!(reader_width_even), "reader_text_even", Width(Even)),
+        (id!(reader_width_wide), "reader_width_wide", Width(Wide)),
+        (id!(reader_align_left), "reader_align_left", Justify(false)),
+        (
+            id!(reader_align_justified),
+            "reader_align_justified",
+            Justify(true),
+        ),
+        (
+            id!(reader_paragraph_spaced),
+            "reader_paragraph_spaced",
+            Indent(false),
+        ),
+        (
+            id!(reader_paragraph_indented),
+            "reader_paragraph_indented",
+            Indent(true),
+        ),
     ]
 }
 
@@ -681,6 +755,31 @@ mod tests {
     }
 
     #[test]
+    fn text_choices_apply_and_select_exactly_one_option_per_group() {
+        let mut settings = readwise_core::settings::ReaderSettings::default();
+        let choices = text_choices();
+        for (_, key, choice) in choices {
+            for language in [
+                readwise_core::settings::AppLanguage::Chinese,
+                readwise_core::settings::AppLanguage::English,
+            ] {
+                assert_ne!(crate::i18n::text(language, key), key);
+            }
+            choice.apply(&mut settings);
+            assert!(choice.selected(&settings));
+            for group in [&choices[..3], &choices[3..6], &choices[6..8], &choices[8..]] {
+                assert_eq!(
+                    group
+                        .iter()
+                        .filter(|(_, _, choice)| choice.selected(&settings))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_scroll_child_has_exactly_one_section_owner() {
         let mut ids = std::collections::HashSet::new();
         for (id, owner) in section_widgets() {
@@ -689,7 +788,7 @@ mod tests {
                 assert_eq!(section_visible(tab, owner, id, true), tab == owner);
             }
         }
-        assert_eq!(ids.len(), 19);
+        assert_eq!(ids.len(), 21);
     }
 
     #[test]

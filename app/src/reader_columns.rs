@@ -47,7 +47,7 @@ impl ColumnLayout {
             12.0
         };
         let edge = if width < 600.0 {
-            margin.min(24.0)
+            (margin * (24.0 / 28.0)).min(width * 0.15)
         } else {
             margin
         }
@@ -294,6 +294,33 @@ fn page_starts(metrics: &[Option<BlockMetrics>], height: f64) -> (Vec<PageAnchor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn width_presets_change_actual_mobile_and_desktop_text_area() {
+        use readwise_core::settings::{ReaderSettings, ReaderTextWidth};
+        for viewport in [320.0, 390.0, 1100.0] {
+            let widths = [
+                ReaderTextWidth::Narrow,
+                ReaderTextWidth::Even,
+                ReaderTextWidth::Wide,
+            ]
+            .map(|width| {
+                ColumnLayout::resolve_with_margin(
+                    ReaderColumns::One,
+                    viewport,
+                    700.0,
+                    11.0,
+                    1,
+                    ReaderSettings::text_margin_pixels(width, 0.0) as f64,
+                )
+                .width
+            });
+            assert!(
+                widths[0] < widths[1] && widths[1] < widths[2],
+                "{viewport}: {widths:?}"
+            );
+        }
+    }
 
     #[test]
     fn larger_reader_margins_reduce_page_area_without_changing_column_mode() {

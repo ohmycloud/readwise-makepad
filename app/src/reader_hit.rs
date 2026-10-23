@@ -520,6 +520,7 @@ pub fn tracked_html(source: &str) -> Option<String> {
                     | "img"
                     | "a"
                     | "reader_code"
+                    | "reader_indent"
                     | "readeralignon"
                     | "readeralignoff"
             ) {

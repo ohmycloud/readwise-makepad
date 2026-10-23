@@ -438,6 +438,10 @@ impl Db {
                     "reader.margin" => legacy_margin_pixels = value.parse::<f32>().ok(),
                     "reader.margin_percent" => margin_percent = value.parse::<f32>().ok(),
                     "reader.justify_text" => settings.justify_text = value == "1",
+                    "reader.text_width" => {
+                        settings.text_width = crate::settings::ReaderTextWidth::from_str(&value)
+                    }
+                    "reader.indent_paragraphs" => settings.indent_paragraphs = value == "1",
                     "reader.font_size" => settings.font_size = value.parse().ok(),
                     "reader.gloss_enabled" => settings.gloss_enabled = value == "1",
                     "reader.gloss_font_size" => {
@@ -522,6 +526,8 @@ impl Db {
                 ("reader.word_spacing", word_spacing.as_str()),
                 ("reader.margin_percent", margin.as_str()),
                 ("reader.justify_text", justify_text),
+                ("reader.text_width", settings.text_width.as_str()),
+                ("reader.indent_paragraphs", if settings.indent_paragraphs { "1" } else { "0" }),
                 ("reader.font_size", font_size.as_str()),
                 ("reader.gloss_enabled", gloss_enabled),
                 ("reader.gloss_font_size", gloss_font_size.as_str()),
@@ -1269,6 +1275,8 @@ mod migration_tests {
         settings.word_spacing = -0.15;
         settings.margin = 7.0;
         settings.justify_text = true;
+        settings.text_width = crate::settings::ReaderTextWidth::Wide;
+        settings.indent_paragraphs = true;
         for background in [
             crate::settings::ReaderBackground::Quiet,
             crate::settings::ReaderBackground::Sepia,
@@ -1307,6 +1315,8 @@ mod migration_tests {
         };
         let settings = db.load_reader_settings().unwrap();
         assert_eq!(settings.margin, 0.0);
+        assert_eq!(settings.text_width, crate::settings::ReaderTextWidth::Even);
+        assert!(!settings.indent_paragraphs);
         assert_eq!(settings.spacing.plain_line_spacing(), 1.45);
         let mut settings = settings;
         settings.margin = -5.0;

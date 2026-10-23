@@ -24,6 +24,7 @@ mod reader_link;
 mod reader_lists;
 mod reader_page_turn;
 mod reader_paint;
+mod reader_paragraph;
 mod reader_scroll;
 mod reader_selection;
 mod reader_settings_panel;

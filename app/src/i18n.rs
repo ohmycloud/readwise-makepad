@@ -237,7 +237,20 @@ pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
         "reader_accessibility_layout" => {
             choose(english, "辅助阅读与排版", "Accessibility & Layout")
         }
-        "reader_line_spacing" => choose(english, "行间距", "LINE SPACING"),
+        "reader_line_spacing" => choose(english, "行距", "Spacing"),
+        "reader_text_width" => choose(english, "宽度", "Width"),
+        "reader_text_align" => choose(english, "对齐", "Align"),
+        "reader_text_paragraphs" => choose(english, "段落", "Paragraphs"),
+        "reader_text_reset" => choose(english, "↶  重置文本设置", "↶  Reset text settings"),
+        "reader_spacing_snug" => choose(english, "紧凑", "Snug"),
+        "reader_text_even" => choose(english, "适中", "Even"),
+        "reader_spacing_airy" => choose(english, "宽松", "Airy"),
+        "reader_width_narrow" => choose(english, "窄", "Narrow"),
+        "reader_width_wide" => choose(english, "宽", "Wide"),
+        "reader_align_left" => choose(english, "左对齐", "Left"),
+        "reader_align_justified" => choose(english, "两端对齐", "Justified"),
+        "reader_paragraph_spaced" => choose(english, "段间留白", "Spaced"),
+        "reader_paragraph_indented" => choose(english, "首行缩进", "Indented"),
         "reader_character_spacing" => choose(english, "字间距", "CHARACTER SPACING"),
         "reader_word_spacing" => choose(english, "词间距", "WORD SPACING"),
         "reader_margins" => choose(english, "页边距", "MARGINS"),
