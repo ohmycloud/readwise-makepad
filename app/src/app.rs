@@ -8987,10 +8987,9 @@ script_mod! {
                                         text: "Accessibility & Layout"
                                         draw_text.text_style.font_size: 13
                                     }
-                                    reader_customise_bold := CheckBox{text: "Bold Text"}
                                     reader_customise_columns_row := View{
                                         width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
-                                        reader_customise_columns_title := Label{width: Fill text: "Columns" draw_text.text_style.font_size: 13}
+                                        reader_customise_columns_title := Label{width: Fill text: "Columns" draw_text.text_style.font_size: 11}
                                         reader_customise_columns_choice := DropDown{
                                             width: 180 height: 32
                                             align: Align{x: 0.0 y: 0.5}
@@ -9001,6 +9000,15 @@ script_mod! {
                                                 menu_item: mod.widgets.PopupMenuItem{height: 22 padding: Inset{left: 12 right: 8 top: 0 bottom: 0}}
                                             }
                                             labels: ["1", "2", "Auto Set"]
+                                        }
+                                    }
+                                    reader_customise_page_margin_row := View{
+                                        width: Fill height: Fit flow: Down spacing: 6
+                                        reader_customise_page_margin_label := Label{width: Fill text: "页边距"}
+                                        reader_customise_page_margin_controls := View{
+                                            width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                            reader_customise_page_margin_slider := ReaderLayoutSlider{min: -10. max: 10. step: 0. precision: 0}
+                                            reader_customise_page_margin_value := Label{width: 58 text: "0%"}
                                         }
                                     }
                                     reader_customise_character_row := View{
@@ -13664,6 +13672,7 @@ impl App {
             id!(reader_customise_line_row),
             id!(reader_customise_character_row),
             id!(reader_customise_word_row),
+            id!(reader_customise_page_margin_row),
             id!(reader_customise_margin_row),
             id!(reader_customise_columns_row),
         ] {
@@ -13716,6 +13725,8 @@ impl App {
             id!(reader_customise_character_label),
             id!(reader_customise_word_label),
             id!(reader_customise_margin_label),
+            id!(reader_customise_page_margin_label),
+            id!(reader_customise_columns_title),
         ] {
             let mut label = self.ui.widget(cx, &[id]);
             let width = if stacked {
@@ -15143,8 +15154,7 @@ impl ReaderControls<'_> {
         for id in [
             id!(reader_customise_gloss_title),
             id!(reader_customise_layout_title),
-            id!(reader_customise_columns_title),
-            id!(reader_customise_bold),
+            id!(reader_customise_page_margin_value),
             id!(reader_customise_gloss_enable),
             id!(reader_customise_size_value),
             id!(reader_customise_gloss_size_value),
@@ -15154,10 +15164,12 @@ impl ReaderControls<'_> {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
         for id in [
+            id!(reader_customise_columns_title),
             id!(reader_customise_font_label),
             id!(reader_customise_size_label),
             id!(reader_customise_gloss_size_label),
             id!(reader_customise_line_label),
+            id!(reader_customise_page_margin_label),
             id!(reader_customise_character_label),
             id!(reader_customise_word_label),
             id!(reader_customise_margin_label),
@@ -15178,10 +15190,7 @@ impl ReaderControls<'_> {
         let hover = palette.hover;
         let border = palette.border;
         let accent = palette.accent;
-        for id in [
-            id!(reader_customise_bold),
-            id!(reader_customise_gloss_enable),
-        ] {
+        for id in [id!(reader_customise_gloss_enable)] {
             apply_widget_paint(
                 cx,
                 self.ui.widget(cx, &[id]),
@@ -15448,8 +15457,11 @@ impl ReaderControls<'_> {
             .slider(cx, ids!(reader_customise_word_slider))
             .set_value(cx, (word * 100.0).round() as f64);
         self.ui
-            .check_box(cx, ids!(reader_customise_bold))
-            .set_active(cx, settings.bold_text, Animate::No);
+            .label(cx, ids!(reader_customise_page_margin_value))
+            .set_text(cx, &format!("{margin:.0}%"));
+        self.ui
+            .slider(cx, ids!(reader_customise_page_margin_slider))
+            .set_value(cx, margin as f64);
         self.ui
             .check_box(cx, ids!(reader_customise_gloss_enable))
             .set_active(cx, settings.gloss_enabled, Animate::No);
@@ -15911,9 +15923,9 @@ impl ReaderControls<'_> {
             id!(library_rename_title),
             id!(library_import_title),
             id!(reader_turn_mode_label),
+            id!(reader_customise_page_margin_value),
             id!(reader_customise_gloss_title),
             id!(reader_customise_layout_title),
-            id!(reader_customise_columns_title),
             id!(reader_customise_size_value),
             id!(reader_customise_gloss_size_value),
             id!(reader_customise_character_value),
@@ -15948,6 +15960,7 @@ impl ReaderControls<'_> {
             id!(selection_color_name),
             id!(highlight_color_title),
             id!(highlight_color_name),
+            id!(reader_customise_columns_title),
             id!(reader_customise_font_label),
             id!(reader_customise_size_label),
             id!(reader_customise_gloss_size_label),
@@ -15956,6 +15969,7 @@ impl ReaderControls<'_> {
             id!(reader_customise_word_color_label),
             id!(reader_customise_word_bg_label),
             id!(reader_customise_line_label),
+            id!(reader_customise_page_margin_label),
             id!(reader_customise_character_label),
             id!(reader_customise_word_label),
             id!(reader_customise_margin_label),
@@ -16356,7 +16370,7 @@ impl ReaderControls<'_> {
 
         set_text!(reader_customise_font_label, "reader_font");
         set_text!(reader_customise_size_label, "reader_text_size");
-        set_text!(reader_customise_bold, "reader_bold_text");
+        set_text!(reader_customise_page_margin_label, "reader_margins");
         set_text!(reader_customise_highlight_label, "highlight_color");
         set_text!(reader_customise_gloss_title, "reader_annotations");
         set_text!(reader_customise_gloss_enable, "reader_show_annotations");
@@ -21751,16 +21765,6 @@ impl MatchEvent for App {
                 }
             }
         }
-        if let Some(bold) = self
-            .ui
-            .check_box(cx, ids!(reader_customise_bold))
-            .changed(actions)
-        {
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                draft.bold_text = bold;
-                self.sync_reader_customise_controls(cx);
-            }
-        }
         let mut highlight_changed = false;
         for (id, slot) in [
             id!(reader_customise_highlight_yellow),
@@ -21865,6 +21869,10 @@ impl MatchEvent for App {
             .ui
             .slider(cx, ids!(reader_customise_word_slider))
             .slided(actions);
+        let margin_value = self
+            .ui
+            .slider(cx, ids!(reader_customise_page_margin_slider))
+            .slided(actions);
         // Makepad measures the drag against the full widget width, while the
         // visible thumb stops inside it. Snap that small edge gap to the limit.
         let snap_edge = |value: f64, min: f64, max: f64| {
@@ -21903,6 +21911,10 @@ impl MatchEvent for App {
                     (value * 2.0).round() / 2.0
                 };
                 draft.gloss_font_size = (size as f32).clamp(6.0, 12.0);
+                changed = true;
+            }
+            if let Some(value) = margin_value {
+                draft.margin = (snap_edge(value, -10.0, 10.0).round() as f32).clamp(-10.0, 10.0);
                 changed = true;
             }
             if let Some(value) = character_value {

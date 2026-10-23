@@ -287,7 +287,7 @@ pub fn section_widgets() -> [(LiveId, ReaderSettingsTab); 21] {
         (id!(reader_customise_theme_section), Theme),
         (id!(reader_customise_font_row), Text),
         (id!(reader_customise_size_row), Text),
-        (id!(reader_customise_bold), Text),
+        (id!(reader_customise_page_margin_row), Text),
         (id!(reader_customise_layout_title), Text),
         (id!(reader_customise_line_row), Text),
         (id!(reader_customise_character_row), Text),
@@ -777,6 +777,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn text_tab_has_independent_page_margin_and_width_but_no_bold_control() {
+        let sections = section_widgets();
+        for id in [
+            id!(reader_customise_page_margin_row),
+            id!(reader_customise_margin_row),
+        ] {
+            assert!(sections.contains(&(id, ReaderSettingsTab::Text)));
+        }
+        assert!(!sections
+            .iter()
+            .any(|(id, _)| *id == id!(reader_customise_bold)));
+        let source = include_str!("app.rs");
+        assert!(!source.contains("reader_customise_bold"));
+        for control in [
+            "reader_customise_page_margin_row :=",
+            "reader_customise_page_margin_slider :=",
+            "reader_customise_page_margin_value :=",
+        ] {
+            assert!(source.contains(control), "{control}");
+        }
+    }
+
+    #[test]
+    fn layout_controls_keep_spacing_sliders_adjacent_and_column_label_quiet() {
+        let source = include_str!("app.rs");
+        let rows = [
+            "reader_customise_columns_row :=",
+            "reader_customise_page_margin_row :=",
+            "reader_customise_character_row :=",
+            "reader_customise_word_row :=",
+        ]
+        .map(|id| source.find(id).unwrap());
+        assert!(rows.windows(2).all(|pair| pair[0] < pair[1]));
+        for pair in rows.windows(2) {
+            let between = &source[pair[0]..pair[1]];
+            assert_eq!(
+                between.matches("_row :=").count(),
+                1,
+                "unexpected row between grouped controls"
+            );
+        }
+        assert!(source.contains("reader_customise_columns_title := Label{width: Fill text: \"Columns\" draw_text.text_style.font_size: 11}"));
     }
 
     #[test]
