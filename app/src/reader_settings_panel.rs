@@ -20,6 +20,17 @@ pub fn theme_button_choice(
     actions: &Actions,
     buttons: &[(WidgetUid, ReaderBackground)],
 ) -> Option<ReaderBackground> {
+    isolated_button_choice(actions, buttons)
+}
+
+pub fn tab_button_choice(
+    actions: &Actions,
+    buttons: &[(WidgetUid, ReaderSettingsTab)],
+) -> Option<ReaderSettingsTab> {
+    isolated_button_choice(actions, buttons)
+}
+
+fn isolated_button_choice<T: Copy>(actions: &Actions, buttons: &[(WidgetUid, T)]) -> Option<T> {
     let mut choice = None;
     for action in actions {
         let widget = action.as_widget_action()?;
@@ -83,6 +94,31 @@ mod theme_action_tests {
                 en
             );
         }
+    }
+
+    #[test]
+    fn tab_shortcut_maps_identity_and_preserves_mixed_action_batches() {
+        let buttons = [(WidgetUid(800), ReaderSettingsTab::Annotations)];
+        assert_eq!(
+            tab_button_choice(&vec![clicked(800)], &buttons),
+            Some(ReaderSettingsTab::Annotations)
+        );
+        assert_eq!(tab_button_choice(&vec![clicked(801)], &buttons), None);
+        assert_eq!(
+            tab_button_choice(
+                &vec![clicked(800), Box::new("data notice".to_string())],
+                &buttons
+            ),
+            None
+        );
+        assert_eq!(
+            tab_button_choice(&vec![clicked(800), clicked(801)], &buttons),
+            None
+        );
+        assert_eq!(
+            tab_button_choice(&vec![clicked(800), clicked(800)], &buttons),
+            None
+        );
     }
 
     #[test]

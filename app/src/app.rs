@@ -5605,6 +5605,37 @@ mod customise_highlight_tests {
     }
 
     #[test]
+    fn tab_selection_is_local_and_does_not_reproject_or_invalidate_reading() {
+        let source = include_str!("app.rs");
+        let route = source
+            .split("\n    fn select_reader_settings_tab(")
+            .nth(1)
+            .unwrap()
+            .split("\n    fn close_reader_customise_dropdowns(")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "reader_controls()",
+            "sync_reader_customise_controls(cx)",
+            "configure_reader_customise_layout(cx)",
+            "apply_reader_settings(cx",
+            "persist_reader_settings(cx)",
+            "load_reader_font(cx",
+            "pending_customise_preview_after_draw",
+        ] {
+            assert!(
+                !route.contains(forbidden),
+                "tab selection must not call {forbidden}"
+            );
+        }
+        assert!(route.contains("section_visible("));
+        assert!(route.contains("sync_reader_customise_anchor(cx)"));
+        assert!(route.contains("ids!(draw_bg.border_size)"));
+        assert!(!route.contains("reader_settings_motion"));
+        assert!(!source.contains("\n                                reader_settings_content :="));
+    }
+
+    #[test]
     fn choosing_a_marker_needs_no_chapter_or_layout_rebuild() {
         let current = ReaderSettings::default();
         for slot in crate::mark_span::MARKER_SLOTS {
@@ -13809,6 +13840,53 @@ impl App {
         script_apply_eval!(cx, modal, {});
     }
 
+    fn select_reader_settings_tab(&mut self, cx: &mut Cx, tab: ReaderSettingsTab) {
+        if self.reader_customise_draft.is_none() || self.reader_customise_tab == tab {
+            return;
+        }
+        if self.reader_customise_open_dropdown.is_some() {
+            self.close_reader_customise_dropdowns(cx);
+        }
+        // Scoped lookups only. A tab click must not build an index of every app
+        // page, reapply layout scripts, load fonts, save settings or rebuild HTML.
+        let panel = self.ui.widget(cx, ids!(reader_customise_card));
+        self.reader_customise_tab = tab;
+        let enabled = self.reader_customise_draft.as_ref().unwrap().gloss_enabled;
+        for (id, owner) in crate::reader_settings_panel::section_widgets() {
+            panel.widget(cx, &[id]).set_visible(
+                cx,
+                crate::reader_settings_panel::section_visible(tab, owner, id, enabled),
+            );
+        }
+        panel
+            .widget(cx, ids!(reader_customise_scroll))
+            .set_scroll_pos(cx, DVec2::default());
+        let settings = self.reader_customise_draft.as_ref().unwrap();
+        let palette = reader_scene_palette(settings.background, settings.theme);
+        for candidate in ReaderSettingsTab::ALL {
+            let selected = candidate == tab;
+            let text = if selected {
+                palette.text
+            } else {
+                palette.muted
+            };
+            apply_widget_paint(
+                cx,
+                panel.widget(cx, &[candidate.button()]),
+                &[
+                    (ids!(draw_text.color), text),
+                    (ids!(draw_text.color_hover), text),
+                    (ids!(draw_text.color_focus), text),
+                    (ids!(draw_text.color_down), text),
+                ],
+                &[(ids!(draw_bg.border_size), if selected { 1.0 } else { 0.0 })],
+            );
+        }
+        // Restore each tab's compact height without reapplying all control layouts.
+        self.sync_reader_customise_anchor(cx);
+        panel.redraw(cx);
+    }
+
     fn close_reader_customise_dropdowns(&mut self, cx: &mut Cx) {
         self.reader_customise_font_tap.cancel();
         self.reader_customise_open_dropdown = None;
@@ -19755,6 +19833,13 @@ impl MatchEvent for App {
             return;
         }
         if self.reader_customise_draft.is_some() {
+            let panel = self.ui.widget(cx, ids!(reader_customise_card));
+            let tabs = ReaderSettingsTab::ALL
+                .map(|tab| (panel.widget(cx, &[tab.button()]).widget_uid(), tab));
+            if let Some(tab) = crate::reader_settings_panel::tab_button_choice(actions, &tabs) {
+                self.select_reader_settings_tab(cx, tab);
+                return;
+            }
             let controls = self.reader_controls();
             let buttons = crate::reader_settings_panel::theme_modes()
                 .map(|(id, mode)| (controls.ui.widget(cx, &[id]).widget_uid(), mode));
@@ -21606,14 +21691,7 @@ impl MatchEvent for App {
                 && self.reader_customise_draft.is_some()
                 && self.reader_customise_tab != tab
             {
-                self.close_reader_customise_dropdowns(cx);
-                self.reader_customise_tab = tab;
-                self.configure_reader_customise_layout(cx);
-                self.pending_customise_preview_after_draw = true;
-                self.ui
-                    .widget(cx, ids!(reader_customise_scroll))
-                    .set_scroll_pos(cx, DVec2::default());
-                self.sync_reader_customise_controls(cx);
+                self.select_reader_settings_tab(cx, tab);
             }
         }
         for (id, slot) in [
