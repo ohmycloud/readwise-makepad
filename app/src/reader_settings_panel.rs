@@ -122,8 +122,8 @@ impl ReaderSettingsTab {
     pub fn nominal_height(self) -> f64 {
         match self {
             Self::Theme => POPOVER_HEIGHT,
-            Self::Text => 620.0,
-            Self::Annotations => 700.0,
+            Self::Text => 416.0,
+            Self::Annotations => 580.0,
         }
     }
 
@@ -148,6 +148,78 @@ impl ReaderSettingsTab {
 pub const POPOVER_WIDTH: f64 = 316.0;
 pub const POPOVER_HEIGHT: f64 = 400.0;
 pub const ARROW_HEIGHT: f64 = 10.0;
+
+/// Annotation labels, four swatches and the selected name share one row.
+/// Keep room for English names and allow its longer labels to wrap internally,
+/// rather than moving the entire picker below the label on compact cards.
+#[derive(Clone, Copy, Debug)]
+pub struct AnnotationRowLayout {
+    pub label_width: f64,
+    pub name_width: f64,
+    pub swatch_width: f64,
+}
+
+impl AnnotationRowLayout {
+    pub const GAP: f64 = 6.0;
+    pub const SWATCH_GAP: f64 = 2.0;
+
+    pub fn new(content_width: f64, english: bool) -> Self {
+        let label_width = if english { 80.0 } else { 64.0 };
+        let name_width = if english { 68.0 } else { 32.0 };
+        let swatch_width =
+            ((content_width - label_width - Self::GAP - name_width - Self::SWATCH_GAP * 4.0) / 4.0)
+                .clamp(1.0, 34.0);
+        Self {
+            label_width,
+            name_width,
+            swatch_width,
+        }
+    }
+}
+
+pub fn annotation_rows() -> [(LiveId, LiveId, &'static str); 5] {
+    [
+        (
+            id!(reader_customise_gloss_size_row),
+            id!(reader_customise_gloss_size_label),
+            "reader_annotation_size",
+        ),
+        (
+            id!(reader_customise_gloss_color_row),
+            id!(reader_customise_gloss_color_label),
+            "reader_annotation_color",
+        ),
+        (
+            id!(reader_customise_gloss_bg_row),
+            id!(reader_customise_gloss_bg_label),
+            "reader_annotation_background",
+        ),
+        (
+            id!(reader_customise_word_color_row),
+            id!(reader_customise_word_color_label),
+            "word_color",
+        ),
+        (
+            id!(reader_customise_word_bg_row),
+            id!(reader_customise_word_bg_label),
+            "word_background",
+        ),
+    ]
+}
+
+pub fn annotation_title(
+    language: readwise_core::settings::AppLanguage,
+    key: &'static str,
+) -> String {
+    let title = crate::i18n::text(language, key);
+    // Explicit breaks avoid clipping long English titles inside the label
+    // column, without wrapping the picker itself onto another row.
+    if language == readwise_core::settings::AppLanguage::English {
+        title.replace(' ', "\n")
+    } else {
+        title.to_string()
+    }
+}
 
 /// Card bounds and arrow centre in card-local coordinates. Only viewport/safe
 /// area constraints may shrink the preferred height; overflow remains scrollable.
@@ -281,17 +353,13 @@ pub fn font_menu_rect(size: DVec2, insets: SafeAreaInsets, input: Rect) -> Rect 
 
 /// Only top-level scroll children belong here. Nested colour controls follow
 /// their section owner; enabling annotations must not expose them in other tabs.
-pub fn section_widgets() -> [(LiveId, ReaderSettingsTab); 21] {
+pub fn section_widgets() -> [(LiveId, ReaderSettingsTab); 18] {
     use ReaderSettingsTab::*;
     [
         (id!(reader_customise_theme_section), Theme),
         (id!(reader_customise_font_row), Text),
         (id!(reader_customise_size_row), Text),
-        (id!(reader_customise_page_margin_row), Text),
-        (id!(reader_customise_layout_title), Text),
         (id!(reader_customise_line_row), Text),
-        (id!(reader_customise_character_row), Text),
-        (id!(reader_customise_word_row), Text),
         (id!(reader_customise_margin_row), Text),
         (id!(reader_customise_columns_row), Text),
         (id!(reader_customise_align_row), Text),
@@ -305,6 +373,7 @@ pub fn section_widgets() -> [(LiveId, ReaderSettingsTab); 21] {
         (id!(reader_customise_gloss_bg_row), Annotations),
         (id!(reader_customise_word_color_row), Annotations),
         (id!(reader_customise_word_bg_row), Annotations),
+        (id!(reader_customise_annotations_reset), Annotations),
     ]
 }
 
@@ -315,6 +384,7 @@ pub enum TextChoice {
     Width(readwise_core::settings::ReaderTextWidth),
     Justify(bool),
     Indent(bool),
+    Columns(readwise_core::settings::ReaderColumns),
 }
 
 impl TextChoice {
@@ -324,6 +394,7 @@ impl TextChoice {
             Self::Width(width) => settings.text_width == width,
             Self::Justify(justify) => settings.justify_text == justify,
             Self::Indent(indent) => settings.indent_paragraphs == indent,
+            Self::Columns(columns) => settings.columns == columns,
         }
     }
 
@@ -335,11 +406,12 @@ impl TextChoice {
             Self::Width(width) => settings.text_width = width,
             Self::Justify(justify) => settings.justify_text = justify,
             Self::Indent(indent) => settings.indent_paragraphs = indent,
+            Self::Columns(columns) => settings.columns = columns,
         }
     }
 }
 
-pub fn text_choices() -> [(LiveId, &'static str, TextChoice); 10] {
+pub fn text_choices() -> [(LiveId, &'static str, TextChoice); 13] {
     use readwise_core::settings::ReaderTextWidth::*;
     use TextChoice::*;
     [
@@ -376,6 +448,21 @@ pub fn text_choices() -> [(LiveId, &'static str, TextChoice); 10] {
             id!(reader_paragraph_indented),
             "reader_paragraph_indented",
             Indent(true),
+        ),
+        (
+            id!(reader_customise_columns_one),
+            "reader_columns_one",
+            Columns(readwise_core::settings::ReaderColumns::One),
+        ),
+        (
+            id!(reader_customise_columns_two),
+            "reader_columns_two",
+            Columns(readwise_core::settings::ReaderColumns::Two),
+        ),
+        (
+            id!(reader_customise_columns_auto),
+            "reader_columns_auto",
+            Columns(readwise_core::settings::ReaderColumns::Auto),
         ),
     ]
 }
@@ -591,6 +678,144 @@ mod tests {
     }
 
     #[test]
+    fn annotation_reset_is_last_and_available_when_annotations_are_disabled() {
+        let reset = id!(reader_customise_annotations_reset);
+        assert!(section_widgets().contains(&(reset, ReaderSettingsTab::Annotations)));
+        assert!(section_visible(
+            ReaderSettingsTab::Annotations,
+            ReaderSettingsTab::Annotations,
+            reset,
+            false
+        ));
+        assert!(!section_visible(
+            ReaderSettingsTab::Text,
+            ReaderSettingsTab::Annotations,
+            reset,
+            true
+        ));
+        for language in [
+            readwise_core::settings::AppLanguage::Chinese,
+            readwise_core::settings::AppLanguage::English,
+        ] {
+            assert_ne!(
+                crate::i18n::text(language, "reader_annotations_reset"),
+                "reader_annotations_reset"
+            );
+        }
+        let source = include_str!("app.rs");
+        let background = source.find("reader_customise_word_bg_row :=").unwrap();
+        let reset = source
+            .find("reader_customise_annotations_reset :=")
+            .unwrap();
+        let next = source.find("reader_customise_line_row :=").unwrap();
+        assert!(background < reset && reset < next);
+    }
+
+    #[test]
+    fn runtime_popover_layout_uses_rust_values_not_unbound_dsl_symbols() {
+        let source = include_str!("app.rs");
+        let layout = source
+            .split("fn configure_reader_customise_layout(")
+            .nth(1)
+            .unwrap()
+            .split("fn close_reader_customise_dropdowns(")
+            .next()
+            .unwrap();
+        for call in layout.split("script_apply_eval!").skip(1) {
+            let code = call.split("});").next().unwrap();
+            // Interpolated Rust values are safe; inspect only evaluated Splash.
+            let mut evaluated = String::new();
+            let mut chars = code.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '#' && chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut depth = 1;
+                    for ch in chars.by_ref() {
+                        if ch == '(' {
+                            depth += 1;
+                        }
+                        if ch == ')' {
+                            depth -= 1;
+                        }
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                } else {
+                    evaluated.push(ch);
+                }
+            }
+            for token in evaluated.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                assert!(
+                    !["Fit", "Fill", "Flow", "Right", "Down", "Align", "Inset"].contains(&token),
+                    "unbound runtime DSL symbol {token}: {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn annotation_titles_remain_readable_after_language_projection() {
+        use readwise_core::settings::AppLanguage;
+        let rows = annotation_rows();
+        for (index, (row, label, key)) in rows.iter().enumerate() {
+            assert!(!rows[..index].iter().any(|(r, l, _)| r == row || l == label));
+            let chinese = annotation_title(AppLanguage::Chinese, key);
+            let english = annotation_title(AppLanguage::English, key);
+            assert!(!chinese.contains('\n'));
+            assert_eq!(english.lines().count(), 2);
+            assert_eq!(
+                english.replace('\n', " "),
+                crate::i18n::text(AppLanguage::English, key)
+            );
+        }
+    }
+
+    #[test]
+    fn annotation_rows_fit_beside_labels_in_both_languages() {
+        for (size, safe) in [
+            (dvec2(1100.0, 1000.0), SafeAreaInsets::default()),
+            (
+                dvec2(320.0, 568.0),
+                SafeAreaInsets {
+                    left: 8.0,
+                    right: 8.0,
+                    top: 24.0,
+                    bottom: 16.0,
+                },
+            ),
+            (dvec2(300.0, 568.0), SafeAreaInsets::default()),
+            (
+                dvec2(844.0, 390.0),
+                SafeAreaInsets {
+                    left: 44.0,
+                    right: 44.0,
+                    bottom: 20.0,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let (card, _) = popover_layout(size, safe, None, ReaderSettingsTab::Annotations);
+            let content = card.size.x - 32.0;
+            for english in [false, true] {
+                let row = AnnotationRowLayout::new(content, english);
+                let used = row.label_width
+                    + AnnotationRowLayout::GAP
+                    + row.swatch_width * 4.0
+                    + AnnotationRowLayout::SWATCH_GAP * 4.0
+                    + row.name_width;
+                assert!(
+                    used <= content + 0.01,
+                    "{size:?}, english={english}: {used} > {content}"
+                );
+                assert!(row.swatch_width >= 20.0 && row.swatch_width <= 34.0);
+                // A useful slider remains after the label, value and gaps.
+                assert!(content - row.label_width - 28.0 - 14.0 >= 100.0);
+            }
+        }
+    }
+
+    #[test]
     fn compact_popover_stays_inside_all_safe_edges() {
         for (size, safe, trigger) in [
             (
@@ -692,7 +917,7 @@ mod tests {
             );
             controls.push(properties);
         }
-        assert_eq!(controls.len(), 4, "audit newly added dropdowns too");
+        assert_eq!(controls.len(), 3, "audit newly added dropdowns too");
     }
 
     #[test]
@@ -756,7 +981,12 @@ mod tests {
 
     #[test]
     fn text_choices_apply_and_select_exactly_one_option_per_group() {
-        let mut settings = readwise_core::settings::ReaderSettings::default();
+        let mut settings = readwise_core::settings::ReaderSettings {
+            margin: -2.0,
+            character_spacing: 0.04,
+            word_spacing: 0.1,
+            ..Default::default()
+        };
         let choices = text_choices();
         for (_, key, choice) in choices {
             for language in [
@@ -767,7 +997,21 @@ mod tests {
             }
             choice.apply(&mut settings);
             assert!(choice.selected(&settings));
-            for group in [&choices[..3], &choices[3..6], &choices[6..8], &choices[8..]] {
+            assert_eq!(
+                (
+                    settings.margin,
+                    settings.character_spacing,
+                    settings.word_spacing
+                ),
+                (-2.0, 0.04, 0.1)
+            );
+            for group in [
+                &choices[..3],
+                &choices[3..6],
+                &choices[6..8],
+                &choices[8..10],
+                &choices[10..],
+            ] {
                 assert_eq!(
                     group
                         .iter()
@@ -780,48 +1024,47 @@ mod tests {
     }
 
     #[test]
-    fn text_tab_has_independent_page_margin_and_width_but_no_bold_control() {
+    fn text_tab_removes_advanced_spacing_controls_but_keeps_width_and_columns() {
         let sections = section_widgets();
         for id in [
-            id!(reader_customise_page_margin_row),
             id!(reader_customise_margin_row),
+            id!(reader_customise_columns_row),
         ] {
             assert!(sections.contains(&(id, ReaderSettingsTab::Text)));
         }
-        assert!(!sections
-            .iter()
-            .any(|(id, _)| *id == id!(reader_customise_bold)));
         let source = include_str!("app.rs");
-        assert!(!source.contains("reader_customise_bold"));
-        for control in [
-            "reader_customise_page_margin_row :=",
-            "reader_customise_page_margin_slider :=",
-            "reader_customise_page_margin_value :=",
+        for removed in [
+            "reader_customise_bold",
+            "reader_customise_page_margin",
+            "reader_customise_character",
+            "reader_customise_word_slider",
+            "reader_customise_word_value",
+            "reader_customise_word_row",
+            "reader_customise_word_label",
+            "reader_customise_layout_title",
+            "reader_customise_columns_choice",
         ] {
-            assert!(source.contains(control), "{control}");
+            assert!(!source.contains(removed), "stale aA control: {removed}");
         }
     }
 
     #[test]
-    fn layout_controls_keep_spacing_sliders_adjacent_and_column_label_quiet() {
+    fn columns_follow_paragraphs_as_matching_capsules_before_reset() {
         let source = include_str!("app.rs");
-        let rows = [
-            "reader_customise_columns_row :=",
-            "reader_customise_page_margin_row :=",
-            "reader_customise_character_row :=",
-            "reader_customise_word_row :=",
-        ]
-        .map(|id| source.find(id).unwrap());
-        assert!(rows.windows(2).all(|pair| pair[0] < pair[1]));
-        for pair in rows.windows(2) {
-            let between = &source[pair[0]..pair[1]];
-            assert_eq!(
-                between.matches("_row :=").count(),
-                1,
-                "unexpected row between grouped controls"
-            );
+        let paragraph = source.find("reader_customise_paragraph_row :=").unwrap();
+        let columns = source.find("reader_customise_columns_row :=").unwrap();
+        let reset = source.find("reader_customise_text_reset :=").unwrap();
+        assert!(paragraph < columns && columns < reset);
+        assert_eq!(source[paragraph..columns].matches("_row :=").count(), 1);
+        let group = &source[columns..reset];
+        assert!(group.contains("reader_customise_columns_controls := RoundedView{"));
+        for id in [
+            "reader_customise_columns_one",
+            "reader_customise_columns_two",
+            "reader_customise_columns_auto",
+        ] {
+            assert!(group.contains(&format!("{id} := ReaderSettingsSegment{{height: 32")));
         }
-        assert!(source.contains("reader_customise_columns_title := Label{width: Fill text: \"Columns\" draw_text.text_style.font_size: 11}"));
     }
 
     #[test]
@@ -833,7 +1076,7 @@ mod tests {
                 assert_eq!(section_visible(tab, owner, id, true), tab == owner);
             }
         }
-        assert_eq!(ids.len(), 21);
+        assert_eq!(ids.len(), 18);
     }
 
     #[test]

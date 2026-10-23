@@ -8937,6 +8937,11 @@ script_mod! {
                                             reader_customise_word_bg_name := mod.widgets.SettingsColorName{}
                                         }
                                     }
+                                    reader_customise_annotations_reset := ButtonFlat{
+                                        width: Fill height: 36 margin: 0 padding: 0
+                                        enable_long_press: true
+                                        align: Align{x: 0.0 y: 0.5} text: "↶  重置注音设置"
+                                    }
                                     reader_customise_line_row := View{
                                         width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
                                         reader_customise_line_label := Label{width: 64 text: "行距"}
@@ -8979,55 +8984,20 @@ script_mod! {
                                             reader_paragraph_indented := ReaderSettingsSegment{height: 32 text: "首行缩进" draw_text.text_style.font_size: 11}
                                         }
                                     }
+                                    reader_customise_columns_row := View{
+                                        width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                        reader_customise_columns_title := Label{width: 64 text: "分栏" draw_text.text_style.font_size: 11}
+                                        reader_customise_columns_controls := RoundedView{
+                                            width: Fill height: Fit flow: Right padding: 2 new_batch: true
+                                            draw_bg.border_radius: 10.0
+                                            reader_customise_columns_one := ReaderSettingsSegment{height: 32 text: "单栏" draw_text.text_style.font_size: 11}
+                                            reader_customise_columns_two := ReaderSettingsSegment{height: 32 text: "双栏" draw_text.text_style.font_size: 11}
+                                            reader_customise_columns_auto := ReaderSettingsSegment{height: 32 text: "自动" draw_text.text_style.font_size: 11}
+                                        }
+                                    }
                                     reader_customise_text_reset := ButtonFlat{
                                         width: Fill height: 36 margin: 0 padding: 0
                                         align: Align{x: 0.0 y: 0.5} text: "↶  重置文本设置"
-                                    }
-                                    reader_customise_layout_title := Label{
-                                        text: "Accessibility & Layout"
-                                        draw_text.text_style.font_size: 13
-                                    }
-                                    reader_customise_columns_row := View{
-                                        width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
-                                        reader_customise_columns_title := Label{width: Fill text: "Columns" draw_text.text_style.font_size: 11}
-                                        reader_customise_columns_choice := DropDown{
-                                            width: 180 height: 32
-                                            align: Align{x: 0.0 y: 0.5}
-                                            padding: Inset{left: 12 right: 24 top: 0 bottom: 0}
-                                            popup_menu_position: mod.widgets.PopupMenuPosition.BelowInput
-                                            popup_menu: mod.widgets.PopupMenuFlat{
-                                                width: 180
-                                                menu_item: mod.widgets.PopupMenuItem{height: 22 padding: Inset{left: 12 right: 8 top: 0 bottom: 0}}
-                                            }
-                                            labels: ["1", "2", "Auto Set"]
-                                        }
-                                    }
-                                    reader_customise_page_margin_row := View{
-                                        width: Fill height: Fit flow: Down spacing: 6
-                                        reader_customise_page_margin_label := Label{width: Fill text: "页边距"}
-                                        reader_customise_page_margin_controls := View{
-                                            width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
-                                            reader_customise_page_margin_slider := ReaderLayoutSlider{min: -10. max: 10. step: 0. precision: 0}
-                                            reader_customise_page_margin_value := Label{width: 58 text: "0%"}
-                                        }
-                                    }
-                                    reader_customise_character_row := View{
-                                        width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
-                                        reader_customise_character_label := Label{width: 164 text: "CHARACTER SPACING"}
-                                        reader_customise_character_controls := View{
-                                            width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
-                                            reader_customise_character_slider := ReaderLayoutSlider{min: -10. max: 10.}
-                                            reader_customise_character_value := Label{width: 58 text: "0%"}
-                                        }
-                                    }
-                                    reader_customise_word_row := View{
-                                        width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
-                                        reader_customise_word_label := Label{width: 164 text: "WORD SPACING"}
-                                        reader_customise_word_controls := View{
-                                            width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
-                                            reader_customise_word_slider := ReaderLayoutSlider{min: -20. max: 20.}
-                                            reader_customise_word_value := Label{width: 58 text: "0%"}
-                                        }
                                     }
                                 }
                             }
@@ -13662,24 +13632,15 @@ impl App {
         for id in [
             id!(reader_customise_font_row),
             id!(reader_customise_size_row),
-            id!(reader_customise_gloss_size_row),
             id!(reader_quick_pen_row),
             id!(reader_customise_highlight_row),
-            id!(reader_customise_gloss_color_row),
-            id!(reader_customise_gloss_bg_row),
-            id!(reader_customise_word_color_row),
-            id!(reader_customise_word_bg_row),
             id!(reader_customise_line_row),
-            id!(reader_customise_character_row),
-            id!(reader_customise_word_row),
-            id!(reader_customise_page_margin_row),
             id!(reader_customise_margin_row),
             id!(reader_customise_columns_row),
         ] {
             let row = self.ui.widget(cx, &[id]);
             if let Some(mut view) = row.borrow_mut::<View>() {
-                let dropdown_row =
-                    id == id!(reader_customise_font_row) || id == id!(reader_customise_columns_row);
+                let dropdown_row = id == id!(reader_customise_font_row);
                 view.layout.flow = if stacked && !dropdown_row {
                     Flow::Down
                 } else {
@@ -13691,10 +13652,6 @@ impl App {
         for id in [
             id!(reader_quick_pen_options),
             id!(reader_customise_highlight_options),
-            id!(reader_customise_gloss_color_options),
-            id!(reader_customise_gloss_bg_options),
-            id!(reader_customise_word_color_options),
-            id!(reader_customise_word_bg_options),
         ] {
             let options = self.ui.widget(cx, &[id]);
             if let Some(mut view) = options.borrow_mut::<View>() {
@@ -13711,21 +13668,12 @@ impl App {
             };
         }
         for id in [
-            id!(reader_customise_layout_title),
             id!(reader_customise_gloss_title),
             id!(reader_customise_size_label),
-            id!(reader_customise_gloss_size_label),
             id!(reader_quick_pen_label),
             id!(reader_customise_highlight_label),
-            id!(reader_customise_gloss_color_label),
-            id!(reader_customise_gloss_bg_label),
-            id!(reader_customise_word_color_label),
-            id!(reader_customise_word_bg_label),
             id!(reader_customise_line_label),
-            id!(reader_customise_character_label),
-            id!(reader_customise_word_label),
             id!(reader_customise_margin_label),
-            id!(reader_customise_page_margin_label),
             id!(reader_customise_columns_title),
         ] {
             let mut label = self.ui.widget(cx, &[id]);
@@ -13736,6 +13684,80 @@ impl App {
             };
             script_apply_eval!(cx, label, {width: #(width) height: 20 padding: 0 draw_text +: {text_style +: {font_size: 11.0}}});
         }
+        // Annotation controls stay beside their labels, even on phone cards.
+        // Only the four swatches shrink; names retain a readable fixed column.
+        let annotation = crate::reader_settings_panel::AnnotationRowLayout::new(
+            rect.size.x - padding * 2.0,
+            app_language() == AppLanguage::English,
+        );
+        let annotation_gap = crate::reader_settings_panel::AnnotationRowLayout::GAP;
+        let swatch_gap = crate::reader_settings_panel::AnnotationRowLayout::SWATCH_GAP;
+        for (row_id, label_id, key) in crate::reader_settings_panel::annotation_rows() {
+            if let Some(mut row) = self.ui.widget(cx, &[row_id]).borrow_mut::<View>() {
+                row.layout.flow = Flow::right();
+                row.layout.spacing = annotation_gap;
+                row.layout.align.y = 0.5;
+            }
+            let mut label = self.ui.widget(cx, &[label_id]);
+            script_apply_eval!(cx, label, {width: #(annotation.label_width) height: #(Size::fit()) flow: #(Flow::right_wrap()) padding: 0 draw_text +: {text_style +: {font_size: 11.0}}});
+            label.set_text(
+                cx,
+                &crate::reader_settings_panel::annotation_title(app_language(), key),
+            );
+        }
+        for (options_id, name_id, cells) in [
+            (
+                id!(reader_customise_gloss_color_options),
+                id!(reader_customise_gloss_color_name),
+                [
+                    id!(reader_customise_gloss_color_green),
+                    id!(reader_customise_gloss_color_blue),
+                    id!(reader_customise_gloss_color_orange),
+                    id!(reader_customise_gloss_color_gray),
+                ],
+            ),
+            (
+                id!(reader_customise_gloss_bg_options),
+                id!(reader_customise_gloss_bg_name),
+                [
+                    id!(reader_customise_gloss_bg_none),
+                    id!(reader_customise_gloss_bg_gray),
+                    id!(reader_customise_gloss_bg_green),
+                    id!(reader_customise_gloss_bg_blue),
+                ],
+            ),
+            (
+                id!(reader_customise_word_color_options),
+                id!(reader_customise_word_color_name),
+                [
+                    id!(reader_customise_word_color_default),
+                    id!(reader_customise_word_color_green),
+                    id!(reader_customise_word_color_blue),
+                    id!(reader_customise_word_color_orange),
+                ],
+            ),
+            (
+                id!(reader_customise_word_bg_options),
+                id!(reader_customise_word_bg_name),
+                [
+                    id!(reader_customise_word_bg_none),
+                    id!(reader_customise_word_bg_gray),
+                    id!(reader_customise_word_bg_green),
+                    id!(reader_customise_word_bg_blue),
+                ],
+            ),
+        ] {
+            let mut options = self.ui.widget(cx, &[options_id]);
+            script_apply_eval!(cx, options, {width: #(Size::fill()) flow: #(Flow::right()) spacing: #(swatch_gap) align: #(Align {x: 0.0, y: 0.5})});
+            let mut name = self.ui.widget(cx, &[name_id]);
+            script_apply_eval!(cx, name, {width: #(annotation.name_width) height: #(Size::fit()) flow: #(Flow::right_wrap())});
+            for cell_id in cells {
+                let mut cell = self.ui.widget(cx, &[cell_id]);
+                script_apply_eval!(cx, cell, {width: #(annotation.swatch_width) height: 44});
+            }
+        }
+        let mut value = self.ui.widget(cx, ids!(reader_customise_gloss_size_value));
+        script_apply_eval!(cx, value, {width: 28 padding: 0});
         // Text controls keep the reference's label/control rows even in the
         // compact popover. At very narrow widths stack the label, not the options.
         for (row_id, label_id) in [
@@ -13759,6 +13781,10 @@ impl App {
                 id!(reader_customise_paragraph_row),
                 id!(reader_customise_paragraph_label),
             ),
+            (
+                id!(reader_customise_columns_row),
+                id!(reader_customise_columns_title),
+            ),
         ] {
             let narrow = rect.size.x < 290.0;
             if let Some(mut row) = self.ui.widget(cx, &[row_id]).borrow_mut::<View>() {
@@ -13773,10 +13799,7 @@ impl App {
             };
             script_apply_eval!(cx, label, {width: #(width) height: 20 padding: 0 draw_text +: {text_style +: {font_size: 11.0}}});
         }
-        for id in [
-            id!(reader_customise_font_field),
-            id!(reader_customise_columns_choice),
-        ] {
+        for id in [id!(reader_customise_font_field)] {
             let mut choice = self.ui.widget(cx, &[id]);
             let width = Size::Fixed(180.0);
             script_apply_eval!(cx, choice, {width: #(width)});
@@ -13793,11 +13816,6 @@ impl App {
             .widget(cx, ids!(reader_customise_font_menu))
             .set_visible(cx, false);
         self.sync_reader_customise_anchor(cx);
-        for id in [id!(reader_customise_columns_choice)] {
-            if let Some(mut dropdown) = self.ui.widget(cx, &[id]).borrow_mut::<DropDown>() {
-                dropdown.set_closed(cx);
-            }
-        }
     }
 
     fn close_reader_customise(&mut self, cx: &mut Cx) {
@@ -13837,36 +13855,14 @@ impl App {
         {
             return false;
         }
-        // Makepad's DropDown dismisses on MouseDown outside its popup, but
-        // Android sends TouchUpdate. Consume the outside press so controls
-        // behind the overlay cannot also be activated.
-        let dropdowns = [
-            (id!(reader_customise_font_choice), 202.0),
-            (id!(reader_customise_columns_choice), 72.0),
-        ];
-        let pressed_choice = dropdowns.iter().find_map(|(id, _)| {
-            let widget = self.ui.widget(cx, &[*id]);
-            let control = widget.area().rect(cx);
-            control.contains(abs).then_some(*id)
-        });
+        // Only the owned font menu remains. Consume an outside press so
+        // dismissing it cannot also activate a text-setting capsule beneath it.
         if let Some(active_id) = self.reader_customise_open_dropdown {
-            let menu_height = dropdowns
-                .iter()
-                .find_map(|(id, height)| (*id == active_id).then_some(*height))
-                .unwrap_or(0.0);
-            let active = self.ui.widget(cx, &[active_id]);
-            let control = active.area().rect(cx);
-            let menu = if active_id == id!(reader_customise_font_choice) {
-                current_clipped_rect(
-                    cx,
-                    self.ui.widget(cx, ids!(reader_customise_font_menu)).area(),
-                )
-            } else {
-                Rect {
-                    pos: control.pos + dvec2(0.0, control.size.y),
-                    size: dvec2(control.size.x, menu_height),
-                }
-            };
+            let control = self.ui.widget(cx, &[active_id]).area().rect(cx);
+            let menu = current_clipped_rect(
+                cx,
+                self.ui.widget(cx, ids!(reader_customise_font_menu)).area(),
+            );
             if control.contains(abs) {
                 self.close_reader_customise_dropdowns(cx);
                 return true;
@@ -13882,16 +13878,9 @@ impl App {
             }) {
                 return false;
             }
-            if let Some(id) = pressed_choice {
-                self.reader_customise_open_dropdown =
-                    (id != id!(reader_customise_font_choice)).then_some(id);
-                return false;
-            }
             return true;
         }
         // The owned font menu opens on a completed tap, not on pointer-down.
-        self.reader_customise_open_dropdown =
-            pressed_choice.filter(|id| *id != id!(reader_customise_font_choice));
         false
     }
 
@@ -15153,13 +15142,9 @@ impl ReaderControls<'_> {
         );
         for id in [
             id!(reader_customise_gloss_title),
-            id!(reader_customise_layout_title),
-            id!(reader_customise_page_margin_value),
             id!(reader_customise_gloss_enable),
             id!(reader_customise_size_value),
             id!(reader_customise_gloss_size_value),
-            id!(reader_customise_character_value),
-            id!(reader_customise_word_value),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
@@ -15169,9 +15154,6 @@ impl ReaderControls<'_> {
             id!(reader_customise_size_label),
             id!(reader_customise_gloss_size_label),
             id!(reader_customise_line_label),
-            id!(reader_customise_page_margin_label),
-            id!(reader_customise_character_label),
-            id!(reader_customise_word_label),
             id!(reader_customise_margin_label),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
@@ -15179,7 +15161,6 @@ impl ReaderControls<'_> {
         for id in [
             id!(reader_customise_reset),
             id!(reader_customise_font_choice),
-            id!(reader_customise_columns_choice),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
@@ -15348,6 +15329,7 @@ impl ReaderControls<'_> {
             id!(reader_customise_margin_controls),
             id!(reader_customise_align_controls),
             id!(reader_customise_paragraph_controls),
+            id!(reader_customise_columns_controls),
         ] {
             apply_reader_surface_palette(
                 cx,
@@ -15383,6 +15365,7 @@ impl ReaderControls<'_> {
             (id!(reader_customise_line_label), "reader_line_spacing"),
             (id!(reader_customise_margin_label), "reader_text_width"),
             (id!(reader_customise_align_label), "reader_text_align"),
+            (id!(reader_customise_columns_title), "reader_columns"),
             (
                 id!(reader_customise_paragraph_label),
                 "reader_text_paragraphs",
@@ -15396,6 +15379,7 @@ impl ReaderControls<'_> {
             id!(reader_customise_size_minus),
             id!(reader_customise_size_plus),
             id!(reader_customise_text_reset),
+            id!(reader_customise_annotations_reset),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
         }
@@ -15403,6 +15387,7 @@ impl ReaderControls<'_> {
             id!(reader_customise_size_minus),
             id!(reader_customise_size_plus),
             id!(reader_customise_text_reset),
+            id!(reader_customise_annotations_reset),
         ] {
             apply_widget_paint(
                 cx,
@@ -15417,6 +15402,9 @@ impl ReaderControls<'_> {
         self.ui
             .widget(cx, ids!(reader_customise_text_reset))
             .set_text(cx, tr("reader_text_reset"));
+        self.ui
+            .widget(cx, ids!(reader_customise_annotations_reset))
+            .set_text(cx, tr("reader_annotations_reset"));
     }
 
     fn sync_reader_customise_controls(&self, cx: &mut Cx) {
@@ -15445,24 +15433,6 @@ impl ReaderControls<'_> {
             .slider(cx, ids!(reader_customise_size_slider))
             .set_value(cx, size as f64);
         self.ui
-            .label(cx, ids!(reader_customise_character_value))
-            .set_text(cx, &format!("{:.0}%", character * 100.0));
-        self.ui
-            .label(cx, ids!(reader_customise_word_value))
-            .set_text(cx, &format!("{:.0}%", word * 100.0));
-        self.ui
-            .slider(cx, ids!(reader_customise_character_slider))
-            .set_value(cx, (character * 100.0).round() as f64);
-        self.ui
-            .slider(cx, ids!(reader_customise_word_slider))
-            .set_value(cx, (word * 100.0).round() as f64);
-        self.ui
-            .label(cx, ids!(reader_customise_page_margin_value))
-            .set_text(cx, &format!("{margin:.0}%"));
-        self.ui
-            .slider(cx, ids!(reader_customise_page_margin_slider))
-            .set_value(cx, margin as f64);
-        self.ui
             .check_box(cx, ids!(reader_customise_gloss_enable))
             .set_active(cx, settings.gloss_enabled, Animate::No);
         self.ui
@@ -15473,29 +15443,6 @@ impl ReaderControls<'_> {
             .set_value(cx, settings.gloss_font_size as f64);
         self.sync_reader_text_segments(cx, &settings);
         self.sync_reader_customise_font_labels(cx, font);
-        self.ui
-            .drop_down(cx, ids!(reader_customise_columns_choice))
-            .set_selected_item(
-                cx,
-                match columns {
-                    ReaderColumns::One => 0,
-                    ReaderColumns::Two => 1,
-                    ReaderColumns::Auto => 2,
-                },
-            );
-        apply_reader_dropdown_popup_palette(
-            cx,
-            self.ui.widget(cx, ids!(reader_customise_columns_choice)),
-            palette,
-            180.0,
-            22.0,
-            Inset {
-                left: 12.0,
-                right: 8.0,
-                top: 0.0,
-                bottom: 0.0,
-            },
-        );
         apply_reader_surface_palette(
             cx,
             self.ui.widget(cx, ids!(reader_preview)),
@@ -15923,13 +15870,9 @@ impl ReaderControls<'_> {
             id!(library_rename_title),
             id!(library_import_title),
             id!(reader_turn_mode_label),
-            id!(reader_customise_page_margin_value),
             id!(reader_customise_gloss_title),
-            id!(reader_customise_layout_title),
             id!(reader_customise_size_value),
             id!(reader_customise_gloss_size_value),
-            id!(reader_customise_character_value),
-            id!(reader_customise_word_value),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.text);
         }
@@ -15969,9 +15912,6 @@ impl ReaderControls<'_> {
             id!(reader_customise_word_color_label),
             id!(reader_customise_word_bg_label),
             id!(reader_customise_line_label),
-            id!(reader_customise_page_margin_label),
-            id!(reader_customise_character_label),
-            id!(reader_customise_word_label),
             id!(reader_customise_margin_label),
         ] {
             apply_reader_label_palette(cx, self.ui.widget(cx, &[id]), palette.muted);
@@ -16043,7 +15983,6 @@ impl ReaderControls<'_> {
             id!(reader_bookmark_btn),
             id!(reader_bookmark_filled_btn),
             id!(reader_customise_font_choice),
-            id!(reader_customise_columns_choice),
             id!(reader_customise_reset),
         ] {
             apply_reader_button_palette(cx, self.ui.widget(cx, &[id]), palette);
@@ -16370,50 +16309,19 @@ impl ReaderControls<'_> {
 
         set_text!(reader_customise_font_label, "reader_font");
         set_text!(reader_customise_size_label, "reader_text_size");
-        set_text!(reader_customise_page_margin_label, "reader_margins");
         set_text!(reader_customise_highlight_label, "highlight_color");
         set_text!(reader_customise_gloss_title, "reader_annotations");
         set_text!(reader_customise_gloss_enable, "reader_show_annotations");
-        set_text!(reader_customise_gloss_size_label, "reader_annotation_size");
-        set_text!(
-            reader_customise_gloss_color_label,
-            "reader_annotation_color"
-        );
-        set_text!(
-            reader_customise_gloss_bg_label,
-            "reader_annotation_background"
-        );
-        set_text!(reader_customise_word_color_label, "word_color");
-        set_text!(reader_customise_word_bg_label, "word_background");
-        set_text!(reader_customise_layout_title, "reader_accessibility_layout");
+        for (_, label, key) in crate::reader_settings_panel::annotation_rows() {
+            self.ui.widget(cx, &[label]).set_text(
+                cx,
+                &crate::reader_settings_panel::annotation_title(language, key),
+            );
+        }
         set_text!(reader_customise_line_label, "reader_line_spacing");
-        set_text!(reader_customise_character_label, "reader_character_spacing");
-        set_text!(reader_customise_word_label, "reader_word_spacing");
         set_text!(reader_customise_margin_label, "reader_text_width");
         set_text!(reader_customise_columns_title, "reader_columns");
         set_text!(reader_customise_reset, "reader_reset_theme");
-        let columns = self.ui.drop_down(cx, ids!(reader_customise_columns_choice));
-        columns.set_labels(
-            cx,
-            vec![
-                "1".to_string(),
-                "2".to_string(),
-                crate::i18n::text(language, "reader_auto_set").to_string(),
-            ],
-        );
-        columns.set_selected_item(
-            cx,
-            match self
-                .reader_customise_draft
-                .as_ref()
-                .map(|draft| draft.columns)
-                .unwrap_or_else(|| *READER_COLUMNS.read().unwrap())
-            {
-                ReaderColumns::One => 0,
-                ReaderColumns::Two => 1,
-                ReaderColumns::Auto => 2,
-            },
-        );
         self.sync_reader_customise_font_labels(
             cx,
             self.reader_customise_draft
@@ -21861,30 +21769,6 @@ impl MatchEvent for App {
             .ui
             .slider(cx, ids!(reader_customise_gloss_size_slider))
             .slided(actions);
-        let character_value = self
-            .ui
-            .slider(cx, ids!(reader_customise_character_slider))
-            .slided(actions);
-        let word_value = self
-            .ui
-            .slider(cx, ids!(reader_customise_word_slider))
-            .slided(actions);
-        let margin_value = self
-            .ui
-            .slider(cx, ids!(reader_customise_page_margin_slider))
-            .slided(actions);
-        // Makepad measures the drag against the full widget width, while the
-        // visible thumb stops inside it. Snap that small edge gap to the limit.
-        let snap_edge = |value: f64, min: f64, max: f64| {
-            let edge = (max - min) * 0.1;
-            if value <= min + edge {
-                min
-            } else if value >= max - edge {
-                max
-            } else {
-                value
-            }
-        };
         if let Some(draft) = self.reader_customise_draft.as_mut() {
             let mut changed = false;
             if let Some(value) = size_value {
@@ -21913,36 +21797,7 @@ impl MatchEvent for App {
                 draft.gloss_font_size = (size as f32).clamp(6.0, 12.0);
                 changed = true;
             }
-            if let Some(value) = margin_value {
-                draft.margin = (snap_edge(value, -10.0, 10.0).round() as f32).clamp(-10.0, 10.0);
-                changed = true;
-            }
-            if let Some(value) = character_value {
-                draft.character_spacing =
-                    (snap_edge(value, -10.0, 10.0).round() as f32 / 100.0).clamp(-0.1, 0.1);
-                changed = true;
-            }
-            if let Some(value) = word_value {
-                draft.word_spacing =
-                    (snap_edge(value, -20.0, 20.0).round() as f32 / 100.0).clamp(-0.2, 0.2);
-                changed = true;
-            }
             if changed {
-                self.sync_reader_customise_controls(cx);
-            }
-        }
-        if let Some(index) = self
-            .ui
-            .drop_down(cx, ids!(reader_customise_columns_choice))
-            .selected(actions)
-        {
-            self.reader_customise_open_dropdown = None;
-            if let Some(draft) = self.reader_customise_draft.as_mut() {
-                draft.columns = match index {
-                    0 => ReaderColumns::One,
-                    1 => ReaderColumns::Two,
-                    _ => ReaderColumns::Auto,
-                };
                 self.sync_reader_customise_controls(cx);
             }
         }
@@ -21973,6 +21828,17 @@ impl MatchEvent for App {
                 draft.word_color_slot = default.word_color_slot;
                 draft.word_background_slot = default.word_background_slot;
                 draft.highlight_color_slot = default.highlight_color_slot;
+                self.sync_reader_customise_controls(cx);
+            }
+        }
+        if self.reader_customise_tab == ReaderSettingsTab::Annotations
+            && self
+                .ui
+                .button(cx, ids!(reader_customise_annotations_reset))
+                .clicked(actions)
+        {
+            if let Some(draft) = self.reader_customise_draft.as_mut() {
+                draft.reset_annotations();
                 self.sync_reader_customise_controls(cx);
             }
         }

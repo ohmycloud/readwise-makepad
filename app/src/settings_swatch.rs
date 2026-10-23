@@ -112,6 +112,9 @@ script_mod! {
             pixel: fn() {
                 let center = self.rect_size * 0.5
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                // Compact annotation rows narrow the hit box, not its 44px
+                // height. Scale the dab and ring together so neither is clipped.
+                sdf.scale(max(1.0, 44.0 / min(self.rect_size.x, self.rect_size.y)), center.x, center.y)
                 // Only selection draws a ring. Focus can survive closing and
                 // reopening a modal, so it must not ring a different old choice.
                 // Both hover and keyboard focus emphasise the ink dab instead.

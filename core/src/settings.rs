@@ -509,6 +509,17 @@ impl ReaderSettings {
         self
     }
 
+    /// Reset only the Annotations tab, preserving text, theme and vocabulary preferences.
+    pub fn reset_annotations(&mut self) {
+        let default = Self::default();
+        self.gloss_enabled = default.gloss_enabled;
+        self.gloss_font_size = default.gloss_font_size;
+        self.gloss_color_slot = default.gloss_color_slot;
+        self.gloss_background_slot = default.gloss_background_slot;
+        self.word_color_slot = default.word_color_slot;
+        self.word_background_slot = default.word_background_slot;
+    }
+
     /// Reset only the Text tab; appearance, annotations and other preferences stay intact.
     pub fn reset_text(&mut self) {
         let default = Self::default();
@@ -724,6 +735,39 @@ mod tests {
         settings.reset_text();
         assert_eq!(settings, expected);
         settings.reset_text();
+        assert_eq!(settings, expected);
+    }
+
+    #[test]
+    fn annotation_reset_is_isolated_and_idempotent() {
+        let mut settings = ReaderSettings {
+            language: AppLanguage::English,
+            english_level: EnglishLevel::C3,
+            background: ReaderBackground::Night,
+            font_size: Some(18.0),
+            columns: ReaderColumns::Two,
+            margin: 5.0,
+            highlight_color_slot: 7,
+            selection_color_slot: 6,
+            gloss_enabled: false,
+            gloss_font_size: 12.0,
+            gloss_color_slot: 3,
+            gloss_background_slot: 2,
+            word_color_slot: 1,
+            word_background_slot: 3,
+            ..ReaderSettings::default()
+        };
+        let mut expected = settings.clone();
+        let default = ReaderSettings::default();
+        expected.gloss_enabled = default.gloss_enabled;
+        expected.gloss_font_size = default.gloss_font_size;
+        expected.gloss_color_slot = default.gloss_color_slot;
+        expected.gloss_background_slot = default.gloss_background_slot;
+        expected.word_color_slot = default.word_color_slot;
+        expected.word_background_slot = default.word_background_slot;
+        settings.reset_annotations();
+        assert_eq!(settings, expected);
+        settings.reset_annotations();
         assert_eq!(settings, expected);
     }
 
