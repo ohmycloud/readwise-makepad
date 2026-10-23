@@ -302,9 +302,9 @@ pub fn text(language: AppLanguage, key: &'static str) -> &'static str {
         "moss" => choose(english, "苔绿", "Moss"),
         "graphite" => choose(english, "石墨", "Graphite"),
         "none" => choose(english, "无", "None"),
-        "dark_gray" => choose(english, "深灰", "Dark Gray"),
-        "dark_cyan" => choose(english, "深青", "Dark Cyan"),
-        "dark_blue" => choose(english, "深蓝", "Dark Blue"),
+        "cream_yellow" => choose(english, "奶黄", "Cream Yellow"),
+        "mint" => choose(english, "薄荷", "Mint"),
+        "mist_blue" => choose(english, "雾蓝", "Mist Blue"),
         "reader_settings_saved" => choose(
             english,
             "阅读设置与外观主题更改后自动保存在本机。",

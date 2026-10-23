@@ -57,7 +57,7 @@ impl ColorKind {
         }
         let keys = match self {
             Self::Gloss => ["cyan", "blue", "orange", "gray"],
-            Self::Background => ["none", "dark_gray", "dark_cyan", "dark_blue"],
+            Self::Background => ["none", "cream_yellow", "mint", "mist_blue"],
             Self::Word => ["default", "cyan", "blue", "orange"],
             Self::Selection => ["cyan", "blue", "orange", "yellow"],
             Self::Highlight => ["yellow", "cyan", "blue", "orange"],
@@ -175,8 +175,8 @@ mod tests {
             ),
             (
                 ColorKind::Background,
-                ["无", "深灰", "深青", "深蓝"],
-                ["None", "Dark Gray", "Dark Cyan", "Dark Blue"],
+                ["无", "奶黄", "薄荷", "雾蓝"],
+                ["None", "Cream Yellow", "Mint", "Mist Blue"],
             ),
             (
                 ColorKind::Word,
@@ -216,6 +216,24 @@ mod tests {
         assert!(default.w > 0.0);
         let white = Vec4f::from_u32(0xf7f7_f7ff);
         assert_ne!(ColorKind::Word.color(0, white).x, default.x);
+    }
+
+    #[test]
+    fn background_swatches_and_reader_presets_use_the_requested_pastels() {
+        let ink = Vec4f::from_u32(0x302f_2aff);
+        for (slot, rgba) in [0x0000_0000, 0xffe9_a8ff, 0xcfe8_d5ff, 0xd3e6_f7ff]
+            .into_iter()
+            .enumerate()
+        {
+            let expected = Vec4f::from_u32(rgba);
+            assert_eq!(ColorKind::Background.color(slot, ink), expected);
+            let (name, preset) = crate::ruby_word::BG_PRESETS[slot];
+            assert_eq!(name, ColorKind::Background.name(slot, AppLanguage::Chinese));
+            assert_eq!(
+                preset,
+                (slot != 0).then_some((expected.x, expected.y, expected.z, expected.w))
+            );
+        }
     }
 
     #[test]
