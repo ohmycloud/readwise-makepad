@@ -533,6 +533,81 @@ pub async fn add_highlight(
     Ok(id)
 }
 
+/// Apply a colour to exactly this range, preserving any unselected tails of
+/// overlapping marks. The replacement and the returned chapter snapshot share
+/// one transaction, so a failed insert cannot silently remove the old paint.
+pub async fn apply_highlight(
+    pool: &SqlitePool,
+    book_id: &str,
+    chapter: usize,
+    range: (usize, usize, usize, usize),
+    color: &str,
+) -> Result<Vec<Highlight>, String> {
+    let (sb, sc, eb, ec) = range;
+    if (sb, sc) >= (eb, ec) || sc >= PACK as usize || ec >= PACK as usize {
+        return Err("高亮范围无效".into());
+    }
+    let packed = |block, offset: usize| {
+        i64::try_from(block)
+            .ok()
+            .and_then(|block: i64| block.checked_mul(PACK))
+            .and_then(|n| n.checked_add(offset as i64))
+    };
+    let start = packed(sb, sc);
+    let end = packed(eb, ec);
+    let (Some(start), Some(end)) = (start, end) else {
+        return Err("高亮范围无效".into());
+    };
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let rows = sqlx::query("SELECT id,norm_start,norm_end,color FROM book_notes WHERE book_id=? AND section_id=? AND type='annotation' AND style='highlight' AND norm_start<? AND norm_end>?")
+        .bind(book_id).bind(chapter.to_string()).bind(end).bind(start)
+        .fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
+    let mut additions = vec![(start, end, color.to_owned())];
+    for row in rows {
+        let id: String = row.get("id");
+        let a: i64 = row.get("norm_start");
+        let b: i64 = row.get("norm_end");
+        let old: String = row.get::<Option<String>, _>("color").unwrap_or_default();
+        sqlx::query("DELETE FROM book_notes WHERE id=? AND book_id=?")
+            .bind(id)
+            .bind(book_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        if a < start {
+            additions.push((a, start, old.clone()));
+        }
+        if b > end {
+            additions.push((end, b, old));
+        }
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    for (a, b, colour) in additions {
+        sqlx::query("INSERT INTO book_notes (id,book_id,type,cfi,text,style,color,section_id,norm_start,norm_end,note,created_at,updated_at) VALUES (?,?,'annotation','',NULL,'highlight',?,?,?,?,'',?,?)")
+            .bind(uuid::Uuid::new_v4().to_string()).bind(book_id).bind(colour).bind(chapter.to_string())
+            .bind(a).bind(b).bind(now).bind(now).execute(&mut *tx).await.map_err(|e| format!("保存高亮失败: {e}"))?;
+    }
+    let rows = sqlx::query("SELECT id,norm_start,norm_end,color FROM book_notes WHERE book_id=? AND section_id=? AND type='annotation' AND style='highlight' ORDER BY norm_start,norm_end,id")
+        .bind(book_id).bind(chapter.to_string()).fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
+    let result = rows
+        .into_iter()
+        .map(|row| {
+            let a: i64 = row.get("norm_start");
+            let b: i64 = row.get("norm_end");
+            Highlight {
+                id: row.get("id"),
+                start_block: (a / PACK) as usize,
+                start_char: (a % PACK) as usize,
+                end_block: (b / PACK) as usize,
+                end_char: (b % PACK) as usize,
+                color: row.get::<Option<String>, _>("color").unwrap_or_default(),
+            }
+        })
+        .collect();
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
 /// 全书高亮，按章节分组。
 pub async fn get_highlights_by_chapter(
     pool: &SqlitePool,
@@ -762,6 +837,114 @@ mod highlight_tests {
             )
             .unwrap();
         (runtime, pool)
+    }
+
+    #[test]
+    fn swatch_applies_immediately_and_replaces_only_selected_colour_range() {
+        let (runtime, pool) = pool();
+        let apply = |range, color| {
+            runtime
+                .block_on(apply_highlight(&pool, "book", 2, range, color))
+                .unwrap()
+        };
+        let first = apply((1, 2, 3, 8), "marker-yellow");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].color, "marker-yellow");
+        runtime
+            .block_on(add_highlight(
+                &pool,
+                "other",
+                2,
+                (1, 0, 4, 8),
+                "marker-yellow",
+            ))
+            .unwrap();
+        runtime
+            .block_on(add_highlight(
+                &pool,
+                "book",
+                3,
+                (1, 0, 4, 8),
+                "marker-yellow",
+            ))
+            .unwrap();
+        let second = apply((2, 4, 2, 9), "marker-blue");
+        let ranges = second
+            .iter()
+            .map(|h| {
+                (
+                    (h.start_block, h.start_char, h.end_block, h.end_char),
+                    h.color.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranges,
+            vec![
+                ((1, 2, 2, 4), "marker-yellow"),
+                ((2, 4, 2, 9), "marker-blue"),
+                ((2, 9, 3, 8), "marker-yellow")
+            ]
+        );
+        let repeated = apply((2, 4, 2, 9), "marker-pink");
+        assert_eq!(repeated.len(), 3, "recolour must not stack duplicate paint");
+        assert_eq!(repeated[1].color, "marker-pink");
+        let book = runtime
+            .block_on(get_highlights_by_chapter(&pool, "book"))
+            .unwrap();
+        assert_eq!(book[&3].len(), 1);
+        assert_eq!(
+            runtime
+                .block_on(get_highlights_by_chapter(&pool, "other"))
+                .unwrap()[&2]
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn swatch_failure_rolls_back_deleted_marks_and_can_be_retried() {
+        let (runtime, pool) = pool();
+        let id = runtime
+            .block_on(add_highlight(
+                &pool,
+                "book",
+                0,
+                (0, 1, 0, 20),
+                "marker-yellow",
+            ))
+            .unwrap();
+        runtime.block_on(sqlx::query("CREATE TRIGGER reject_highlight BEFORE INSERT ON book_notes BEGIN SELECT RAISE(ABORT,'qa failure'); END").execute(&pool)).unwrap();
+        assert!(runtime
+            .block_on(apply_highlight(
+                &pool,
+                "book",
+                0,
+                (0, 5, 0, 10),
+                "marker-blue"
+            ))
+            .is_err());
+        let saved = runtime
+            .block_on(get_highlights_by_chapter(&pool, "book"))
+            .unwrap();
+        assert_eq!(saved[&0].len(), 1);
+        assert_eq!(saved[&0][0].id, id);
+        runtime
+            .block_on(sqlx::query("DROP TRIGGER reject_highlight").execute(&pool))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(apply_highlight(
+                    &pool,
+                    "book",
+                    0,
+                    (0, 5, 0, 10),
+                    "marker-blue"
+                ))
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[test]

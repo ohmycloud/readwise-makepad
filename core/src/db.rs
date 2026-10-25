@@ -280,6 +280,18 @@ impl Db {
         ))
     }
 
+    pub fn apply_highlight(
+        &self,
+        book_id: &str,
+        chapter: usize,
+        range: (usize, usize, usize, usize),
+        color: &str,
+    ) -> Result<Vec<books::Highlight>, String> {
+        self.rt.block_on(books::apply_highlight(
+            &self.pool, book_id, chapter, range, color,
+        ))
+    }
+
     pub fn get_highlights_by_chapter(
         &self,
         book_id: &str,
@@ -387,98 +399,112 @@ impl Db {
     }
 
     pub fn load_reader_settings(&self) -> Result<crate::settings::ReaderSettings, String> {
-        self.rt.block_on(async {
-            use sqlx::Row;
+        self.rt.block_on(Self::read_reader_settings(&self.pool))
+    }
 
-            let rows = sqlx::query("SELECT key, value FROM app_settings WHERE key LIKE 'reader.%'")
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| format!("读取阅读设置失败: {e}"))?;
-            let mut settings = crate::settings::ReaderSettings::default();
-            let mut legacy_margin_pixels = None;
-            let mut margin_percent = None;
-            for row in rows {
-                let key: String = row.get("key");
-                let value: String = row.get("value");
-                match key.as_str() {
-                    "reader.language" => {
-                        settings.language = crate::settings::AppLanguage::from_str(&value)
-                    }
-                    "reader.english_level" => {
-                        settings.english_level = crate::settings::EnglishLevel::from_str(&value)
-                    }
-                    "reader.library_view_mode" => {
-                        settings.library_view_mode =
-                            crate::settings::LibraryViewMode::from_str(&value)
-                    }
-                    "reader.theme" => {
-                        settings.theme = crate::settings::ReaderTheme::from_str(&value)
-                    }
-                    "reader.background" => {
-                        settings.background = crate::settings::ReaderBackground::from_str(&value)
-                    }
-                    "reader.columns" => {
-                        settings.columns = crate::settings::ReaderColumns::from_str(&value)
-                    }
-                    "reader.turn_mode" => {
-                        settings.turn_mode = crate::settings::ReaderTurnMode::from_str(&value)
-                    }
-                    "reader.font" => settings.font = crate::settings::ReaderFont::from_str(&value),
-                    "reader.bold_text" => settings.bold_text = value == "1",
-                    "reader.spacing" => {
-                        settings.spacing = crate::settings::ReaderSpacing::from_str(&value)
-                    }
-                    "reader.character_spacing" => {
-                        settings.character_spacing =
-                            value.parse().unwrap_or(settings.character_spacing)
-                    }
-                    "reader.word_spacing" => {
-                        settings.word_spacing = value.parse().unwrap_or(settings.word_spacing)
-                    }
-                    "reader.margin" => legacy_margin_pixels = value.parse::<f32>().ok(),
-                    "reader.margin_percent" => margin_percent = value.parse::<f32>().ok(),
-                    "reader.justify_text" => settings.justify_text = value == "1",
-                    "reader.text_width" => {
-                        settings.text_width = crate::settings::ReaderTextWidth::from_str(&value)
-                    }
-                    "reader.indent_paragraphs" => settings.indent_paragraphs = value == "1",
-                    "reader.font_size" => settings.font_size = value.parse().ok(),
-                    "reader.gloss_enabled" => settings.gloss_enabled = value == "1",
-                    "reader.gloss_font_size" => {
-                        settings.gloss_font_size =
-                            value.parse().unwrap_or(settings.gloss_font_size);
-                    }
-                    "reader.gloss_color_slot" => {
-                        settings.gloss_color_slot =
-                            value.parse().unwrap_or(settings.gloss_color_slot);
-                    }
-                    "reader.gloss_background_slot" => {
-                        settings.gloss_background_slot =
-                            value.parse().unwrap_or(settings.gloss_background_slot);
-                    }
-                    "reader.word_color_slot" => {
-                        settings.word_color_slot =
-                            value.parse().unwrap_or(settings.word_color_slot);
-                    }
-                    "reader.word_background_slot" => {
-                        settings.word_background_slot =
-                            value.parse().unwrap_or(settings.word_background_slot);
-                    }
-                    "reader.selection_color_slot" => {
-                        settings.selection_color_slot =
-                            value.parse().unwrap_or(settings.selection_color_slot);
-                    }
-                    "reader.highlight_color_slot" => {
-                        settings.highlight_color_slot =
-                            value.parse().unwrap_or(settings.highlight_color_slot);
-                    }
-                    _ => {}
+    /// Read an existing settings snapshot, including through a read-only pool.
+    /// Does not open/migrate a native data directory or create a nested runtime.
+    pub async fn read_reader_settings(
+        pool: &SqlitePool,
+    ) -> Result<crate::settings::ReaderSettings, String> {
+        use sqlx::Row;
+
+        let rows = sqlx::query("SELECT key, value FROM app_settings WHERE key LIKE 'reader.%'")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("读取阅读设置失败: {e}"))?;
+        let mut settings = crate::settings::ReaderSettings::default();
+        let mut legacy_margin_pixels = None;
+        let mut margin_percent = None;
+        for row in rows {
+            let key: String = row.get("key");
+            let value: String = row.get("value");
+            match key.as_str() {
+                "reader.language" => {
+                    settings.language = crate::settings::AppLanguage::from_str(&value)
                 }
+                "reader.english_level" => {
+                    settings.english_level = crate::settings::EnglishLevel::from_str(&value)
+                }
+                "reader.library_view_mode" => {
+                    settings.library_view_mode = crate::settings::LibraryViewMode::from_str(&value)
+                }
+                "reader.theme" => settings.theme = crate::settings::ReaderTheme::from_str(&value),
+                "reader.background" => {
+                    settings.background = crate::settings::ReaderBackground::from_str(&value)
+                }
+                "reader.columns" => {
+                    settings.columns = crate::settings::ReaderColumns::from_str(&value)
+                }
+                "reader.turn_mode" => {
+                    settings.turn_mode = crate::settings::ReaderTurnMode::from_str(&value)
+                }
+                "reader.font" => settings.font = crate::settings::ReaderFont::from_str(&value),
+                "reader.bold_text" => settings.bold_text = value == "1",
+                "reader.spacing" => {
+                    settings.spacing = crate::settings::ReaderSpacing::from_str(&value)
+                }
+                "reader.character_spacing" => {
+                    settings.character_spacing = value.parse().unwrap_or(settings.character_spacing)
+                }
+                "reader.word_spacing" => {
+                    settings.word_spacing = value.parse().unwrap_or(settings.word_spacing)
+                }
+                "reader.margin" => legacy_margin_pixels = value.parse::<f32>().ok(),
+                "reader.margin_percent" => margin_percent = value.parse::<f32>().ok(),
+                "reader.justify_text" => settings.justify_text = value == "1",
+                "reader.text_width" => {
+                    settings.text_width = crate::settings::ReaderTextWidth::from_str(&value)
+                }
+                "reader.indent_paragraphs" => settings.indent_paragraphs = value == "1",
+                "reader.font_size" => settings.font_size = value.parse().ok(),
+                "reader.gloss_enabled" => settings.gloss_enabled = value == "1",
+                "reader.gloss_font_size" => {
+                    settings.gloss_font_size = value.parse().unwrap_or(settings.gloss_font_size);
+                }
+                "reader.gloss_color_slot" => {
+                    settings.gloss_color_slot = value.parse().unwrap_or(settings.gloss_color_slot);
+                }
+                "reader.gloss_background_slot" => {
+                    settings.gloss_background_slot =
+                        value.parse().unwrap_or(settings.gloss_background_slot);
+                }
+                "reader.word_color_slot" => {
+                    settings.word_color_slot = value.parse().unwrap_or(settings.word_color_slot);
+                }
+                "reader.word_background_slot" => {
+                    settings.word_background_slot =
+                        value.parse().unwrap_or(settings.word_background_slot);
+                }
+                "reader.selection_color_slot" => {
+                    settings.selection_color_slot =
+                        value.parse().unwrap_or(settings.selection_color_slot);
+                }
+                "reader.highlight_color_slot" => {
+                    settings.highlight_color_slot =
+                        value.parse().unwrap_or(settings.highlight_color_slot);
+                }
+                _ => {}
             }
-            settings.margin = margin_percent
-                .or_else(|| legacy_margin_pixels.map(|pixels| (pixels / 28.0 - 1.0) * 100.0))
-                .unwrap_or(settings.margin);
-            Ok(settings.normalized())
+        }
+        settings.margin = margin_percent
+            .or_else(|| legacy_margin_pixels.map(|pixels| (pixels / 28.0 - 1.0) * 100.0))
+            .unwrap_or(settings.margin);
+        Ok(settings.normalized())
+    }
+
+    /// Client-specific appearance data can share the reader-settings transaction
+    /// without extending the native settings/slot contract.
+    pub fn load_reader_extension(&self, key: &str) -> Result<Option<String>, String> {
+        if !key.starts_with("web.") {
+            return Err("阅读扩展键无效".into());
+        }
+        self.rt.block_on(async {
+            sqlx::query_scalar("SELECT value FROM app_settings WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| format!("读取阅读扩展失败: {e}"))
         })
     }
 
@@ -486,6 +512,17 @@ impl Db {
         &self,
         settings: &crate::settings::ReaderSettings,
     ) -> Result<(), String> {
+        self.save_reader_settings_with_extension(settings, None)
+    }
+
+    pub fn save_reader_settings_with_extension(
+        &self,
+        settings: &crate::settings::ReaderSettings,
+        extension: Option<(&str, &str)>,
+    ) -> Result<(), String> {
+        if extension.is_some_and(|(key, _)| !key.starts_with("web.")) {
+            return Err("阅读扩展键无效".into());
+        }
         self.rt.block_on(async {
             let settings = settings.clone().normalized();
             let now = chrono::Utc::now().timestamp_millis();
@@ -555,7 +592,7 @@ impl Db {
                 .begin()
                 .await
                 .map_err(|e| format!("开启阅读设置事务失败: {e}"))?;
-            for (key, value) in values {
+            for (key, value) in values.into_iter().chain(extension) {
                 sqlx::query(
                     "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) \
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",

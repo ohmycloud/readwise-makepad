@@ -54,6 +54,9 @@ mkdir -p "$bundle_dir"
 install -m 0755 "$built_binary" "$bundle_dir/ReadWise"
 install -m 0644 app/resources/icon_512.png "$bundle_dir/ReadWise.png"
 install -m 0755 scripts/install_linux_user.sh "$bundle_dir/install-user.sh"
+mkdir -p "$bundle_dir/third-party/typst-assets"
+install -m 0644 app/resources/third-party/typst-assets/{LICENSE,NOTICE} \
+    "$bundle_dir/third-party/typst-assets/"
 
 cat > "$bundle_dir/README.txt" <<'EOF'
 ReadWise for Linux

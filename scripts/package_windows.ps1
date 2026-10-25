@@ -48,6 +48,9 @@ New-Item -ItemType Directory -Path $BundleDir | Out-Null
 
 $DistBinary = Join-Path $BundleDir "ReadWise.exe"
 Copy-Item $BuiltBinary $DistBinary
+$Notices = Join-Path $BundleDir "third-party/typst-assets"
+New-Item -ItemType Directory -Force -Path $Notices | Out-Null
+Copy-Item "app/resources/third-party/typst-assets/LICENSE", "app/resources/third-party/typst-assets/NOTICE" $Notices
 
 $SigningThumbprint = $env:READWISE_WINDOWS_CERT_THUMBPRINT
 if (-not [string]::IsNullOrWhiteSpace($SigningThumbprint)) {

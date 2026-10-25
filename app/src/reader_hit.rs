@@ -21,6 +21,14 @@ pub struct HitRun {
     /// Resolved TextFlow row areas after Makepad's per-row alignment.
     drawn_rows: Vec<(usize, Rect)>,
     ink_rows: Vec<(usize, Rect)>,
+    atomic: Option<AtomicGeometry>,
+}
+#[derive(Clone, Copy)]
+struct AtomicGeometry {
+    len: usize,
+    hidden: bool,
+    center: f64,
+    display: bool,
 }
 
 struct PendingRun {
@@ -130,6 +138,16 @@ pub fn end_capture(cx: &Cx, origin: DVec2) -> (Vec<HitRun>, Vec<(Rect, usize)>) 
 pub fn painted_rows(runs: &[HitRun]) -> Vec<(Rect, usize)> {
     runs.iter()
         .flat_map(|run| {
+            if let Some(math) = run.atomic {
+                return if math.hidden {
+                    Vec::new()
+                } else {
+                    run.drawn_rows
+                        .iter()
+                        .map(|(_, rect)| (*rect, run.start))
+                        .collect()
+                };
+            }
             let rows = if run.ink_rows.is_empty() {
                 &run.drawn_rows
             } else {
@@ -196,6 +214,7 @@ pub fn capture_code_rows(
                         row: Some(row),
                         drawn_rows: Vec::new(),
                         ink_rows: Vec::new(),
+                        atomic: None,
                     },
                     painted_row: Some((area, padding)),
                     row_areas: Vec::new(),
@@ -275,10 +294,46 @@ pub fn draw_text(tf: &mut TextFlow, cx: &mut Cx2d, text: &str) {
                     row: None,
                     drawn_rows: Vec::new(),
                     ink_rows: Vec::new(),
+                    atomic: None,
                 },
                 painted_row: None,
                 row_areas,
                 ink_rows,
+            });
+        }
+    });
+}
+
+pub fn capture_atomic(
+    layout: Rc<LaidoutText>,
+    area: Area,
+    start: usize,
+    len: usize,
+    hidden: bool,
+    center: f64,
+    display: bool,
+) {
+    RUNS.with(|runs| {
+        if let Some(runs) = runs.borrow_mut().as_mut() {
+            runs.push(PendingRun {
+                run: HitRun {
+                    layout,
+                    origin: DVec2::default(),
+                    scale: 1.,
+                    start,
+                    row: None,
+                    drawn_rows: Vec::new(),
+                    ink_rows: Vec::new(),
+                    atomic: Some(AtomicGeometry {
+                        len,
+                        hidden,
+                        center,
+                        display,
+                    }),
+                },
+                painted_row: None,
+                row_areas: vec![(area, DVec2::default())],
+                ink_rows: Vec::new(),
             });
         }
     });
@@ -336,7 +391,9 @@ fn hit_text_index(runs: &[HitRun], point: DVec2, word: bool) -> Option<usize> {
             .iter()
             .enumerate()
             .filter_map(move |(index, row)| {
-                if run.row.is_some_and(|painted_row| painted_row != index) {
+                if run.atomic.is_some_and(|math| math.hidden)
+                    || run.row.is_some_and(|painted_row| painted_row != index)
+                {
                     return None;
                 }
                 let rect = run.row_rect(index, row)?;
@@ -344,6 +401,17 @@ fn hit_text_index(runs: &[HitRun], point: DVec2, word: bool) -> Option<usize> {
             })
     });
     let (run, index, row) = nearest_row(rows, point)?;
+    if let Some(math) = run.atomic {
+        let rect = run.row_rect(index, row)?;
+        return (!word).then_some(
+            run.start
+                + if point.x < rect.pos.x + rect.size.x * 0.5 {
+                    0
+                } else {
+                    math.len
+                },
+        );
+    }
     let x = run.row_x_in_lpxs(index, row, point.x);
     if word {
         let mut groups = row
@@ -427,7 +495,27 @@ fn painted_row_screen_x(left: f64, row_start: f64, scale: f64, x: f32) -> f64 {
 /// cannot accumulate a vertical offset between text, hit testing and color.
 pub fn selection_rects(runs: &[HitRun], from: usize, to: usize) -> Vec<Rect> {
     let mut rects = Vec::new();
+    let mut formulas = Vec::new();
     for run in runs {
+        if let Some(math) = run.atomic {
+            if from < run.start + math.len && to > run.start {
+                if let Some((_, rect)) = run.drawn_rows.first() {
+                    let height = run.layout.rows.first().map_or(rect.size.y, |row| {
+                        (row.ascender_in_lpxs - row.descender_in_lpxs) as f64 * run.scale
+                    });
+                    formulas.push(MathSelection {
+                        rect: Rect {
+                            pos: rect.pos - dvec2(0., 2.),
+                            size: rect.size + dvec2(0., 4.),
+                        },
+                        center: rect.pos.y + math.center,
+                        tolerance: height * 0.45,
+                        display: math.display,
+                    });
+                }
+            }
+            continue;
+        }
         for (index, row) in run.layout.rows.iter().enumerate() {
             if run.row.is_some_and(|painted| painted != index) {
                 continue;
@@ -463,7 +551,101 @@ pub fn selection_rects(runs: &[HitRun], from: usize, to: usize) -> Vec<Rect> {
             }
         }
     }
-    rects
+    if formulas.is_empty() {
+        rects
+    } else {
+        math_selection_rows(rects, formulas)
+    }
+}
+
+struct MathSelection {
+    rect: Rect,
+    center: f64,
+    tolerance: f64,
+    display: bool,
+}
+/// Use the PROSE baseline, not an asymmetric fraction's ink centre. Fold
+/// displaced proxies into the same visual row before the existing continuous
+/// line-band painter runs; source/selection order itself is never changed.
+fn math_selection_rows(mut prose: Vec<Rect>, formulas: Vec<MathSelection>) -> Vec<Rect> {
+    prose.sort_by(|a, b| {
+        (a.pos.y + a.size.y * 0.5)
+            .total_cmp(&(b.pos.y + b.size.y * 0.5))
+            .then(a.pos.x.total_cmp(&b.pos.x))
+    });
+    let mut rows: Vec<(MathSelection, Vec<Rect>)> = Vec::new();
+    for fragment in prose
+        .into_iter()
+        .map(|rect| MathSelection {
+            center: rect.pos.y + rect.size.y * 0.5,
+            tolerance: rect.size.y * 0.45,
+            rect,
+            display: false,
+        })
+        .chain(formulas)
+    {
+        if rows
+            .iter()
+            .any(|(_, pieces)| pieces.contains(&fragment.rect))
+        {
+            continue;
+        }
+        let target = (!fragment.display)
+            .then(|| {
+                rows.iter()
+                    .enumerate()
+                    .filter(|(_, (r, _))| {
+                        !r.display
+                            && (r.center - fragment.center).abs()
+                                <= r.tolerance.min(fragment.tolerance)
+                    })
+                    .min_by(|(_, (a, _)), (_, (b, _))| {
+                        (a.center - fragment.center)
+                            .abs()
+                            .total_cmp(&(b.center - fragment.center).abs())
+                    })
+                    .map(|(i, _)| i)
+            })
+            .flatten();
+        if let Some(i) = target {
+            rows[i].1.push(fragment.rect);
+            let r = &mut rows[i].0.rect;
+            let right = (r.pos.x + r.size.x).max(fragment.rect.pos.x + fragment.rect.size.x);
+            let bottom = (r.pos.y + r.size.y).max(fragment.rect.pos.y + fragment.rect.size.y);
+            r.pos = dvec2(
+                r.pos.x.min(fragment.rect.pos.x),
+                r.pos.y.min(fragment.rect.pos.y),
+            );
+            r.size = dvec2(right - r.pos.x, bottom - r.pos.y);
+        } else {
+            let rect = fragment.rect;
+            rows.push((fragment, vec![rect]));
+        }
+    }
+    rows.sort_by(|(a, _), (b, _)| {
+        a.center
+            .total_cmp(&b.center)
+            .then(a.rect.pos.x.total_cmp(&b.rect.pos.x))
+    });
+    rows.into_iter()
+        .flat_map(|(row, mut pieces)| {
+            pieces.sort_by(|a, b| a.pos.x.total_cmp(&b.pos.x));
+            let mut spans: Vec<Rect> = Vec::new();
+            for mut piece in pieces {
+                piece.pos.y = row.rect.pos.y;
+                piece.size.y = row.rect.size.y;
+                if let Some(last) = spans
+                    .last_mut()
+                    .filter(|last| piece.pos.x <= last.pos.x + last.size.x + 2.)
+                {
+                    last.size.x = last.size.x.max(piece.pos.x + piece.size.x - last.pos.x);
+                } else {
+                    spans.push(piece);
+                }
+            }
+            spans
+        })
+        .collect()
 }
 
 /// Intercept text whose runs we can record completely, including paragraphs
@@ -521,12 +703,17 @@ pub fn tracked_html(source: &str) -> Option<String> {
                     | "a"
                     | "reader_code"
                     | "reader_indent"
+                    | "reader_math"
+                    | "reader_math_hidden"
                     | "readeralignon"
                     | "readeralignoff"
             ) {
                 return None;
             }
-            if matches!(name.as_str(), "ruby" | "mark" | "reader_code" | "a") {
+            if matches!(
+                name.as_str(),
+                "ruby" | "mark" | "reader_code" | "a" | "reader_math" | "reader_math_hidden"
+            ) {
                 if closing {
                     custom_depth = custom_depth.saturating_sub(1);
                 } else if !inside.ends_with('/') {
@@ -948,6 +1135,163 @@ mod tests {
         ] {
             assert!(tracked_html(&crate::reader_inline_code::wrap_html(source)).is_none());
         }
+    }
+
+    #[test]
+    fn typst_formula_hits_are_atomic_and_displaced_source_paints_the_owner() {
+        use makepad_widgets::makepad_draw::text::{
+            geom::{Point, Size},
+            layouter::LaidoutRow,
+        };
+        let layout = Rc::new(LaidoutText {
+            text: "M".into(),
+            size_in_lpxs: Size::new(12., 16.),
+            is_truncated: false,
+            rows: vec![LaidoutRow {
+                origin_in_lpxs: Point::new(0., 12.),
+                text: "M".into(),
+                newline: false,
+                width_in_lpxs: 12.,
+                ascender_in_lpxs: 12.,
+                descender_in_lpxs: -4.,
+                line_gap_in_lpxs: 0.,
+                line_spacing_scale: 1.,
+                glyphs: Vec::new(),
+            }],
+        });
+        let rect = Rect {
+            pos: dvec2(90., 130.),
+            size: dvec2(100., 45.),
+        };
+        let highlight = Rect {
+            pos: rect.pos - dvec2(0., 2.),
+            size: rect.size + dvec2(0., 4.),
+        };
+        let run = HitRun {
+            layout,
+            origin: rect.pos,
+            scale: 1.,
+            start: 12,
+            row: Some(0),
+            drawn_rows: vec![(0, rect)],
+            ink_rows: vec![(0, rect)],
+            atomic: Some(AtomicGeometry {
+                len: "x√d_k".len(),
+                hidden: false,
+                center: 20.,
+                display: false,
+            }),
+        };
+        assert_eq!(
+            hit_index(std::slice::from_ref(&run), dvec2(100., 150.)),
+            Some(12)
+        );
+        assert_eq!(
+            hit_index(std::slice::from_ref(&run), dvec2(180., 150.)),
+            Some(12 + "x√d_k".len())
+        );
+        assert_eq!(
+            hit_word_index(std::slice::from_ref(&run), dvec2(100., 150.)),
+            None
+        );
+        assert_eq!(
+            selection_rects(std::slice::from_ref(&run), 13, 14),
+            vec![highlight]
+        );
+        assert_eq!(
+            selection_rects(std::slice::from_ref(&run), 0, 12),
+            Vec::new()
+        );
+        let hidden = HitRun {
+            atomic: Some(AtomicGeometry {
+                len: 1,
+                hidden: true,
+                center: 20.,
+                display: false,
+            }),
+            ..run
+        };
+        assert_eq!(
+            hit_index(std::slice::from_ref(&hidden), dvec2(100., 150.)),
+            None
+        );
+        assert!(painted_rows(std::slice::from_ref(&hidden)).is_empty());
+        assert_eq!(selection_rects(&[hidden], 12, 13), vec![highlight]);
+    }
+
+    #[test]
+    fn paragraph_math_uses_prose_rows_and_deduplicates_out_of_order_script_proxies() {
+        let formula = Rect {
+            pos: dvec2(45., 28.),
+            size: dvec2(25., 24.),
+        };
+        let rects = math_selection_rows(
+            vec![
+                Rect {
+                    pos: dvec2(10., 70.),
+                    size: dvec2(80., 14.),
+                },
+                Rect {
+                    pos: dvec2(10., 20.),
+                    size: dvec2(35., 14.),
+                },
+                Rect {
+                    pos: dvec2(70., 20.),
+                    size: dvec2(30., 14.),
+                },
+            ],
+            vec![
+                MathSelection {
+                    rect: formula,
+                    center: 27.,
+                    tolerance: 7.,
+                    display: false,
+                },
+                MathSelection {
+                    rect: formula,
+                    center: 27.,
+                    tolerance: 7.,
+                    display: false,
+                },
+            ],
+        );
+        assert_eq!(
+            rects,
+            vec![
+                Rect {
+                    pos: dvec2(10., 20.),
+                    size: dvec2(90., 32.)
+                },
+                Rect {
+                    pos: dvec2(10., 70.),
+                    size: dvec2(80., 14.)
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn displaced_formula_proxy_does_not_colour_unselected_prose_between_fragments() {
+        let rects = math_selection_rows(
+            vec![Rect {
+                pos: dvec2(10., 20.),
+                size: dvec2(30., 14.),
+            }],
+            vec![MathSelection {
+                rect: Rect {
+                    pos: dvec2(200., 16.),
+                    size: dvec2(20., 24.),
+                },
+                center: 27.,
+                tolerance: 7.,
+                display: false,
+            }],
+        );
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].pos.x + rects[0].size.x, 40.);
+        assert_eq!(rects[1].pos.x, 200.);
+        assert_eq!(rects[0].pos.y, rects[1].pos.y);
+        assert_eq!(rects[0].size.y, rects[1].size.y);
     }
 
     #[test]

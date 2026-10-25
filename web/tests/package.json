@@ -1,0 +1,6 @@
+{
+  "name": "readwise-web-browser-tests",
+  "private": true,
+  "scripts": { "test": "node math.cjs && node colours.cjs && node shelf.cjs && node browser.cjs && node parity.cjs && node highlight.cjs && node highlight-seams.cjs" },
+  "devDependencies": { "playwright-core": "1.57.0" }
+}

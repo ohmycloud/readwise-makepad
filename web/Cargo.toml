@@ -1,0 +1,25 @@
+[package]
+name = "readwise-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+
+[dependencies]
+topcoat = { version = "=0.10.0", default-features = false, features = ["asset", "router", "runtime", "serve", "view", "discover", "multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "signal"] }
+readwise-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+ammonia = "4.2"
+html-escape = "0.2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+tempfile = "3"
+readwise-math = { path = "../math" }
+zip = { version = "3", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+http = "1"
+http-body-util = "0.1"

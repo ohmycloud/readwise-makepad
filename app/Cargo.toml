@@ -16,6 +16,7 @@ makepad-ai = { git = "https://github.com/makepad/makepad", branch = "dev" }
 makepad-code-editor = { git = "https://github.com/makepad/makepad", branch = "dev" }
 makepad-widgets = { git = "https://github.com/makepad/makepad", branch = "dev" }
 readwise-core = { path = "../core" }
+readwise-math = { path = "../math" }
 jieba-rs = "0.10"
 unicode-segmentation = "1"
 log = "0.4"

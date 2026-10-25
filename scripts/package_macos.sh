@@ -55,6 +55,9 @@ fi
 mkdir -p "$dist_dir"
 rm -rf "$dist_app"
 ditto "$built_app" "$dist_app"
+mkdir -p "$dist_app/Contents/Resources/third-party/typst-assets"
+install -m 0644 app/resources/third-party/typst-assets/{LICENSE,NOTICE} \
+    "$dist_app/Contents/Resources/third-party/typst-assets/"
 
 plist="$dist_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$plist"

@@ -769,14 +769,67 @@ fn highlight_range_in_block(
 #[cfg(test)]
 mod table_block_tests {
     use super::{
-        choose_reader_hit_index, is_table_block, normalize_rich_selection_rects,
-        ordered_selection_range, reader_block_visual_height, reader_drag_moves_forward,
-        reader_fallback_source_index, reader_geometry_capture_policy,
-        reader_geometry_width_is_stable, reader_markup_available_width, reader_pagination_rows,
-        reader_painted_page_cuts, reader_plain_paragraph, selection_range_in_block,
-        supports_unified_reader_hit_test, visual_selection_row_bounds,
+        choose_reader_hit_index, disjoint_highlight_paint, is_table_block,
+        normalize_math_selection_rects, normalize_rich_selection_rects, ordered_selection_range,
+        reader_block_visual_height, reader_drag_moves_forward, reader_fallback_source_index,
+        reader_geometry_capture_policy, reader_geometry_width_is_stable,
+        reader_markup_available_width, reader_pagination_rows, reader_painted_page_cuts,
+        reader_plain_paragraph, selection_range_in_block, supports_unified_reader_hit_test,
+        visual_selection_row_bounds,
     };
-    use makepad_widgets::{dvec2, Rect};
+    use makepad_widgets::{dvec2, Rect, Vec4f};
+
+    #[test]
+    fn displaced_owner_receives_only_one_alpha_layer_for_the_same_colour() {
+        let color = Vec4f::from_u32(0xf2c43859);
+        let rect = |x| Rect {
+            pos: dvec2(x, 0.),
+            size: dvec2(20., 10.),
+        };
+        let paint = disjoint_highlight_paint(vec![
+            (color, rect(0.)),
+            (color, rect(10.)),
+            (color, rect(0.)),
+        ]);
+        assert_eq!(
+            paint.iter().map(|(_, r)| r.size.x * r.size.y).sum::<f64>(),
+            300.
+        );
+        let mixed = disjoint_highlight_paint(vec![
+            (color, rect(0.)),
+            (Vec4f::from_u32(0x6aa8f059), rect(0.)),
+        ]);
+        assert_eq!(
+            mixed.len(),
+            2,
+            "different colours keep their existing stacking contract"
+        );
+    }
+
+    #[test]
+    fn displaced_math_keeps_unselected_horizontal_gaps_inside_continuous_row_bands() {
+        let rects = [
+            Rect {
+                pos: dvec2(0., 10.),
+                size: dvec2(25., 30.),
+            },
+            Rect {
+                pos: dvec2(100., 10.),
+                size: dvec2(20., 30.),
+            },
+            Rect {
+                pos: dvec2(0., 50.),
+                size: dvec2(60., 20.),
+            },
+        ];
+        let painted = normalize_math_selection_rects(&rects);
+        assert_eq!(painted.len(), 3);
+        assert_eq!(painted[0].pos.y, painted[1].pos.y);
+        assert_eq!(painted[0].size.y, painted[1].size.y);
+        assert_eq!(painted[0].pos.x + painted[0].size.x, 25.);
+        assert_eq!(painted[1].pos.x, 100.);
+        assert_eq!(painted[0].pos.y + painted[0].size.y, painted[2].pos.y);
+    }
 
     #[test]
     fn recognizes_only_top_level_table_blocks() {
@@ -3219,6 +3272,7 @@ struct OpenBook {
     /// 各章原始 body HTML（已消毒，不含运行时注音）。
     chapters: Vec<String>,
     chapter_paths: Vec<String>,
+    math: crate::reader_math::BookMath,
     figure_targets: Vec<HashMap<String, String>>,
     /// 按访问惰性生成、已切块的注音章节；关闭注音时仍从原始章节投影。
     /// 直接缓存 PortalList 所需的块，避免每次设置刷新或旋转恢复都重新 split_blocks。
@@ -3249,6 +3303,35 @@ impl OpenBook {
 
     fn chapter_chunks(&mut self, idx: usize, gloss_enabled: bool) -> Option<Vec<String>> {
         let raw = self.chapters.get(idx)?;
+        if let Some(page) = self.math.page(idx, raw) {
+            if gloss_enabled {
+                if let Some(cached) = self.glossed_chapter_chunks.get(idx)?.as_ref() {
+                    return Some(cached.clone());
+                }
+            }
+            let blocks = readwise_core::books::epub_meta::split_blocks(raw);
+            let chunks = blocks
+                .iter()
+                .enumerate()
+                .map(|(block, html)| {
+                    self.math.project(&page, idx, block, html, |protected| {
+                        if gloss_enabled {
+                            readwise_core::vocab::annotate::annotate_html(
+                                protected,
+                                &self.glosses,
+                                &self.known_words,
+                            )
+                        } else {
+                            protected.to_owned()
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            if gloss_enabled {
+                self.glossed_chapter_chunks[idx] = Some(chunks.clone());
+            }
+            return Some(chunks);
+        }
         if !gloss_enabled || self.glosses.is_empty() {
             return Some(readwise_core::books::epub_meta::split_blocks(raw));
         }
@@ -3425,6 +3508,7 @@ mod lazy_gloss_tests {
     fn book() -> OpenBook {
         OpenBook {
             id: "book".to_string(),
+            math: Default::default(),
             title: "Book".to_string(),
             chapters: vec![
                 "<p>The solitude.</p>".to_string(),
@@ -4037,6 +4121,12 @@ fn spawn_delete_note(book_id: String, note_id: String) {
 /// 高亮保存结果。
 #[derive(Debug)]
 enum HlAction {
+    Applied {
+        book_id: String,
+        chapter: usize,
+        range: TextRange,
+        highlights: Vec<readwise_core::books::Highlight>,
+    },
     Saved {
         book_id: String,
         highlight: readwise_core::books::Highlight,
@@ -4056,10 +4146,31 @@ enum HlAction {
     Error(String),
 }
 
+fn spawn_apply_highlight(book_id: String, chapter: usize, range: TextRange, slot: usize) {
+    let color =
+        crate::mark_span::HL_COLOR_NAMES[slot.min(crate::mark_span::HL_COLOR_NAMES.len() - 1)];
+    std::thread::spawn(move || {
+        let ((sb, sc), (eb, ec)) = range;
+        let result = DB
+            .get()
+            .ok_or_else(|| "数据库尚未就绪".to_owned())
+            .and_then(|db| db.apply_highlight(&book_id, chapter, (sb, sc, eb, ec), color));
+        match result {
+            Ok(highlights) => Cx::post_action(HlAction::Applied {
+                book_id,
+                chapter,
+                range,
+                highlights,
+            }),
+            Err(error) => Cx::post_action(HlAction::Error(error)),
+        }
+    });
+}
+
 fn spawn_add_highlight(book_id: String, chapter: usize, range: TextRange) {
+    let slot = *crate::mark_span::HL_SLOT.read().unwrap();
     std::thread::spawn(move || {
         let Some(db) = DB.get() else { return };
-        let slot = *crate::mark_span::HL_SLOT.read().unwrap();
         let names = crate::mark_span::HL_COLOR_NAMES;
         let color = names[slot.min(names.len() - 1)];
         let ((sb, sc), (eb, ec)) = range;
@@ -4549,8 +4660,13 @@ fn spawn_open_book(item: ShelfItem) {
         let english_level = *ENGLISH_LEVEL.read().unwrap();
         let glosses = lexicon.select(english_level);
         let gloss_count = glosses.len();
+        let mut math = crate::reader_math::BookMath::new(&item.file_path, &item.id, request_id);
+        if let Some(raw) = chapters.get(resume.chapter) {
+            math.prepare_initial(resume.chapter, raw);
+        }
         let mut book = OpenBook {
             id: item.id,
+            math,
             title: item.title,
             glossed_chapter_chunks: vec![None; chapters.len()],
             chapters,
@@ -4659,6 +4775,7 @@ mod highlight_overlap_tests {
     fn failed_delete_restores_only_removed_highlights_in_original_order() {
         let mut book = OpenBook {
             id: "book".into(),
+            math: Default::default(),
             title: String::new(),
             chapters: Vec::new(),
             chapter_paths: Vec::new(),
@@ -5633,6 +5750,30 @@ mod customise_highlight_tests {
         assert!(route.contains("ids!(draw_bg.border_size)"));
         assert!(!route.contains("reader_settings_motion"));
         assert!(!source.contains("\n                                reader_settings_content :="));
+    }
+
+    #[test]
+    fn selection_swatch_applies_the_captured_range_not_just_the_default_colour() {
+        let source = include_str!("app.rs");
+        let route = source
+            .rsplit_once("        for (id, slot) in [\n            (id!(sel_yellow), 4)")
+            .unwrap()
+            .1;
+        let route = route.split("ids!(hl_btn)").next().unwrap();
+        assert!(route.contains("spawn_apply_highlight(book_id, self.chapter_idx, range, slot)"));
+        assert!(route.contains("!self.selection_highlight_pending"));
+        assert!(route.contains("let range = *SEL_RANGE.read().unwrap()"));
+        for forbidden in [
+            "refresh_current_chapter",
+            "invalidate_layout",
+            "set_chapter(",
+            "request_script_reapply",
+        ] {
+            assert!(
+                !route.contains(forbidden),
+                "swatch must be paint-only, not {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -6781,6 +6922,8 @@ script_mod! {
                 para_html := Html{
                     width: Fill height: Fit
                     selectable: true
+                    reader_math := mod.widgets.ReaderMath{}
+                    reader_math_hidden := mod.widgets.ReaderMathHidden{}
                     a := mod.widgets.ReaderLink{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
@@ -6796,6 +6939,8 @@ script_mod! {
                 para_html := Html{
                     width: Fill height: Fit
                     selectable: true
+                    reader_math := mod.widgets.ReaderMath{}
+                    reader_math_hidden := mod.widgets.ReaderMathHidden{}
                     a := mod.widgets.ReaderLink{}
                     ruby := mod.widgets.RubyWord{}
                     reader_indent := mod.widgets.ReaderParagraphIndent{}
@@ -6815,6 +6960,8 @@ script_mod! {
                 para_html := Html{
                     width: Fill{max: 960} height: Fit
                     selectable: true
+                    reader_math := mod.widgets.ReaderMath{}
+                    reader_math_hidden := mod.widgets.ReaderMathHidden{}
                     a := mod.widgets.ReaderLink{}
                     img := mod.widgets.ChapterImage{}
                     mark := mod.widgets.MarkSpan{}
@@ -6831,6 +6978,8 @@ script_mod! {
                 para_html := Html{
                     width: Fill{max: 960} height: Fit
                     selectable: true
+                    reader_math := mod.widgets.ReaderMath{}
+                    reader_math_hidden := mod.widgets.ReaderMathHidden{}
                     a := mod.widgets.ReaderLink{}
                     ruby := mod.widgets.RubyWord{}
                     img := mod.widgets.ChapterImage{}
@@ -9642,6 +9791,84 @@ fn normalize_rich_selection_rects(rects: &[Rect]) -> Vec<Rect> {
     out
 }
 
+// The same displaced owner can belong to two non-contiguous source tails.
+// Union same-colour paint before alpha blending, never tint that owner twice.
+fn disjoint_highlight_paint(paint: Vec<(Vec4f, Rect)>) -> Vec<(Vec4f, Rect)> {
+    let mut out: Vec<(Vec4f, Rect)> = Vec::new();
+    for (color, rect) in paint {
+        let mut pieces = vec![rect];
+        for (_, old) in out.iter().filter(|(old_color, _)| *old_color == color) {
+            pieces = pieces
+                .into_iter()
+                .flat_map(|r| {
+                    let left = r.pos.x.max(old.pos.x);
+                    let top = r.pos.y.max(old.pos.y);
+                    let right = (r.pos.x + r.size.x).min(old.pos.x + old.size.x);
+                    let bottom = (r.pos.y + r.size.y).min(old.pos.y + old.size.y);
+                    if right <= left || bottom <= top {
+                        return vec![r];
+                    }
+                    [
+                        (r.pos.x, r.pos.y, r.size.x, top - r.pos.y),
+                        (r.pos.x, bottom, r.size.x, r.pos.y + r.size.y - bottom),
+                        (r.pos.x, top, left - r.pos.x, bottom - top),
+                        (right, top, r.pos.x + r.size.x - right, bottom - top),
+                    ]
+                    .into_iter()
+                    .filter(|(_, _, w, h)| *w > 0. && *h > 0.)
+                    .map(|(x, y, w, h)| Rect {
+                        pos: dvec2(x, y),
+                        size: dvec2(w, h),
+                    })
+                    .collect()
+                })
+                .collect();
+            if pieces.is_empty() {
+                break;
+            }
+        }
+        out.extend(pieces.into_iter().map(|rect| (color, rect)));
+    }
+    out
+}
+
+// Keep a displaced formula proxy from bridging an unselected stretch of prose.
+// Vertical bands still use the same paragraph painter; only real horizontal
+// gaps (larger than a normal space) are retained inside that band.
+fn normalize_math_selection_rects(rects: &[Rect]) -> Vec<Rect> {
+    let bands = normalize_rich_selection_rects(rects);
+    let mut pieces = vec![Vec::<(f64, f64)>::new(); bands.len()];
+    for rect in rects {
+        let center = rect.pos.y + rect.size.y * 0.5;
+        if let Some((i, _)) = bands.iter().enumerate().min_by(|(_, a), (_, b)| {
+            (a.pos.y + a.size.y * 0.5 - center)
+                .abs()
+                .total_cmp(&(b.pos.y + b.size.y * 0.5 - center).abs())
+        }) {
+            pieces[i].push((rect.pos.x, rect.pos.x + rect.size.x));
+        }
+    }
+    bands
+        .into_iter()
+        .zip(pieces)
+        .flat_map(|(band, mut pieces)| {
+            pieces.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut spans: Vec<(f64, f64)> = Vec::new();
+            for (left, right) in pieces {
+                if let Some(last) = spans.last_mut().filter(|last| left <= last.1 + 2.) {
+                    last.1 = last.1.max(right);
+                } else {
+                    spans.push((left, right));
+                }
+            }
+            spans.into_iter().map(move |(left, right)| Rect {
+                pos: dvec2(left, band.pos.y),
+                size: dvec2(right - left, band.size.y),
+            })
+        })
+        .collect()
+}
+
 /// Return cuts between the actual TextFlow row boxes. TextFlow adds 2px above
 /// and below every selection rectangle; retaining that highlight padding can
 /// make adjacent rows appear to overlap and leave pagination with no cuts.
@@ -11410,6 +11637,7 @@ impl ChapterList {
         }
         crate::reader_hit::begin_capture(measure);
         crate::reader_inline_code::begin_capture(native_probe);
+        crate::reader_math::begin_capture();
         let page_height = if self.pager.active {
             self.pager.layout.height
         } else {
@@ -11423,6 +11651,7 @@ impl ChapterList {
         }
         let item_rect = item.area().rect(cx);
         let item_margin = item.walk(cx).margin;
+        crate::reader_math::finish_capture();
         let (runs, overlays) = crate::reader_hit::end_capture(cx, item_rect.pos);
         let mut painted_bottom = 0.0_f64;
         let painted_cuts = if measure && !runs.is_empty() {
@@ -11527,7 +11756,11 @@ impl ChapterList {
                             .fold(0.0_f64, f64::max),
                     );
                 }
-                let normalized = normalize_rich_selection_rects(&raw);
+                let normalized = if para.contains("<reader_math") {
+                    normalize_math_selection_rects(&raw)
+                } else {
+                    normalize_rich_selection_rects(&raw)
+                };
                 if measure {
                     page_lines = reader_pagination_rows(&raw);
                 }
@@ -11556,25 +11789,59 @@ impl ChapterList {
             };
         }
 
+        // Rich hit runs already describe every painted character, not just
+        // TextFlow's single probe. Capture ALL missing marks in this draw;
+        // scheduling one redraw per mark can stop after the first cached row
+        // when the parent draw-list is reused (notably after partial recolour).
+        if !measure && tracked.is_some() && mapping_stable && width_stable {
+            if let Some((_, _, runs)) = self.hit_runs.get(&item.widget_uid()) {
+                for (range, key, _) in &highlight_entries {
+                    if self.range_geometry_cache.contains_key(key) {
+                        continue;
+                    }
+                    let Some((start, end)) = self
+                        .text_maps
+                        .get(&item_id)
+                        .and_then(|(_, map)| map.native_range(*range))
+                    else {
+                        continue;
+                    };
+                    let raw = crate::reader_hit::selection_rects(runs, start, end);
+                    if !raw.is_empty() {
+                        let normalized = if para.contains("<reader_math") {
+                            normalize_math_selection_rects(&raw)
+                        } else {
+                            normalize_rich_selection_rects(&raw)
+                        };
+                        self.range_geometry_cache.insert(*key, normalized);
+                    }
+                }
+            }
+        }
+
         if !measure {
             // Permanent highlights and the current selection are drawn from
             // exactly the same captured rich-text geometry. Translate cached
             // item-relative rectangles so PortalList scrolling cannot stale it.
+            let mut paint = Vec::new();
             for (_, key, color) in &highlight_entries {
                 if let Some(rects) = self.range_geometry_cache.get(key).cloned() {
-                    self.draw_reader_selection.color = *color;
                     for rect in rects {
-                        self.draw_reader_selection.draw_abs(
-                            cx,
-                            Rect {
-                                pos: rect.pos + item_rect.pos,
-                                size: rect.size,
-                            },
-                        );
+                        paint.push((*color, rect));
                     }
                 } else if self.text_map(item_id, para).is_some() {
                     needs_geometry_redraw = true;
                 }
+            }
+            for (color, rect) in disjoint_highlight_paint(paint) {
+                self.draw_reader_selection.color = color;
+                self.draw_reader_selection.draw_abs(
+                    cx,
+                    Rect {
+                        pos: rect.pos + item_rect.pos,
+                        size: rect.size,
+                    },
+                );
             }
             if let Some(key) = current_key {
                 if let Some(rects) = captured_current_geometry {
@@ -13146,6 +13413,8 @@ pub struct App {
     selection_ai_open: bool,
     #[rust]
     selection_more_open: bool,
+    #[rust]
+    selection_highlight_pending: bool,
     #[rust]
     selection_ai_draft: String,
     #[rust]
@@ -18402,6 +18671,14 @@ impl App {
             if idx >= book.chapters.len() {
                 return;
             }
+            // Never flash the extracted flat formula first, or disturb the
+            // current page/history while its destination is being compiled.
+            if book
+                .math
+                .defer_navigation(idx, &book.chapters[idx], block, scroll, persist)
+            {
+                return;
+            }
             let Some(chunks) = build_chapter_chunks(book, idx) else {
                 return;
             };
@@ -18590,6 +18867,9 @@ impl App {
     fn page_scroll(&mut self, cx: &mut Cx, down: bool) {
         if self.reader_page_navigation_blocked(cx) {
             return;
+        }
+        if let Some(book) = CURRENT_BOOK.write().unwrap().as_mut() {
+            book.math.cancel_navigation();
         }
         if self.compact_layout {
             self.set_reader_toolbar_visible(cx, false);
@@ -20609,7 +20889,33 @@ impl MatchEvent for App {
                 continue;
             }
             if let Some(highlight_action) = action.downcast_ref::<HlAction>() {
+                self.selection_highlight_pending = false;
                 match highlight_action {
+                    HlAction::Applied {
+                        book_id,
+                        chapter,
+                        range,
+                        highlights,
+                    } => {
+                        let changed = CURRENT_BOOK
+                            .write()
+                            .unwrap()
+                            .as_mut()
+                            .filter(|book| book.id == *book_id)
+                            .is_some_and(|book| {
+                                book.highlights.insert(*chapter, highlights.clone());
+                                true
+                            });
+                        if changed && *chapter == self.chapter_idx {
+                            if *SEL_RANGE.read().unwrap() == Some(*range) {
+                                self.clear_reader_selection(cx);
+                            }
+                            self.redraw_reader_annotations(cx);
+                        }
+                        if changed && self.note_open {
+                            self.refresh_reader_highlights(cx);
+                        }
+                    }
                     HlAction::Saved {
                         book_id,
                         highlight,
@@ -20733,6 +21039,43 @@ impl MatchEvent for App {
                                 format!("笔记操作失败：{e}")
                             },
                         );
+                    }
+                }
+                continue;
+            }
+            if let Some(ready) = action.downcast_ref::<crate::reader_math::Ready>() {
+                let accepted = {
+                    let mut guard = CURRENT_BOOK.write().unwrap();
+                    guard.as_mut().and_then(|book| {
+                        let removed = book.math.accept(ready)?;
+                        for chapter in removed {
+                            book.glossed_chapter_chunks[chapter] = None;
+                        }
+                        if ready.page.bytes > 0 {
+                            book.glossed_chapter_chunks[ready.chapter] = None;
+                        }
+                        let navigation = book.math.take_navigation(ready.chapter);
+                        if navigation.is_none() {
+                            if let Some(chapter) = book.math.waiting_navigation() {
+                                book.math.page(chapter, &book.chapters[chapter]);
+                            }
+                        }
+                        Some(navigation)
+                    })
+                };
+                if let Some(navigation) = accepted {
+                    if ready.page.bytes > 0 {
+                        READER_BOOK_PAGINATION_REVISION.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Some((chapter, block, scroll, persist)) = navigation {
+                        if self.on_reader_page {
+                            self.set_chapter_at(cx, chapter, block, scroll, persist);
+                        }
+                    } else if self.on_reader_page
+                        && ready.page.bytes > 0
+                        && self.chapter_idx == ready.chapter
+                    {
+                        self.refresh_current_chapter(cx);
                     }
                 }
                 continue;
@@ -22311,19 +22654,32 @@ impl MatchEvent for App {
             (id!(sel_blue), 6),
             (id!(sel_pink), 7),
         ] {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if self.ui.button(cx, &[id]).clicked(actions) && !self.selection_highlight_pending {
                 *crate::mark_span::HL_SLOT.write().unwrap() = slot;
                 self.persist_reader_settings(cx);
                 self.sync_selection_popup(cx);
                 self.ui.widget(cx, ids!(sel_bar)).redraw(cx);
+                let range = *SEL_RANGE.read().unwrap();
+                let book_id = CURRENT_BOOK
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|book| book.id.clone());
+                if let (Some(range), Some(book_id)) = (range, book_id) {
+                    self.selection_highlight_pending = true;
+                    self.set_selection_hint(cx, localized("正在添加高亮…", "Adding highlight…"));
+                    spawn_apply_highlight(book_id, self.chapter_idx, range, slot);
+                }
             }
         }
-        if self.ui.button(cx, ids!(hl_btn)).clicked(actions)
-            || self.ui.button(cx, ids!(remove_hl_sel_btn)).clicked(actions)
+        if (self.ui.button(cx, ids!(hl_btn)).clicked(actions)
+            || self.ui.button(cx, ids!(remove_hl_sel_btn)).clicked(actions))
+            && !self.selection_highlight_pending
         {
             let range = *SEL_RANGE.read().unwrap();
             let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
             if let (Some(range), Some(book_id)) = (range, book_id) {
+                self.selection_highlight_pending = true;
                 let ids = self.selected_highlight_ids();
                 if ids.is_empty() {
                     self.set_selection_hint(cx, localized("正在添加高亮…", "Adding highlight…"));
@@ -23251,6 +23607,7 @@ impl AppMain for App {
         crate::shelf_list::script_mod(vm);
         crate::ruby_word::script_mod(vm);
         crate::reader_hit::script_mod(vm);
+        crate::reader_math::script_mod(vm);
         crate::reader_inline_code::script_mod(vm);
         crate::reader_paragraph::script_mod(vm);
         crate::reader_link::script_mod(vm);

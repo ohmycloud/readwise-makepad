@@ -4,6 +4,7 @@
 
 用 [Makepad 2.0](https://zhanghandong.github.io/makepad-2.0-book/)（Splash DSL + 纯 Rust）重写的 ReadWise 阅读器。
 原 Tauri + React 版本保留在 `../readwise`；当前项目的阅读、词汇、AI、统计和本地数据主链路均已迁移到 Rust + Makepad。
+新增独立的 **Topcoat Web 客户端**，复用 Rust 业务层；目前提供本机单用户的书架、导入、注音/分页阅读、选文高亮/笔记/单次 AI、词汇与完整 aA 阅读设置，完整范围和限制见 [Web 开发指南](docs/WEB.md)。
 
 - 里程碑规划：[docs/MILESTONES.md](docs/MILESTONES.md)
 - 开发日志：[docs/DEVLOG.md](docs/DEVLOG.md)
@@ -16,6 +17,8 @@
 readwise-makepad/
 ├── app/          # Makepad UI 应用与平台资源
 ├── core/         # SQLite、EPUB / PDF、词汇、笔记、AI 等纯 Rust 业务逻辑
+├── math/         # 桌面 / Web 共用的离线 Typst PDF 几何投影
+├── web/          # Topcoat Web 客户端、浏览器阅读交互及回归测试
 ├── scripts/      # 可复现的数据生成与发布脚本
 └── docs/         # 里程碑、部署指南与开发日志
 ```
@@ -42,6 +45,21 @@ cargo run -p readwise-app --release  # 发布构建
 ```
 
 依赖 makepad dev 分支（git 依赖），首次构建会拉取并编译 makepad，耗时较长属正常。
+
+## PDF 数学公式
+
+桌面与 Web 共用 `readwise-math` 的离线 Typst 0.15.1 引擎：从原 PDF 字形、基线及横线投影公式，不依赖 Typst CLI、系统字体或在线服务。桌面以原生 `DrawSvg` 绘制，Web 使用 SVG 与透明源选择层；正文快照、UTF-8 高亮坐标和阅读锚点不迁移，无法可靠映射时保守回退原文。复制仍为原提取文本，不是语义 LaTeX 导出。原生字体许可证及声明在 `app/resources/third-party/typst-assets/`，随发行包携带。
+
+## 运行（Web / Topcoat）
+
+需要 Rust 1.98+ 和 Topcoat CLI 0.10.0：
+
+```bash
+cargo install topcoat-cli --version 0.10.0 --locked
+scripts/run_web.sh
+```
+
+打开 `http://127.0.0.1:3000`。脚本会先打包 Topcoat 的 CSS/JS 资源再启动服务；默认使用 ReadWise 系统数据目录下独立的 `web/` 子目录，不修改原生书库。当前仅允许本机回环监听，无认证、云同步或离线 PWA；**不要直接暴露公网**。部署边界、测试及后续计划见 [docs/WEB.md](docs/WEB.md)。
 
 ## GitHub Release
 

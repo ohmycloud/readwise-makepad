@@ -1,0 +1,19 @@
+[package]
+name = "readwise-math"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# One offline compiler/projection for native and Web readers.
+typst = "=0.15.1"
+typst-svg = "=0.15.1"
+typst-layout = "=0.15.1"
+typst-assets = { version = "=0.15.1", features = ["fonts"] }
+pdf_oxide = { version = "=0.3.78", default-features = false, features = ["legacy-crypto"] }
+ammonia = "4.2"
+html-escape = "0.2"
+serde_json = "1"
+
+[dev-dependencies]
+readwise-core = { path = "../core" }
+tempfile = "3"

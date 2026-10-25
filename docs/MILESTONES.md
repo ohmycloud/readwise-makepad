@@ -1,10 +1,11 @@
 # ReadWise Makepad 重写 — Milestones
 
 > 决策日期：2026-07-14
-> 架构：纯 Makepad 2.0（Splash DSL + Rust），不再有 WebView/React/Vue。
+> 原生架构：Makepad 2.0（Splash DSL + Rust），不嵌入 WebView/React/Vue。
+> 2026-10-23 新增：独立 Topcoat Web 客户端，复用 readwise-core，详见 [WEB.md](WEB.md)。
 > 参考资料：[Makepad 2.0 Book](https://zhanghandong.github.io/makepad-2.0-book/)、[makepad-skills](https://github.com/ZhangHanDong/makepad-skills)
 
-## 目标平台（2026-07-15 确认：桌面 + 移动，不含 Web）
+## 目标平台（原桌面 + 移动；2026-10-23 增加 Topcoat Web）
 
 | 平台 | 状态 |
 |------|------|
@@ -12,7 +13,8 @@
 | iOS（iPhone） | ✅ 已验证（真机 + 模拟器） |
 | Windows / Linux 桌面 | 🟡 原生打包脚本已实现，待对应主机实跑与 UI 补测（Windows 窗口装饰小差异待处理） |
 | Android | 🟡 arm64 release APK 已真实构建并安装，EPUB 系统选择器已通过真机验证，横竖屏状态保持待复测 |
-| **Web (wasm)** | ❌ **明确不做**。Makepad 框架支持 wasm，但 readwise-core 的 sqlx + SQLite + tokio 在浏览器沙箱跑不了（无文件系统/原生线程）。支持 Web 需为 wasm 单独做数据层（IndexedDB/OPFS sqlite-wasm）或改远程架构，违背本地优先设计，不纳入路线图。 |
+| **Web（Topcoat SSR）** | 🟡 第一阶段已实现：本机单用户书架、EPUB/PDF 导入、章节/目录/图片、注音词卡、已认识词、词汇、aA/设置及阅读锚点恢复。已增加桌面风格选文工具栏、持久化 Web 高亮/笔记、单次 AI、完整 aA 三页签/全局阅读偏好、只读桌面设置载入与 CSS 分页；默认独立数据目录，不含认证、自动双向同步和完整原生 AI。验证与限制见 [WEB.md](WEB.md)。 |
+| **Web（Makepad WASM）** | ❌ 仍不纳入路线图。不是将当前原生 SQLite、文件和线程路径直接编译进浏览器；新增 Web 采用服务端运行 readwise-core 的独立架构。 |
 
 ## 总体策略
 
@@ -20,6 +22,23 @@
 - **UI 全部重写**：React 页面（library/reader/chat/vocab/wordbook/statistics/skills）逐个用 Splash DSL 重建。
 - **最大风险点是阅读器**：现在靠 foliate-js（WebView 里的 HTML/CSS 排版）渲染 EPUB。Makepad 没有浏览器引擎，只有 Html widget（HTML 子集）。注音（ruby）、高亮、划词、分页都要自己做。**所以 M0 先做技术验证，不通过就止损。**
 - **AI 推理**：桌面端可保留 llama-server 子进程方案；iOS 禁止子进程，移动端 AI 一律走远程 API（smartFetch 链路对应的 reqwest 流式请求）。
+
+## W1 Topcoat Web 第一阶段
+
+- [x] 独立 `readwise-web` crate，固定 Topcoat 0.10.0，资源打包与启动脚本。
+- [x] 复用核心导入/解析/词库/数据库，隔离原生数据，原生客户端不迁移。
+- [x] 书架、流式上传、章节/目录/图片、滚动阅读及文本锚点保存/恢复。
+- [x] 原生 ruby、Topcoat signal 色板、词卡、标为已认识、词汇本、真实统计。
+- [x] 原地隐藏注音保持几何、失败恢复、返回章节一致性；窄/矮视口草稿与取消回归。
+- [x] 代码块语法高亮、选文复制/保存摘录工具栏与真实摘录列表。
+- [x] 桌面风格选文工具栏、四种持久化高亮、笔记撰写/摘录列表、引文/词汇/书内搜索操作。
+- [x] aA「主题／文本／注音」与统一全局阅读偏好；只读载入桌面设置草稿，明确应用，不修改桌面数据库。
+- [x] CSS 多栏分页与滑动/轻量卷页过渡、窄屏回退、旋转锚点、首/后续页交互回归。
+- [x] OpenAI 兼容配置及选文单次问答/解释/释义；回环 mock 验收，密钥不回传。
+- [ ] 物理跟手卷页、全书精确页码、书签、已有笔记编辑/管理。
+- [ ] AI 流式多轮/历史/skills、阅读计时、完整书架管理。
+- [ ] Android/iOS 真机浏览器、Safari/Firefox 专项验收。
+- [ ] 认证、多用户隔离、跨端同步及离线能力，须另行设计后开放远程部署。
 
 ## M0 技术验证（风险闸门）✅ 2026-07-14 通过
 

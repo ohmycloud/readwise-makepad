@@ -26,6 +26,11 @@ desktop_file="$desktop_dir/org.ohmycloud.readwise.desktop"
 mkdir -p "$user_bin_dir" "$desktop_dir" "$icon_dir"
 install -m 0755 "$source_binary" "$installed_binary"
 install -m 0644 "$source_icon" "$installed_icon"
+if [[ -d "$script_dir/third-party/typst-assets" ]]; then
+    notice_dir="$user_data_dir/readwise/third-party/typst-assets"
+    mkdir -p "$notice_dir"
+    install -m 0644 "$script_dir/third-party/typst-assets/"{LICENSE,NOTICE} "$notice_dir/"
+fi
 
 cat > "$desktop_file" <<EOF
 [Desktop Entry]
