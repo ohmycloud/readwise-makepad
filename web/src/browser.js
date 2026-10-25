@@ -487,7 +487,7 @@ Promise.all([
   const appearance = await appearanceModule.initializeAppearance({ $, $$, api, toast, article, captureAnchor, restoreAnchor, getPager: () => pager, channel });
   translate = appearance.t;
   const shelf = $(".shelf-page");
-  if (shelf) (await import(shelf.dataset.shelfSrc)).initializeShelf({ api, toast });
+  if (shelf) (await import(shelf.dataset.shelfSrc)).initializeShelf({ api, toast, t: appearance.t, format: appearance.format });
   selectionModule?.initializeSelection({ $, $$, api, toast, article, textNodes, textPoint, positionSelection,
     getExcerpt: () => selectedExcerpt, hideSelection, applySaved: appearance.applySaved, channel,
     painter: highlightModule?.createHighlightPainter({ article }) });

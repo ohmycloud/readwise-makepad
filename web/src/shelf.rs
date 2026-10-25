@@ -1,5 +1,8 @@
 //! Shelf management reuses the native Db operations, not a second book store.
-use crate::routes;
+use crate::{
+    i18n::{text, translate},
+    routes,
+};
 use readwise_core::books::models::BookShelfItem;
 use serde::Deserialize;
 use topcoat::{
@@ -24,6 +27,17 @@ pub fn status(book: &BookShelfItem) -> String {
         format!("{name} · {percent}%")
     } else {
         name.into()
+    }
+}
+
+pub fn localized_status(cx: &Cx, book: &BookShelfItem) -> String {
+    let value = status(book);
+    let (name, suffix) = value.split_once(" · ").unwrap_or((&value, ""));
+    let name = translate(cx, name);
+    if suffix.is_empty() {
+        name
+    } else {
+        format!("{name} · {suffix}")
     }
 }
 
@@ -72,7 +86,7 @@ async fn manage_book(cx: &Cx, Json(action): Json<BookAction>) -> Result<Json<ser
 }
 
 #[component]
-pub async fn dialogs() -> Result<impl View> {
+pub async fn dialogs(cx: &Cx) -> Result<impl View> {
     Ok(view! {
         <dialog
             id="book-menu"
@@ -82,28 +96,28 @@ pub async fn dialogs() -> Result<impl View> {
             <div class="dialog-heading">
                 <h2 id="book-menu-title"></h2>
                 <button type="button" class="button quiet" data-close="">
-                    "关闭"
+                    (text(cx, "关闭"))
                 </button>
             </div>
             <div class="shelf-menu-actions">
                 <button type="button" class="button" data-book-action="share">
-                    "分享"
+                    (text(cx, "分享"))
                 </button>
                 <button type="button" class="button" data-book-action="want_to_read">
-                    "加入欲读清单"
+                    (text(cx, "加入欲读清单"))
                 </button>
                 <hr>
                 <button type="button" class="button" data-book-action="tags">
-                    "添加到藏书"
+                    (text(cx, "添加到藏书"))
                 </button>
                 <button type="button" class="button" data-book-action="complete">
-                    "标记为已读完"
+                    (text(cx, "标记为已读完"))
                 </button>
                 <button type="button" class="button" data-book-action="rename">
-                    "重新命名"
+                    (text(cx, "重新命名"))
                 </button>
                 <button type="button" class="button danger" data-book-action="delete">
-                    "删除"
+                    (text(cx, "删除"))
                 </button>
             </div>
             <p class="shelf-error" role="status" aria-live="polite"></p>
@@ -115,10 +129,12 @@ pub async fn dialogs() -> Result<impl View> {
         >
             <form id="book-editor-form">
                 <div class="dialog-heading">
-                    <h2 id="book-editor-title">"重新命名"</h2>
+                    <h2 id="book-editor-title">(text(cx, "重新命名"))</h2>
                 </div>
                 <p id="book-editor-book" class="muted"></p>
-                <label for="book-editor-input" id="book-editor-label">"书名"</label>
+                <label for="book-editor-input" id="book-editor-label">
+                    (text(cx, "书名"))
+                </label>
                 <input
                     id="book-editor-input"
                     class="shelf-input"
@@ -129,8 +145,12 @@ pub async fn dialogs() -> Result<impl View> {
                 <p id="book-editor-hint" class="muted small"></p>
                 <p class="shelf-error" role="status" aria-live="polite"></p>
                 <div class="shelf-dialog-actions">
-                    <button type="button" class="button" data-close="">"取消"</button>
-                    <button type="submit" class="button primary">"保存"</button>
+                    <button type="button" class="button" data-close="">
+                        (text(cx, "取消"))
+                    </button>
+                    <button type="submit" class="button primary">
+                        (text(cx, "保存"))
+                    </button>
                 </div>
             </form>
         </dialog>
@@ -141,16 +161,23 @@ pub async fn dialogs() -> Result<impl View> {
         >
             <form id="book-delete-form">
                 <div class="dialog-heading">
-                    <h2 id="book-delete-title">"删除书籍？"</h2>
+                    <h2 id="book-delete-title">(text(cx, "删除书籍？"))</h2>
                 </div>
                 <p id="book-delete-name"></p>
                 <p>
-                    "阅读进度和书内高亮会一并删除，已保存的摘录笔记保留。不会删除应用外的原始 EPUB / PDF。此操作无法撤销。"
+                    (text(
+                        cx,
+                        "阅读进度和书内高亮会一并删除，已保存的摘录笔记保留。不会删除应用外的原始 EPUB / PDF。此操作无法撤销。",
+                    ))
                 </p>
                 <p class="shelf-error" role="status" aria-live="polite"></p>
                 <div class="shelf-dialog-actions">
-                    <button type="button" class="button" data-close="">"取消"</button>
-                    <button type="submit" class="button danger">"确认删除"</button>
+                    <button type="button" class="button" data-close="">
+                        (text(cx, "取消"))
+                    </button>
+                    <button type="submit" class="button danger">
+                        (text(cx, "确认删除"))
+                    </button>
                 </div>
             </form>
         </dialog>

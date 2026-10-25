@@ -218,7 +218,7 @@ h2 { font-size: 20px; font-weight: 550; line-height: 1.4; }
 .scene-picker { border: 0; padding: 12px 0; margin: 0; min-width: 0; }
 .scene-picker legend { color: var(--muted); font-size: 13px; }
 .scene-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.scene-options span { display: flex; min-height: 75px; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; padding: 6px 2px; background: var(--scene-paper); color: var(--scene-ink); font-size: 12px; }
+.scene-options label > span { display: flex; min-height: 75px; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; padding: 6px 2px; background: var(--scene-paper); color: var(--scene-ink); font-size: 12px; }
 .scene-options b { font: 23px/1 Georgia, serif; }
 .scene-options input:checked + span { outline: 2px solid var(--accent); outline-offset: 1px; }
 .reset-settings { width: 100%; justify-content: flex-start; font-size: 13px; }

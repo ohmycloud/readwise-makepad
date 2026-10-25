@@ -1,13 +1,16 @@
 //! Shared, accessible controls. Native enum values are the wire/storage values.
+use crate::i18n::{text, translate};
 use crate::settings::{MARKER, PEN, Preferences, SCENES};
 use readwise_core::settings::ReaderFont;
 use topcoat::{
     Result,
+    context::Cx,
     view::{View, component, view},
 };
 
 #[component]
 pub async fn choices(
+    cx: &Cx,
     label: &str,
     field: &str,
     selected: &str,
@@ -15,7 +18,7 @@ pub async fn choices(
 ) -> Result<impl View> {
     Ok(view! {
         <fieldset class="setting-choice">
-            <legend>(label)</legend>
+            <legend>(text(cx, label))</legend>
             <div class="choice-options">
                 for &(value, title) in options {
                     <label>
@@ -25,7 +28,7 @@ pub async fn choices(
                             value=(value)
                             checked=(selected == value)
                         >
-                        <span>(title)</span>
+                        <span>(text(cx, title))</span>
                     </label>
                 }
             </div>
@@ -35,6 +38,7 @@ pub async fn choices(
 
 #[component]
 pub async fn range_control(
+    cx: &Cx,
     label: &str,
     field: &str,
     value: f32,
@@ -45,7 +49,7 @@ pub async fn range_control(
 ) -> Result<impl View> {
     Ok(view! {
         <label class="setting-row">
-            <span>(label)</span>
+            <span>(text(cx, label))</span>
             <input
                 name=(field)
                 type="range"
@@ -61,10 +65,10 @@ pub async fn range_control(
 }
 
 #[component]
-pub async fn global_controls(preferences: &Preferences) -> Result<impl View> {
+pub async fn global_controls(cx: &Cx, preferences: &Preferences) -> Result<impl View> {
     Ok(view! {
         <section class="global-reading-settings">
-            <h2>"阅读"</h2>
+            <h2>(text(cx, "阅读"))</h2>
             choices(
                 label: "界面语言",
                 field: "language",
@@ -72,33 +76,48 @@ pub async fn global_controls(preferences: &Preferences) -> Result<impl View> {
                 options: &[("zh-CN", "中文"), ("en", "英文")]
             )
             <label class="setting-row">
-                <span>"英文水平"</span>
+                <span>(text(cx, "英文水平"))</span>
                 <select name="english_level">
                     for level in ["A1", "A2", "B1", "B2", "C1", "C2", "C3"] {
                         <option
                             value=(level)
                             selected=(preferences.english_level == level)
+                            data-i18n=(if level == "C3" {
+                                Some("C3-自定义")
+                            } else {
+                                None
+                            })
                         >
-                            (if level == "C3" { "C3-自定义" } else { level })
+                            (if level == "C3" {
+                                translate(cx, "C3-自定义")
+                            } else {
+                                level.to_owned()
+                            })
                         </option>
                     }
                 </select>
             </label>
             <p class="small muted">
-                "水平越高，注音越少；C3 仅注音有自定义释义的导入词，已认识词不注音。"
+                (text(
+                    cx,
+                    "水平越高，注音越少；C3 仅注音有自定义释义的导入词，已认识词不注音。",
+                ))
             </p>
             <button class="button" type="button" data-import-desktop="">
-                "载入桌面阅读设置"
+                (text(cx, "载入桌面阅读设置"))
             </button>
             <p class="small muted">
-                "只读载入此电脑的桌面设置为草稿，点击应用后保存到 Web；不会修改桌面数据库或同步书籍。"
+                (text(
+                    cx,
+                    "只读载入此电脑的桌面设置为草稿，点击应用后保存到 Web；不会修改桌面数据库或同步书籍。",
+                ))
             </p>
         </section>
     })
 }
 
 #[component]
-pub async fn theme_controls(preferences: &Preferences) -> Result<impl View> {
+pub async fn theme_controls(cx: &Cx, preferences: &Preferences) -> Result<impl View> {
     Ok(view! {
         choices(
             label: "外观主题",
@@ -107,7 +126,7 @@ pub async fn theme_controls(preferences: &Preferences) -> Result<impl View> {
             options: &[("dark", "深色"), ("light", "浅色")]
         )
         <fieldset class="scene-picker">
-            <legend>"阅读背景"</legend>
+            <legend>(text(cx, "阅读背景"))</legend>
             <div class="scene-options">
                 for &(value, title, paper, ink) in SCENES {
                     <label style=(format!("--scene-paper:{paper};--scene-ink:{ink}"))>
@@ -119,7 +138,7 @@ pub async fn theme_controls(preferences: &Preferences) -> Result<impl View> {
                         >
                         <span>
                             <b>"Aa"</b>
-                            (title)
+                            (text(cx, title))
                         </span>
                     </label>
                 }
@@ -135,7 +154,7 @@ pub async fn theme_controls(preferences: &Preferences) -> Result<impl View> {
             ),
         ] {
             <fieldset class="setting-choice">
-                <legend>(title)</legend>
+                <legend>(text(cx, title))</legend>
                 <div class="choice-options colour-options">
                     for (index, &(name, colour)) in colours.iter().enumerate() {
                         <label>
@@ -147,7 +166,7 @@ pub async fn theme_controls(preferences: &Preferences) -> Result<impl View> {
                             >
                             <span>
                                 <i style=(format!("background:{colour}"))></i>
-                                (name)
+                                (text(cx, name))
                             </span>
                         </label>
                     }
@@ -159,13 +178,13 @@ pub async fn theme_controls(preferences: &Preferences) -> Result<impl View> {
             class="button quiet reset-settings"
             data-reset-settings="theme"
         >
-            "↶ 重置主题设置"
+            (text(cx, "↶ 重置主题设置"))
         </button>
     })
 }
 
 #[component]
-pub async fn text_controls(preferences: &Preferences) -> Result<impl View> {
+pub async fn text_controls(cx: &Cx, preferences: &Preferences) -> Result<impl View> {
     Ok(view! {
         <div
             class="annotation-preview reading-content"
@@ -187,7 +206,7 @@ pub async fn text_controls(preferences: &Preferences) -> Result<impl View> {
             </p>
         </div>
         <label class="setting-row">
-            <span>"正文字体"</span>
+            <span>(text(cx, "正文字体"))</span>
             <select name="font">
                 for font in ReaderFont::ALL {
                     <option
@@ -200,7 +219,10 @@ pub async fn text_controls(preferences: &Preferences) -> Result<impl View> {
             </select>
         </label>
         <p class="small muted">
-            "字体使用本机已安装版本；不可用时使用同类后备字体。"
+            (text(
+                cx,
+                "字体使用本机已安装版本；不可用时使用同类后备字体。",
+            ))
         </p>
         range_control(
             label: "正文字号",
@@ -254,22 +276,29 @@ pub async fn text_controls(preferences: &Preferences) -> Result<impl View> {
             ]
         )
         <p class="small muted">
-            "窄屏自动回退单栏；上下滚动采用单栏，分栏用于分页模式。分页可使用底部按钮或左右方向键，选文时不拦截方向键。"
+            (text(
+                cx,
+                "窄屏自动回退单栏；上下滚动采用单栏，分栏用于分页模式。分页可使用底部按钮或左右方向键，选文时不拦截方向键。",
+            ))
         </p>
         <button
             type="button"
             class="button quiet reset-settings"
             data-reset-settings="text"
         >
-            "↶ 重置文本设置"
+            (text(cx, "↶ 重置文本设置"))
         </button>
     })
 }
 
 #[component]
-pub async fn custom_colours() -> Result<impl View> {
+pub async fn custom_colours(cx: &Cx) -> Result<impl View> {
     Ok(view! {
-        <section class="custom-colours" aria-label="自定义配色">
+        <section
+            class="custom-colours"
+            aria-label=(translate(cx, "自定义配色"))
+            data-i18n-aria-label="自定义配色"
+        >
             <div class="custom-colour-row">
                 for (index, title) in [
                     "注音颜色",
@@ -285,7 +314,7 @@ pub async fn custom_colours() -> Result<impl View> {
                         aria-controls="inline-colour-picker"
                     >
                         <i class="colour-dot" data-empty="true"></i>
-                        <span>(title)</span>
+                        <span>(text(cx, title))</span>
                     </button>
                 }
             </div>
@@ -293,15 +322,17 @@ pub async fn custom_colours() -> Result<impl View> {
                 id="inline-colour-picker"
                 class="inline-colour-picker"
                 hidden=(true)
-                aria-label="内嵌取色卡片"
+                aria-label=(translate(cx, "内嵌取色卡片"))
+                data-i18n-aria-label="内嵌取色卡片"
             >
                 <div class="colour-picker-heading">
-                    <h3 data-picker-title="">"注音颜色"</h3>
+                    <h3 data-picker-title="">(text(cx, "注音颜色"))</h3>
                     <button
                         type="button"
                         class="button quiet"
                         data-close-picker=""
-                        aria-label="收起取色卡片"
+                        aria-label=(translate(cx, "收起取色卡片"))
+                        data-i18n-aria-label="收起取色卡片"
                     >
                         "×"
                     </button>
@@ -310,7 +341,8 @@ pub async fn custom_colours() -> Result<impl View> {
                     class="colour-plane"
                     tabindex="0"
                     role="slider"
-                    aria-label="饱和度与明度"
+                    aria-label=(translate(cx, "饱和度与明度"))
+                    data-i18n-aria-label="饱和度与明度"
                     aria-valuemin="0"
                     aria-valuemax="100"
                     aria-valuenow="100"
@@ -318,7 +350,7 @@ pub async fn custom_colours() -> Result<impl View> {
                     <span class="colour-cursor"></span>
                 </div>
                 <label class="colour-hue-label">
-                    <span>"色相"</span>
+                    <span>(text(cx, "色相"))</span>
                     <input
                         type="range"
                         class="colour-hue"
@@ -326,12 +358,13 @@ pub async fn custom_colours() -> Result<impl View> {
                         max="360"
                         step="1"
                         value="160"
-                        aria-label="色相"
+                        aria-label=(translate(cx, "色相"))
+                        data-i18n-aria-label="色相"
                     >
                 </label>
                 <div class="colour-hex-row">
                     <label>
-                        "十六进制"
+                        (text(cx, "十六进制"))
                         <input
                             type="text"
                             class="colour-hex"
@@ -339,15 +372,16 @@ pub async fn custom_colours() -> Result<impl View> {
                             spellcheck="false"
                             autocomplete="off"
                             placeholder="#7FB2A6"
-                            aria-label="十六进制颜色"
+                            aria-label=(translate(cx, "十六进制颜色"))
+                            data-i18n-aria-label="十六进制颜色"
                         >
                     </label>
                     <button type="button" class="button" data-clear-colour="">
-                        "恢复预设"
+                        (text(cx, "恢复预设"))
                     </button>
                 </div>
                 <p class="colour-error small" role="status" aria-live="polite"></p>
-                <p class="small muted">"推荐色"</p>
+                <p class="small muted">(text(cx, "推荐色"))</p>
                 <div class="recommended-colours">
                     for colour in [
                         "#7FB2A6",
@@ -380,34 +414,40 @@ pub async fn custom_colours() -> Result<impl View> {
                 data-favorite-toggle=""
                 aria-pressed="false"
             >
-                "♡ 收藏这套配色"
+                (text(cx, "♡ 收藏这套配色"))
             </button>
             <div class="favorite-heading">
-                <h3>"我的搭配"</h3>
+                <h3>(text(cx, "我的搭配"))</h3>
                 <span class="small muted" data-favorite-count=""></span>
             </div>
             <div class="favorite-schemes"></div>
             <p class="favorite-empty small muted">
-                "喜欢的配色可以收藏在这里。"
+                (text(cx, "喜欢的配色可以收藏在这里。"))
             </p>
             <p class="small muted">
-                "自定义颜色和收藏在点击「应用并保存」后保存。"
+                (text(
+                    cx,
+                    "自定义颜色和收藏在点击「应用并保存」后保存。",
+                ))
             </p>
         </section>
     })
 }
 
 #[component]
-pub async fn ai_controls() -> Result<impl View> {
+pub async fn ai_controls(cx: &Cx) -> Result<impl View> {
     Ok(view! {
         <section class="settings-card ai-settings">
-            <h2>"AI 设置"</h2>
+            <h2>(text(cx, "AI 设置"))</h2>
             <p class="small muted">
-                "选文的问 AI、解释和释义共用 OpenAI 兼容接口。仅在点击发送时将选文发送到你配置的服务。"
+                (text(
+                    cx,
+                    "选文的问 AI、解释和释义共用 OpenAI 兼容接口。仅在点击发送时将选文发送到你配置的服务。",
+                ))
             </p>
             <form id="ai-settings-form">
                 <label>
-                    "接口地址"
+                    (text(cx, "接口地址"))
                     <input
                         type="url"
                         name="endpoint"
@@ -416,7 +456,7 @@ pub async fn ai_controls() -> Result<impl View> {
                     >
                 </label>
                 <label>
-                    "模型"
+                    (text(cx, "模型"))
                     <input
                         name="model"
                         required=(true)
@@ -431,14 +471,17 @@ pub async fn ai_controls() -> Result<impl View> {
                         name="api_key"
                         maxlength="4096"
                         autocomplete="new-password"
-                        placeholder="留空保留已保存的密钥"
+                        placeholder=(translate(cx, "留空保留已保存的密钥"))
+                        data-i18n-placeholder="留空保留已保存的密钥"
                     >
                 </label>
                 <label class="check-line">
                     <input type="checkbox" name="clear_key">
-                    "清除已保存密钥"
+                    (text(cx, "清除已保存密钥"))
                 </label>
-                <button type="submit" class="button">"保存 AI 设置"</button>
+                <button type="submit" class="button">
+                    (text(cx, "保存 AI 设置"))
+                </button>
                 <p id="ai-config-status" class="small muted" role="status"></p>
             </form>
         </section>

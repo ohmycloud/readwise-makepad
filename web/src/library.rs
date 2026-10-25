@@ -220,7 +220,18 @@ impl Library {
         Ok(content)
     }
 
+    #[cfg(test)]
     pub fn reader(&mut self, id: &str, chapter: usize) -> Result<Option<ReaderPage>, String> {
+        let preferences = Preferences::load(&self.db)?;
+        self.reader_with_preferences(id, chapter, preferences)
+    }
+
+    pub fn reader_with_preferences(
+        &mut self,
+        id: &str,
+        chapter: usize,
+        preferences: Preferences,
+    ) -> Result<Option<ReaderPage>, String> {
         let Some(book) = self.book(id)? else {
             return Ok(None);
         };
@@ -263,7 +274,6 @@ impl Library {
             }
             math
         };
-        let preferences = Preferences::load(&self.db)?;
         let (lexicon, known) = self.db.gloss_context(Some(id))?;
         let glosses = lexicon
             .select(EnglishLevel::from_str(&preferences.english_level))
@@ -274,7 +284,11 @@ impl Library {
             .blocks
             .iter()
             .enumerate()
-            .map(|(index, block)| math.annotate(index, block, |html| crate::content::annotate(html, &glosses, &known)))
+            .map(|(index, block)| {
+                math.annotate(index, block, |html| {
+                    crate::content::annotate(html, &glosses, &known)
+                })
+            })
             .collect();
         let mut resume = self
             .db

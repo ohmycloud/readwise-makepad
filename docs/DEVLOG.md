@@ -2,6 +2,16 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-10-25 — 迁移 Topcoat 0.11.0、统一页面设置快照与 Fluent 界面文案
+
+- 将 Web 依赖锁定到 Topcoat 0.11.0，最低 Rust 更新为 1.99，并同步 CLI 校验、启动说明及界面版本。以独立 `target/topcoat-0.11/bin/topcoat` 完成资源打包和校验，未覆盖用户全局 0.10.0 CLI；运行新版前需按 README 安装匹配版本。新增依赖是 Fluent 及其 ICU 数字／语言支持，未引入 Toasty、Tailwind、Topcoat UI、客户端导航或 Popover。
+- 页面 layer 一次读取 `Preferences`，将不可变快照与按已保存语言选择的 `Locale` 放入请求上下文。shell、设置控件和 `Library::reader_with_preferences` 共用它，避免再次查询导致正文注音和外壳使用不同版本。资源与 API 不加载该快照，不做跨请求设置缓存。新增竞争时序回归：数据库先改为 C3／中文／另一字号，阅读渲染仍使用请求捕获的 A1／英文／原字号并实际生成 ruby，同时下一次读取能看到新设置。
+- `web/src/l10n/{zh-CN,en}.ftl` 提供 245 条界面消息，`i18n.rs` 用 Topcoat `messages!` / `t!` 解析；英文标题、按钮、ARIA、placeholder、数量文案由 SSR 直接输出。保留中文调用别名以兼容既有动作；两份静态界面 catalog 转义为 JSON，浏览器 `i18n.js` 仅更新明确标记的界面节点和属性，不再遍历 DOM 文本或维护排除正文的大型白名单。参数模板仅做文本替换及本地数字格式化，复杂复数仍应在服务端用真实参数解析；原始服务错误未承诺全部双语化。
+- 语言仍需应用才保存，取消／离开丢弃草稿，跨标签页只原地更新界面；正文、ruby 槽位、字节坐标、公式投影、选文、高亮与用户笔记不参与翻译。特别保留与界面文案相同的书名和用户标签：书名“书架”、标签“欲读／阅读设置”仍是原值，不以字符串前缀猜测标签性质。将背景卡片样式限制为直接子 span，防止新翻译标记意外继承卡片边框、最小高度和布局。AI 密钥保留保存成功后显式清空，不依赖 0.11 的重渲染覆盖表单。
+- 新增 `web/tests/l10n.cjs`：关闭 JavaScript 检查双语 SSR，确认保存语言优先于浏览器语言；检查标记文案完整性、语言草稿丢弃／应用、跨标签页更新、同名用户内容不被翻译，以及标为已认识后正文节点／HTML／矩形／页码／ruby 状态不变。原有完整 browser、colours、shelf、parity 回归分别退出 0，覆盖首页及后续页“标为已认识”、窄竖屏／矮横屏／旋转草稿、取消／失败重试、AI 密钥及真实进程重启。
+- 最终 workspace 串行 **503 项通过（289 app + 175 core + 7 math + 32 web）**，3 项 core 原有 ignored；生产桌面和 Web 构建、core／math／Web Clippy（既有 warnings）、相关 Topcoat 格式／JS／shell 语法／diff 检查通过。`topcoat l10n check -p readwise-web` 为两语言各 **245/245，0 errors、0 warnings**。完整自有数学 fixture 及只读 Attention PDF 回归退出 0，真实 PDF 页 4／5／7 为 16／19／5 式，原文件字节不变；seams 完整覆盖 20,061,840 背景像素与 5,594,817 不透明字形像素。数学与 seams 曾因并行命令超时而不计通过，后改为足够超时的串行完整复跑，命令退出 0。日志 `/tmp/readwise-topcoat-{final-workspace,final-fluent,final-l10n,verified-reference-math,verified-seams}.log`。
+- **保留已确认的基线失败，不宣称 npm 全套通过**：`npm test --prefix web/tests` 在 `highlight.cjs:207` 的 `border-code-leading-1-40` 底边像素断言失败，值为 `237,232,222 != 142,173,136`。用 `git archive cd80d2c` 创建隔离旧源码，搭配原 Topcoat 0.10.0 构建与资源完整复现同一断言和像素值（`/tmp/readwise-topcoat-old-highlight.log`）；未修改或放宽高亮测试，也未将此前 PASS 计为整个命令成功。本次升级不顺带更改高亮绘制路径；该既有问题需单独处理。未扩大宣称 Safari／Firefox 或手机真机验证。
+
 ## 2026-10-25 — 修复单双栏往返切换时阅读位置与页码累计后退
 
 - 用户撤销上一轮改动后发现：视口大小不变，反复单双栏切换会越来越靠前。确认开始时工作区干净，本次不恢复已撤销的“连续滚动中选择分栏自动切换翻页方式”策略。隔离原生鼠标复现中，5 轮切换使单栏页码依次从 5 降到 4／3／2／1，正文也从第 21 段附近回到章首；不是两种布局本来就不同的页数。此前仅检查一次切换及原源块仍在跨页中，不能证明循环无漂移。

@@ -27,11 +27,11 @@ Web 是新增的 **Topcoat 服务端渲染客户端**，不是把 Makepad 编译
 
 ## 环境与启动
 
-- Rust **1.98+**，项目固定 `topcoat = "=0.10.0"`。
-- Topcoat CLI **0.10.0**（与资源协议匹配）。
+- Rust **1.99+**，项目固定 `topcoat = "=0.11.0"`。
+- Topcoat CLI **0.11.0**（与资源协议匹配）。
 
 ```bash
-cargo install topcoat-cli --version 0.10.0 --locked
+cargo install topcoat-cli --version 0.11.0 --locked
 scripts/run_web.sh
 ```
 
@@ -93,6 +93,18 @@ READWISE_WEB_BIND="127.0.0.1:3100" \
 - 字体、字号、行距、宽度、分栏等实际排版变化，应用后按文本锚点补偿位置。
 - 全局设置与 aA 写入相同偏好；API 部分更新合并已有值，不因旧客户端只提交注音字段就重置主题/文本设置。
 - 英语水平变化需要重新选择注音词集合，因此保存位置后重载当前章节。
+
+### Fluent 界面本地化
+
+Topcoat 固定为 0.11.0，最低 Rust 1.99，CLI 必须同为 0.11.0。每个页面请求在 layer 中读取一次 `Preferences`，将不可变快照和已保存语言的 `Locale` 放入请求上下文。页面外壳、设置控件及正文注音使用同一快照；API 写入后下一请求重新读取，不使用跨请求设置缓存。浏览器语言不会覆盖用户已保存的选择。
+
+`web/src/l10n/{zh-CN,en}.ftl` 是界面译文来源，`i18n.rs` 用 Topcoat `messages!` / `t!` 在服务端解析。英文标题、按钮、ARIA、placeholder 和数量文案不依赖 JavaScript 才能显示。`i18n.rs` 保留中文调用别名以兼容既有浏览器动作；新增文案需同时增加 Fluent key 和别名映射。运行 `topcoat l10n check -p readwise-web` 检查两种语言的 key、变量和引用。
+
+两份已解析的固定界面 catalog 随页面以转义 JSON 提供给 `i18n.js`；它只更新明确标记的 `data-i18n*` 界面节点，不遍历任意文本、不猜测用户内容，也不在浏览器执行 Fluent 或求值表达式。四种简单数量文案由 Fluent 以命名占位参数投影为文本模板，再做纯文本替换；复杂复数／语法分支应在服务端用真实参数解析，不能直接套用该模板路径。译文和调用别名都按文本转义，不作为 HTML 注入。
+
+语言选择沿用草稿／应用／取消语义；已保存语言的跨标签页通知原地更新界面，不重载或替换阅读正文。书名、作者、用户标签、书籍原文、注音、笔记、选文及 AI 回答不参与界面翻译。核心或外部服务返回的原始错误仍可能保持其原始语言。未引入 runtime 客户端导航、shard、Topcoat UI 或 Popover；原生 `<dialog>` 和内嵌取色卡片保持不变。AI 密钥仍在保存成功后显式清空输入框，不依赖重渲染覆盖输入值。
+
+新增隔离回归 `node web/tests/l10n.cjs` 覆盖禁用 JS 的双语 SSR、持久化语言优先、文案完整性、草稿丢弃／应用、跨标签页正文节点与几何不变，以及与界面文案同名的书名／标签／原文不被误翻译。
 
 ### 自定义注音配色与 Favorite
 
@@ -238,6 +250,8 @@ cargo test -p readwise-web --locked
 cargo test --workspace --locked
 cargo clippy -p readwise-web --all-targets --no-deps --locked
 (cd web && topcoat fmt --check src/*.rs)
+topcoat l10n check -p readwise-web
+node web/tests/l10n.cjs
 ```
 
 浏览器回归先构建资源，并安装测试专用 Playwright 驱动：

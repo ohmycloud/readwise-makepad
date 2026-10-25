@@ -52,10 +52,10 @@ cargo run -p readwise-app --release  # 发布构建
 
 ## 运行（Web / Topcoat）
 
-需要 Rust 1.98+ 和 Topcoat CLI 0.10.0：
+需要 Rust 1.99+ 和 Topcoat CLI 0.11.0：
 
 ```bash
-cargo install topcoat-cli --version 0.10.0 --locked
+cargo install topcoat-cli --version 0.11.0 --locked
 scripts/run_web.sh
 ```
 

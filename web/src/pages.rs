@@ -1,4 +1,5 @@
 use crate::{
+    i18n::{t, text, translate},
     library::Location,
     routes::{self, BookId, ChapterNo},
     settings::{BACKGROUND, GLOSS, Preferences, WORD},
@@ -6,7 +7,7 @@ use crate::{
 use topcoat::{
     Result,
     asset::{Asset, asset},
-    context::Cx,
+    context::{Cx, request_context},
     router::{
         error::not_found, error::see_other, href, page, path_param, response::IntoResponse, route,
     },
@@ -17,6 +18,7 @@ use topcoat::{
 pub(super) const STYLE: Asset = asset!("./style.css");
 pub(super) const SCRIPT: Asset = asset!("./browser.js");
 pub(super) const APPEARANCE_SCRIPT: Asset = asset!("./appearance.js");
+pub(super) const I18N_SCRIPT: Asset = asset!("./i18n.js");
 pub(super) const COLOURS_SCRIPT: Asset = asset!("./custom-colours.js");
 pub(super) const PAGER_SCRIPT: Asset = asset!("./pager.js");
 pub(super) const SELECTION_SCRIPT: Asset = asset!("./selection.js");
@@ -27,12 +29,16 @@ async fn shell(
     cx: &Cx,
     title: &str,
     active: &str,
+    #[default] book_title: bool,
     #[default] child: Child<'_>,
 ) -> Result<impl View> {
-    let preferences = routes::state(cx).call(|l| Preferences::load(&l.db)).await?;
+    let preferences = request_context::<Preferences>(cx);
     Ok(view! {
         <!DOCTYPE html>
-        <html lang=(&preferences.language)>
+        <html
+            lang=(&preferences.language)
+            dir=(topcoat::l10n::locale(cx).id().direction())
+        >
             <head>
                 <meta charset="utf-8">
                 <meta
@@ -40,8 +46,8 @@ async fn shell(
                     content="width=device-width, initial-scale=1, viewport-fit=cover"
                 >
                 <meta name="color-scheme" content=(&preferences.theme)>
-                <title>
-                    (title)
+                <title data-i18n-title=(if book_title { None } else { Some(title) })>
+                    (if book_title { title.to_owned() } else { translate(cx, title) })
                     " · ReadWise"
                 </title>
                 <link rel="stylesheet" href=(STYLE)>
@@ -52,22 +58,27 @@ async fn shell(
             <body
                 style=(preferences.ui_style(active == "reader"))
                 data-preferences=(serde_json::to_string(&preferences)?)
+                data-ui-messages=(serde_json::to_string(&*crate::i18n::CATALOGS)?)
                 data-appearance-src=(APPEARANCE_SCRIPT)
+                data-i18n-src=(I18N_SCRIPT)
                 data-colours-src=(COLOURS_SCRIPT)
                 data-selection-src=(SELECTION_SCRIPT)
                 data-highlight-src=(HIGHLIGHT_SCRIPT)
             >
-                <a class="skip-link" href="#main-content">"跳到正文"</a>
+                <a class="skip-link" href="#main-content">(text(cx, "跳到正文"))</a>
                 if active != "reader" {
                     <header class="app-header">
                         <a class="brand" href=(href!(home))>
                             "ReadWise"
                             <small>"WEB"</small>
                         </a>
-                        <nav aria-label="主导航">
+                        <nav
+                            aria-label=(translate(cx, "主导航"))
+                            data-i18n-aria-label="主导航"
+                        >
                             <a href=(href!(continue_reading))>
                                 nav_icon(name: "read")
-                                <span>"阅读"</span>
+                                <span>(text(cx, "阅读"))</span>
                             </a>
                             <a
                                 href=(href!(home))
@@ -78,7 +89,7 @@ async fn shell(
                                 })
                             >
                                 nav_icon(name: "books")
-                                <span>"书架"</span>
+                                <span>(text(cx, "书架"))</span>
                             </a>
                             <a
                                 href=(href!(vocabulary))
@@ -89,7 +100,7 @@ async fn shell(
                                 })
                             >
                                 nav_icon(name: "words")
-                                <span>"词汇"</span>
+                                <span>(text(cx, "词汇"))</span>
                             </a>
                             <a
                                 href=(href!(settings))
@@ -100,7 +111,7 @@ async fn shell(
                                 })
                             >
                                 nav_icon(name: "person")
-                                <span>"我"</span>
+                                <span>(text(cx, "我"))</span>
                             </a>
                         </nav>
                     </header>
@@ -157,14 +168,20 @@ async fn home(cx: &Cx) -> Result<impl View> {
                 <section class="page-heading">
                     <div>
                         <p class="eyebrow">"YOUR READING SPACE"</p>
-                        <h1>"书架"</h1>
-                        <p id="shelf-count" class="muted">
-                            (count)
-                            " 本书，慢慢读。"
+                        <h1>(text(cx, "书架"))</h1>
+                        <p
+                            id="shelf-count"
+                            class="muted"
+                            data-i18n-format="shelf_count"
+                            data-i18n-args=(serde_json::json!({"count": count}).to_string(
+
+                            ))
+                        >
+                            (t!(shelf_count, count))
                         </p>
                     </div>
                     <label class="button primary upload-button">
-                        "＋ 导入书籍"
+                        (text(cx, "＋ 导入书籍"))
                         <input
                             id="book-upload"
                             type="file"
@@ -175,12 +192,16 @@ async fn home(cx: &Cx) -> Result<impl View> {
                 </section>
                 <div class="shelf-toolbar">
                     <p class="muted small">
-                        "支持 EPUB / PDF，每本最大 200 MB。文件保存在当前 Web 服务的数据目录。"
+                        (text(
+                            cx,
+                            "支持 EPUB / PDF，每本最大 200 MB。文件保存在当前 Web 服务的数据目录。",
+                        ))
                     </p>
                     <div
                         class="shelf-view-switch"
                         role="group"
-                        aria-label="书架视图"
+                        aria-label=(translate(cx, "书架视图"))
+                        data-i18n-aria-label="书架视图"
                     >
                         <button
                             type="button"
@@ -188,7 +209,7 @@ async fn home(cx: &Cx) -> Result<impl View> {
                             data-shelf-view="list"
                             aria-pressed="false"
                         >
-                            "列表"
+                            (text(cx, "列表"))
                         </button>
                         <button
                             type="button"
@@ -196,7 +217,7 @@ async fn home(cx: &Cx) -> Result<impl View> {
                             data-shelf-view="grid"
                             aria-pressed="true"
                         >
-                            "网格"
+                            (text(cx, "网格"))
                         </button>
                     </div>
                 </div>
@@ -204,9 +225,12 @@ async fn home(cx: &Cx) -> Result<impl View> {
                 if books.is_empty() {
                     <section class="empty-state">
                         <span class="empty-icon" aria-hidden="true">"本"</span>
-                        <h2>"从一本书开始"</h2>
+                        <h2>(text(cx, "从一本书开始"))</h2>
                         <p>
-                            "导入书籍后，即可阅读、显示生词注音，并建立自己的词汇本。"
+                            (text(
+                                cx,
+                                "导入书籍后，即可阅读、显示生词注音，并建立自己的词汇本。",
+                            ))
                         </p>
                     </section>
                 } else {
@@ -242,12 +266,16 @@ async fn home(cx: &Cx) -> Result<impl View> {
                                 </a>
                                 <div class="book-footer">
                                     <span class="book-status">
-                                        (crate::shelf::status(&book))
+                                        (crate::shelf::localized_status(cx, &book))
                                     </span>
                                     <button
                                         type="button"
                                         class="button quiet book-more"
-                                        aria-label=(format!("更多操作：{}", book.title))
+                                        aria-label=(format!(
+                                            "{}: {}",
+                                            translate(cx, "更多操作"),
+                                            book.title,
+                                        ))
                                         aria-haspopup="dialog"
                                         aria-controls="book-menu"
                                     >
@@ -255,7 +283,11 @@ async fn home(cx: &Cx) -> Result<impl View> {
                                     </button>
                                 </div>
                                 <p class="book-tags muted small">
-                                    (if book.want_to_read { "欲读 · " } else { "" })
+                                    (if book.want_to_read {
+                                        format!("{} · ", translate(cx, "欲读"))
+                                    } else {
+                                        String::new()
+                                    })
                                     (book.tags.join(" · "))
                                 </p>
                             </article>
@@ -316,8 +348,9 @@ async fn resume_reader(cx: &Cx) -> Result<impl IntoResponse> {
 async fn read_chapter(cx: &Cx) -> Result<impl View> {
     let id = routes::book_id(cx)?;
     let chapter = *path_param::<ChapterNo>(cx)?;
+    let preferences = request_context::<Preferences>(cx).clone();
     let reader = routes::state(cx)
-        .call(move |library| library.reader(&id, chapter))
+        .call(move |library| library.reader_with_preferences(&id, chapter, preferences))
         .await?
         .ok_or_else(not_found)?;
     let id = reader.book.id.clone();
@@ -327,20 +360,29 @@ async fn read_chapter(cx: &Cx) -> Result<impl View> {
         shell(
             title: &title,
             active: "reader",
+            book_title: true,
             <header class="reader-toolbar">
-                <a class="button quiet" href=(href!(home)) aria-label="返回书架">
-                    "← 书架"
+                <a
+                    class="button quiet"
+                    href=(href!(home))
+                    aria-label=(translate(cx, "返回书架"))
+                    data-i18n-aria-label="返回书架"
+                >
+                    (text(cx, "← 书架"))
                 </a>
                 <span class="reader-book-title">(&title)</span>
-                <a class="button quiet" href=(href!(excerpts, BookId(&id)))>"摘录"</a>
+                <a class="button quiet" href=(href!(excerpts, BookId(&id)))>
+                    (text(cx, "摘录"))
+                </a>
                 <button type="button" class="button quiet" data-open="toc-dialog">
-                    "目录"
+                    (text(cx, "目录"))
                 </button>
                 <button
                     type="button"
                     class="button quiet"
                     data-open="appearance-dialog"
-                    aria-label="阅读外观"
+                    aria-label=(translate(cx, "阅读外观"))
+                    data-i18n-aria-label="阅读外观"
                 >
                     "aA"
                 </button>
@@ -372,12 +414,18 @@ async fn read_chapter(cx: &Cx) -> Result<impl View> {
                             "false"
                         })
                     >
-                        <p class="chapter-kicker">
-                            "第 "
-                            (reader.chapter + 1)
-                            " / "
-                            (reader.total)
-                            " 章"
+                        <p
+                            class="chapter-kicker"
+                            data-i18n-format="chapter_position"
+                            data-i18n-args=(serde_json::json!({"chapter": reader.chapter + 1, "total": reader.total}).to_string(
+
+                            ))
+                        >
+                            (t!(
+                                chapter_position,
+                                chapter = reader.chapter + 1,
+                                total = reader.total,
+                            ))
                         </p>
                         for (index, block) in reader.blocks.into_iter().enumerate() {
                             <section
@@ -393,15 +441,16 @@ async fn read_chapter(cx: &Cx) -> Result<impl View> {
                 <nav
                     id="page-navigation"
                     class="page-navigation"
-                    aria-label="正文翻页"
+                    aria-label=(translate(cx, "正文翻页"))
+                    data-i18n-aria-label="正文翻页"
                     hidden=(true)
                 >
                     <button type="button" class="button quiet" id="previous-page">
-                        "← 上一页"
+                        (text(cx, "← 上一页"))
                     </button>
                     <output id="page-indicator"></output>
                     <button type="button" class="button quiet" id="next-page">
-                        "下一页 →"
+                        (text(cx, "下一页 →"))
                     </button>
                 </nav>
                 <footer class="chapter-navigation">
@@ -414,7 +463,7 @@ async fn read_chapter(cx: &Cx) -> Result<impl View> {
                                 ChapterNo(reader.chapter - 1),
                             ))
                         >
-                            "← 上一章"
+                            (text(cx, "← 上一章"))
                         </a>
                     } else {
                         <span></span>
@@ -429,22 +478,26 @@ async fn read_chapter(cx: &Cx) -> Result<impl View> {
                                 ChapterNo(reader.chapter + 1),
                             ))
                         >
-                            "下一章 →"
+                            (text(cx, "下一章 →"))
                         </a>
                     } else {
-                        <span class="muted">"本书完"</span>
+                        <span class="muted">(text(cx, "本书完"))</span>
                     }
                 </footer>
             </main>
             crate::selection::toolbar(preferences: &preferences)
             <dialog id="toc-dialog" class="panel-dialog">
                 <div class="dialog-heading">
-                    <h2>"目录"</h2>
+                    <h2>(text(cx, "目录"))</h2>
                     <button class="button quiet" data-close="" type="button">
-                        "关闭"
+                        (text(cx, "关闭"))
                     </button>
                 </div>
-                <nav class="toc" aria-label="章节目录">
+                <nav
+                    class="toc"
+                    aria-label=(translate(cx, "章节目录"))
+                    data-i18n-aria-label="章节目录"
+                >
                     for (label, level, index, fragment) in reader.toc {
                         <a
                             href=(href!(read_chapter, BookId(&id), ChapterNo(index)).fragment(
@@ -466,9 +519,9 @@ async fn read_chapter(cx: &Cx) -> Result<impl View> {
             </dialog>
             <dialog id="appearance-dialog" class="panel-dialog appearance-dialog">
                 <div class="dialog-heading">
-                    <h2>"阅读外观"</h2>
+                    <h2>(text(cx, "阅读外观"))</h2>
                     <button class="button quiet" data-close="" type="button">
-                        "取消"
+                        (text(cx, "取消"))
                     </button>
                 </div>
                 appearance(preferences: &preferences)
@@ -480,7 +533,8 @@ async fn read_chapter(cx: &Cx) -> Result<impl View> {
                         class="button quiet"
                         data-close=""
                         type="button"
-                        aria-label="关闭词卡"
+                        aria-label=(translate(cx, "关闭词卡"))
+                        data-i18n-aria-label="关闭词卡"
                     >
                         "✕"
                     </button>
@@ -488,10 +542,10 @@ async fn read_chapter(cx: &Cx) -> Result<impl View> {
                 <p id="card-gloss"></p>
                 <div class="card-actions">
                     <button type="button" class="button primary" id="mark-known">
-                        "标为已认识"
+                        (text(cx, "标为已认识"))
                     </button>
                     <button type="button" class="button" id="add-vocabulary">
-                        "加入词汇本"
+                        (text(cx, "加入词汇本"))
                     </button>
                 </div>
             </dialog>
@@ -518,12 +572,17 @@ async fn excerpts(cx: &Cx) -> Result<impl View> {
             active: "reader",
             <main id="main-content" class="page excerpts-page">
                 <a class="button quiet" href=(href!(resume_reader, BookId(&book.id)))>
-                    "← 返回阅读"
+                    (text(cx, "← 返回阅读"))
                 </a>
-                <h1>"摘录笔记"</h1>
+                <h1>(text(cx, "摘录笔记"))</h1>
                 <p class="muted">(book.title)</p>
                 if notes.is_empty() {
-                    <p>"选中正文后，使用悬浮工具栏保存摘录。"</p>
+                    <p>
+                        (text(
+                            cx,
+                            "选中正文后，使用悬浮工具栏保存摘录。",
+                        ))
+                    </p>
                 }
                 for note in notes {
                     <article class="excerpt-entry" data-note-id=(note.id)>
@@ -570,7 +629,8 @@ async fn appearance(
             <div
                 class="appearance-tabs"
                 role="tablist"
-                aria-label="阅读设置分区"
+                aria-label=(translate(cx, "阅读设置分区"))
+                data-i18n-aria-label="阅读设置分区"
                 hidden=(global)
             >
                 <button
@@ -581,7 +641,7 @@ async fn appearance(
                     aria-controls="appearance-theme"
                     data-settings-tab="theme"
                 >
-                    "主题"
+                    (text(cx, "主题"))
                 </button>
                 <button
                     type="button"
@@ -592,7 +652,7 @@ async fn appearance(
                     data-settings-tab="text"
                     tabindex="-1"
                 >
-                    "文本"
+                    (text(cx, "文本"))
                 </button>
                 <button
                     type="button"
@@ -603,7 +663,7 @@ async fn appearance(
                     data-settings-tab="annotations"
                     tabindex="-1"
                 >
-                    "注音"
+                    (text(cx, "注音"))
                 </button>
             </div>
             <section
@@ -611,9 +671,10 @@ async fn appearance(
                 class="settings-section"
                 data-settings-section="theme"
                 role="region"
-                aria-label="主题设置"
+                aria-label=(translate(cx, "主题设置"))
+                data-i18n-aria-label="主题设置"
             >
-                <h2 hidden=(!global)>"主题"</h2>
+                <h2 hidden=(!global)>(text(cx, "主题"))</h2>
                 crate::controls::theme_controls(preferences: &preferences)
             </section>
             <section
@@ -621,10 +682,11 @@ async fn appearance(
                 class="settings-section"
                 data-settings-section="text"
                 role="region"
-                aria-label="文本设置"
+                aria-label=(translate(cx, "文本设置"))
+                data-i18n-aria-label="文本设置"
                 hidden=(!global)
             >
-                <h2 hidden=(!global)>"文本"</h2>
+                <h2 hidden=(!global)>(text(cx, "文本"))</h2>
                 crate::controls::text_controls(preferences: &preferences)
             </section>
             <section
@@ -632,10 +694,11 @@ async fn appearance(
                 class="settings-section"
                 data-settings-section="annotations"
                 role="region"
-                aria-label="注音设置"
+                aria-label=(translate(cx, "注音设置"))
+                data-i18n-aria-label="注音设置"
                 hidden=(!global)
             >
-                <h2 hidden=(!global)>"注音"</h2>
+                <h2 hidden=(!global)>(text(cx, "注音"))</h2>
                 <div
                     class="annotation-preview reading-content"
                     data-preview=""
@@ -686,7 +749,7 @@ async fn appearance(
                 )
                 crate::controls::custom_colours()
                 <label class="setting-row">
-                    <span>"显示注音"</span>
+                    <span>(text(cx, "显示注音"))</span>
                     <input
                         name="gloss_enabled"
                         type="checkbox"
@@ -694,7 +757,7 @@ async fn appearance(
                     >
                 </label>
                 <label class="setting-row">
-                    <span>"注音字号"</span>
+                    <span>(text(cx, "注音字号"))</span>
                     <input
                         name="gloss_size"
                         data-scale="1.4"
@@ -711,15 +774,18 @@ async fn appearance(
                     class="button quiet reset-settings"
                     data-reset-settings="annotations"
                 >
-                    "↶ 重置注音设置"
+                    (text(cx, "↶ 重置注音设置"))
                 </button>
             </section>
             <p class="small muted">
-                "颜色即时预览，点击应用后保存。修改英语水平会重新加载当前章节；其他外观修改不重载正文。"
+                (text(
+                    cx,
+                    "颜色即时预览，点击应用后保存。修改英语水平会重新加载当前章节；其他外观修改不重载正文。",
+                ))
             </p>
             <div class="settings-actions">
                 <button class="button primary" type="button" data-save-appearance="">
-                    "应用并保存"
+                    (text(cx, "应用并保存"))
                 </button>
             </div>
         </section>
@@ -728,6 +794,7 @@ async fn appearance(
 
 #[component]
 async fn swatch_row(
+    cx: &Cx,
     label: &str,
     field: &str,
     target: &Signal<String>,
@@ -735,14 +802,20 @@ async fn swatch_row(
 ) -> Result<impl View> {
     Ok(view! {
         <div class="swatch-row" data-field=(field)>
-            <span>(label)</span>
+            <span>(text(cx, label))</span>
             <div class="swatches">
                 for (slot, &(name, value)) in options.iter().enumerate() {
                     <button
                         type="button"
                         class="swatch"
-                        title=(name)
-                        aria-label=(format!("{label}：{name}"))
+                        title=(translate(cx, name))
+                        data-i18n-title-attribute=(name)
+                        aria-label=(format!(
+                            "{}: {}",
+                            translate(cx, label),
+                            translate(cx, name),
+                        ))
+                        data-i18n-aria-label=(format!("{label}：{name}"))
                         data-slot=(slot)
                         data-css-color=(value)
                         style=(format!(
@@ -754,7 +827,7 @@ async fn swatch_row(
                         :aria-pressed=$(target.get() == value.to_owned())
                         @click=$(|_e| target.set(value.to_owned()))
                     >
-                        <span class="visually-hidden">(name)</span>
+                        <span class="visually-hidden">(text(cx, name))</span>
                     </button>
                 }
             </div>
@@ -764,9 +837,7 @@ async fn swatch_row(
 
 #[page("/settings")]
 async fn settings(cx: &Cx) -> Result<impl View> {
-    let preferences = routes::state(cx)
-        .call(|library| Preferences::load(&library.db))
-        .await?;
+    let preferences = request_context::<Preferences>(cx);
     Ok(view! {
         shell(
             title: "我与设置",
@@ -775,17 +846,24 @@ async fn settings(cx: &Cx) -> Result<impl View> {
                 <section class="page-heading">
                     <div>
                         <p class="eyebrow">"MAKE IT YOURS"</p>
-                        <h1>"阅读设置"</h1>
-                        <p class="muted">"让文字呈现你喜欢的样子。"</p>
+                        <h1>(text(cx, "阅读设置"))</h1>
+                        <p class="muted">
+                            (text(cx, "让文字呈现你喜欢的样子。"))
+                        </p>
                     </div>
-                    <a class="button" href=(href!(statistics))>"阅读记录 →"</a>
+                    <a class="button" href=(href!(statistics))>
+                        (text(cx, "阅读记录 →"))
+                    </a>
                 </section>
                 <div class="settings-card">
                     appearance(preferences: &preferences, global: true)
                 </div>
                 crate::controls::ai_controls()
                 <p class="muted small">
-                    "Web 预览版 · Topcoat 0.10 · 本机单用户。数据与原生客户端默认独立，暂不提供云同步。"
+                    (text(
+                        cx,
+                        "Web 预览版 · Topcoat 0.11 · 本机单用户。数据与原生客户端默认独立，暂不提供云同步。",
+                    ))
                 </p>
             </main>
         )
@@ -805,20 +883,30 @@ async fn vocabulary(cx: &Cx) -> Result<impl View> {
                 <section class="page-heading">
                     <div>
                         <p class="eyebrow">"WORDS TO KEEP"</p>
-                        <h1>"词汇本"</h1>
-                        <p class="muted">
-                            (entries.len())
-                            " 个收藏词 · "
-                            (known.len())
-                            " 个已认识词"
+                        <h1>(text(cx, "词汇本"))</h1>
+                        <p
+                            class="muted"
+                            data-i18n-format="vocabulary_counts"
+                            data-i18n-args=(serde_json::json!({"saved": entries.len(), "known": known.len()}).to_string(
+
+                            ))
+                        >
+                            (t!(
+                                vocabulary_counts,
+                                saved = entries.len(),
+                                known = known.len(),
+                            ))
                         </p>
                     </div>
                 </section>
                 if entries.is_empty() {
                     <section class="empty-state">
-                        <h2>"把遇见的词留下来"</h2>
+                        <h2>(text(cx, "把遇见的词留下来"))</h2>
                         <p>
-                            "阅读时点击带注音的单词，选择「加入词汇本」。"
+                            (text(
+                                cx,
+                                "阅读时点击带注音的单词，选择「加入词汇本」。",
+                            ))
                         </p>
                     </section>
                 }
@@ -834,16 +922,19 @@ async fn vocabulary(cx: &Cx) -> Result<impl View> {
                                 class="button quiet"
                                 data-remove-vocabulary=(entry.lemma)
                             >
-                                "移除"
+                                (text(cx, "移除"))
                             </button>
                         </article>
                     }
                 </div>
                 <details class="known-list">
-                    <summary>
-                        "已认识词（"
-                        (known.len())
-                        "）"
+                    <summary
+                        data-i18n-format="known_count"
+                        data-i18n-args=(serde_json::json!({"count": known.len()}).to_string(
+
+                        ))
+                    >
+                        (t!(known_count, count = known.len()))
                     </summary>
                     <ul>
                         for lemma in known {
@@ -854,7 +945,7 @@ async fn vocabulary(cx: &Cx) -> Result<impl View> {
                                     class="button quiet"
                                     data-unmark-known=(&lemma)
                                 >
-                                    "恢复注音"
+                                    (text(cx, "恢复注音"))
                                 </button>
                             </li>
                         }
@@ -875,36 +966,41 @@ async fn statistics(cx: &Cx) -> Result<impl View> {
             title: "阅读记录",
             active: "settings",
             <main id="main-content" class="page">
-                <a class="back-link" href=(href!(settings))>"← 返回我与设置"</a>
+                <a class="back-link" href=(href!(settings))>
+                    (text(cx, "← 返回我与设置"))
+                </a>
                 <section class="page-heading">
                     <div>
                         <p class="eyebrow">"YOUR COLLECTION"</p>
-                        <h1>"阅读记录"</h1>
+                        <h1>(text(cx, "阅读记录"))</h1>
                         <p class="muted">
-                            "来自当前 Web 数据库的真实统计。"
+                            (text(cx, "来自当前 Web 数据库的真实统计。"))
                         </p>
                     </div>
                 </section>
                 <div class="stats-grid">
                     <article>
                         <strong>(snapshot.total_books)</strong>
-                        <span>"藏书"</span>
+                        <span>(text(cx, "藏书"))</span>
                     </article>
                     <article>
                         <strong>(snapshot.reading_books)</strong>
-                        <span>"在读"</span>
+                        <span>(text(cx, "在读"))</span>
                     </article>
                     <article>
                         <strong>(snapshot.vocab_total)</strong>
-                        <span>"词汇收藏"</span>
+                        <span>(text(cx, "词汇收藏"))</span>
                     </article>
                     <article>
                         <strong>(snapshot.total_notes)</strong>
-                        <span>"笔记"</span>
+                        <span>(text(cx, "笔记"))</span>
                     </article>
                 </div>
                 <p class="muted small">
-                    "本阶段尚未接入 Web 阅读计时及已有笔记编辑；不会用模拟数据代替。"
+                    (text(
+                        cx,
+                        "本阶段尚未接入 Web 阅读计时及已有笔记编辑；不会用模拟数据代替。",
+                    ))
                 </p>
             </main>
         )

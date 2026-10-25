@@ -1,6 +1,8 @@
+use crate::i18n::{text, translate};
 use crate::settings::{MARKER, Preferences};
 use topcoat::{
     Result,
+    context::Cx,
     view::{Unescaped, View, component, view},
 };
 
@@ -18,37 +20,41 @@ pub async fn icon(name: &str) -> Result<impl View> {
 }
 
 #[component]
-pub async fn toolbar(preferences: &Preferences) -> Result<impl View> {
+pub async fn toolbar(cx: &Cx, preferences: &Preferences) -> Result<impl View> {
     Ok(view! {
         <div
             id="selection-toolbar"
             class="selection-toolbar"
             role="toolbar"
-            aria-label="选文操作"
+            aria-label=(translate(cx, "选文操作"))
+            data-i18n-aria-label="选文操作"
             hidden=(true)
         >
             <div class="selection-scroll">
                 <div class="selection-actions">
-                    <button type="button" id="ask-selection">"问 AI"</button>
+                    <button type="button" id="ask-selection">
+                        (text(cx, "问 AI"))
+                    </button>
                     <span class="selection-divider"></span>
                     <button
                         type="button"
                         data-selection-question="请解释这段文字，并指出重要词语和表达。"
                     >
                         icon(name: "explain")
-                        <span>"解释"</span>
+                        <span>(text(cx, "解释"))</span>
                     </button>
                     <button
                         type="button"
                         data-selection-question="请解释所选词语的含义、词性和在此处的用法。"
                     >
                         icon(name: "define")
-                        <span>"释义"</span>
+                        <span>(text(cx, "释义"))</span>
                     </button>
                     <button
                         type="button"
                         id="more-selection"
-                        aria-label="更多选文操作"
+                        aria-label=(translate(cx, "更多选文操作"))
+                        data-i18n-aria-label="更多选文操作"
                         aria-expanded="false"
                     >
                         icon(name: "more")
@@ -56,7 +62,8 @@ pub async fn toolbar(preferences: &Preferences) -> Result<impl View> {
                     <button
                         type="button"
                         id="toggle-highlight"
-                        aria-label="添加或移除高亮"
+                        aria-label=(translate(cx, "添加或移除高亮"))
+                        data-i18n-aria-label="添加或移除高亮"
                     >
                         icon(name: "marker")
                     </button>
@@ -65,14 +72,24 @@ pub async fn toolbar(preferences: &Preferences) -> Result<impl View> {
                             type="button"
                             class="selection-colour"
                             data-marker=(index)
-                            aria-label=(format!("高亮颜色：{label}"))
+                            aria-label=(format!(
+                                "{}: {}",
+                                translate(cx, "高亮颜色"),
+                                translate(cx, label),
+                            ))
+                            data-i18n-aria-label=(format!("高亮颜色：{label}"))
                             aria-pressed=(preferences.highlight_color_slot == index + 4)
                             style=(format!("--marker:{colour}"))
                         >
                             <i></i>
                         </button>
                     }
-                    <button type="button" id="compose-note" aria-label="添加笔记">
+                    <button
+                        type="button"
+                        id="compose-note"
+                        aria-label=(translate(cx, "添加笔记"))
+                        data-i18n-aria-label="添加笔记"
+                    >
                         icon(name: "pen")
                     </button>
                 </div>
@@ -80,14 +97,20 @@ pub async fn toolbar(preferences: &Preferences) -> Result<impl View> {
                     <form id="selection-question-form">
                         <input
                             id="selection-question"
-                            aria-label="向 AI 提问"
-                            placeholder="关于这段选文提问…"
+                            aria-label=(translate(cx, "向 AI 提问"))
+                            data-i18n-aria-label="向 AI 提问"
+                            placeholder=(translate(cx, "关于这段选文提问…"))
+                            data-i18n-placeholder="关于这段选文提问…"
                             maxlength="2000"
                         >
                         <button type="button" data-selection-utility="web">
                             "Web"
                         </button>
-                        <button type="submit" aria-label="发送问题">
+                        <button
+                            type="submit"
+                            aria-label=(translate(cx, "发送问题"))
+                            data-i18n-aria-label="发送问题"
+                        >
                             icon(name: "send")
                         </button>
                     </form>
@@ -96,19 +119,19 @@ pub async fn toolbar(preferences: &Preferences) -> Result<impl View> {
                             type="button"
                             data-selection-question="为什么在这里使用这个词？"
                         >
-                            "为什么用这个词？"
+                            (text(cx, "为什么用这个词？"))
                         </button>
                         <button
                             type="button"
                             data-selection-question="这个词源自哪里？请解释它的词源。"
                         >
-                            "这个词源自哪里？"
+                            (text(cx, "这个词源自哪里？"))
                         </button>
                         <button
                             type="button"
                             data-selection-question="请用所选词语造句，并解释用法。"
                         >
-                            "用它造个句子"
+                            (text(cx, "用它造个句子"))
                         </button>
                     </div>
                 </section>
@@ -117,48 +140,56 @@ pub async fn toolbar(preferences: &Preferences) -> Result<impl View> {
                         type="button"
                         data-selection-question="请解释所选词语的含义、词性和在此处的用法。"
                     >
-                        "定义与用法"
+                        (text(cx, "定义与用法"))
                     </button>
                     <button type="button" data-selection-utility="fact">
-                        "事实核查"
+                        (text(cx, "事实核查"))
                     </button>
                     <button type="button" data-selection-utility="related">
-                        "查找书中相关内容"
+                        (text(cx, "查找书中相关内容"))
                     </button>
                     <button
                         type="button"
                         data-selection-question="请提出对所选观点最有力的反驳，区分事实、假设与意见。"
                     >
-                        "提出反驳"
+                        (text(cx, "提出反驳"))
                     </button>
                     <button type="button" data-selection-utility="quote">
-                        "复制引文及出处"
+                        (text(cx, "复制引文及出处"))
                     </button>
                     <div class="selection-utilities">
-                        <button type="button" id="copy-selection">"复制"</button>
-                        <button type="button" id="save-excerpt">"保存摘录"</button>
+                        <button type="button" id="copy-selection">
+                            (text(cx, "复制"))
+                        </button>
+                        <button type="button" id="save-excerpt">
+                            (text(cx, "保存摘录"))
+                        </button>
                         <button type="button" data-selection-utility="vocabulary">
-                            "生词"
+                            (text(cx, "生词"))
                         </button>
                         <button type="button" data-selection-utility="translate">
-                            "翻译"
+                            (text(cx, "翻译"))
                         </button>
                         <button type="button" data-selection-utility="speak">
-                            "发音"
+                            (text(cx, "发音"))
                         </button>
                         <button type="button" data-selection-utility="remove">
-                            "移除高亮"
+                            (text(cx, "移除高亮"))
                         </button>
                         <button
                             type="button"
                             id="dismiss-selection"
-                            aria-label="取消选文"
+                            aria-label=(translate(cx, "取消选文"))
+                            data-i18n-aria-label="取消选文"
                         >
-                            "关闭"
+                            (text(cx, "关闭"))
                         </button>
                     </div>
                     <p class="selection-disclaimer">
-                        "翻译与事实核查会在外部网站打开选文。"
+                        (text(
+                            cx,
+                            "翻译与事实核查会在外部网站打开选文。",
+                        ))
                     </p>
                 </section>
                 <p id="selection-hint" role="status" hidden=(true)></p>
@@ -166,31 +197,34 @@ pub async fn toolbar(preferences: &Preferences) -> Result<impl View> {
         </div>
         <dialog id="note-dialog" class="panel-dialog">
             <div class="dialog-heading">
-                <h2>"添加笔记"</h2>
+                <h2>(text(cx, "添加笔记"))</h2>
                 <button class="button quiet" data-close="" type="button">
-                    "取消"
+                    (text(cx, "取消"))
                 </button>
             </div>
             <form id="note-form">
                 <pre id="note-quote" class="excerpt-text"></pre>
                 <label class="note-label">
-                    "我的想法"
+                    (text(cx, "我的想法"))
                     <textarea
                         id="note-comment"
                         maxlength="12000"
                         rows="5"
-                        placeholder="写下想法（可选）"
+                        placeholder=(translate(cx, "写下想法（可选）"))
+                        data-i18n-placeholder="写下想法（可选）"
                     ></textarea>
                 </label>
-                <button class="button primary" type="submit">"保存笔记"</button>
+                <button class="button primary" type="submit">
+                    (text(cx, "保存笔记"))
+                </button>
                 <p id="note-status" role="status"></p>
             </form>
         </dialog>
         <dialog id="ai-dialog" class="panel-dialog">
             <div class="dialog-heading">
-                <h2>"阅读助教"</h2>
+                <h2>(text(cx, "阅读助教"))</h2>
                 <button class="button quiet" data-close="" type="button">
-                    "关闭"
+                    (text(cx, "关闭"))
                 </button>
             </div>
             <blockquote id="ai-quote"></blockquote>
@@ -198,15 +232,15 @@ pub async fn toolbar(preferences: &Preferences) -> Result<impl View> {
             <pre id="ai-answer" class="excerpt-text" role="status"></pre>
             <p>
                 <a class="button" href="/settings#ai-settings-form">
-                    "配置 AI 接口"
+                    (text(cx, "配置 AI 接口"))
                 </a>
             </p>
         </dialog>
         <dialog id="search-dialog" class="panel-dialog">
             <div class="dialog-heading">
-                <h2>"书内搜索"</h2>
+                <h2>(text(cx, "书内搜索"))</h2>
                 <button class="button quiet" data-close="" type="button">
-                    "关闭"
+                    (text(cx, "关闭"))
                 </button>
             </div>
             <p id="search-status" role="status"></p>

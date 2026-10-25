@@ -1,16 +1,18 @@
 // Browser-only shelf projection; all durable mutations use the native Db facade.
-export function initializeShelf({ api, toast }) {
+export function initializeShelf({ api, toast, t, format }) {
   const shelf = document.querySelector(".shelf-page");
   if (!shelf) return;
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
-  const t = (zh, en) => document.documentElement.lang === "en" ? en : zh;
   const menu = $("#book-menu"), editor = $("#book-editor"), deletion = $("#book-delete");
   let selected, origin, editing, busy = false;
-  const status = value => value.replace(/^(在读|读完|未读)/, word => t(word, ({ 在读: "Reading", 读完: "Finished", 未读: "Unread" })[word]));
+  const status = value => value.replace(/^(在读|读完|未读)/, word => t(word));
   $$(".book-status", shelf).forEach(node => { node.textContent = status(node.textContent); });
   $$(".book-more", shelf).forEach(node => node.setAttribute("aria-label", t("更多操作：", "More actions: ") + node.closest(".book-card").dataset.title));
-  $$(".book-tags", shelf).forEach(node => { if (document.documentElement.lang === "en") node.textContent = node.textContent.replace(/^欲读/, "Want to Read"); });
+  $$(".book-tags", shelf).forEach(node => {
+    const card = node.closest(".book-card");
+    node.textContent = [card.dataset.wantToRead === "true" ? t("欲读") : "", ...JSON.parse(card.dataset.tags)].filter(Boolean).join(" · ");
+  });
   // Back/forward cache can restore the old shelf without requesting its new
   // progress. Only the shelf is refreshed; never reload a visible reader.
   window.addEventListener("pageshow", event => { if (event.persisted) location.reload(); });
@@ -106,7 +108,8 @@ export function initializeShelf({ api, toast }) {
       if (result.deleted) {
         card.remove();
         const count = $$(".book-card", shelf).length;
-        $("#shelf-count").textContent = t(`${count} 本书，慢慢读。`, `${count} books. Take your time.`);
+        $("#shelf-count").dataset.i18nArgs = JSON.stringify({ count });
+        $("#shelf-count").textContent = format("shelf_count", { count });
         // Re-render the server-owned empty state only after confirmed deletion.
         if (!count) location.reload();
         origin = $("[data-shelf-view='grid']");

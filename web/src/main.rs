@@ -1,6 +1,7 @@
 mod assistant;
 mod content;
 mod controls;
+mod i18n;
 #[cfg(test)]
 mod integration_tests;
 mod library;
@@ -34,11 +35,36 @@ fn router(state: State, assets: AssetBundle) -> Router {
         .layer(BodyLimit::max(64 * 1024))
         .layer(BodyLimit::max(MAX_UPLOAD + 1024 * 1024).at("/api/import"))
         .assets(assets)
+        .layer(LayerFn::new(None::<&str>, |cx, body, next| {
+            Box::pin(interface_context(cx, body, next))
+        }))
         .runtime()
         .layer(LayerFn::new(None::<&str>, |cx, body, next| {
             Box::pin(security(cx, body, next))
         }))
         .build()
+}
+
+/// One immutable settings snapshot supplies locale, shell, controls and reader.
+/// Assets and mutation endpoints do not need a settings query or a stale snapshot.
+async fn interface_context(cx: &Cx, body: Body, next: Next<'_>) -> topcoat::Result<Response> {
+    let path = request::uri(cx).path();
+    if matches!(path, "/" | "/settings" | "/vocabulary" | "/statistics")
+        || path.starts_with("/read/")
+        || path.starts_with("/excerpts/")
+    {
+        let preferences = app_context::<State>(cx)
+            .call(|library| settings::Preferences::load(&library.db))
+            .await?;
+        let locale = if preferences.language == "en" {
+            topcoat::l10n::locale!("en")
+        } else {
+            topcoat::l10n::locale!("zh-CN")
+        };
+        next.run(&cx.with(locale).with(preferences), body).await
+    } else {
+        next.run(cx, body).await
+    }
 }
 
 async fn security(cx: &Cx, body: Body, next: Next<'_>) -> topcoat::Result<Response> {

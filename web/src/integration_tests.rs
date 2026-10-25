@@ -11,6 +11,7 @@ fn test_assets(path: &std::path::Path) -> AssetBundle {
         (pages::STYLE, "style.css", "text/css"),
         (pages::SCRIPT, "browser.js", "text/javascript"),
         (pages::APPEARANCE_SCRIPT, "appearance.js", "text/javascript"),
+        (pages::I18N_SCRIPT, "i18n.js", "text/javascript"),
         (
             pages::COLOURS_SCRIPT,
             "custom-colours.js",
@@ -1414,4 +1415,51 @@ async fn pdf_import_uses_the_existing_snapshot_and_ruby_pipeline() {
     );
     drop(router);
     drop(state);
+}
+
+#[tokio::test]
+async fn reader_uses_one_request_snapshot_even_if_settings_change_before_render() {
+    let root = tempfile::tempdir().unwrap();
+    let assets = tempfile::tempdir().unwrap();
+    let state = State::open(root.path().to_owned(), vec!["localhost:3000".into()])
+        .await
+        .unwrap();
+    let router = router(state.clone(), test_assets(assets.path()));
+    let (status, _, result) = request(
+        &router,
+        "POST",
+        "/api/import",
+        "multipart/form-data; boundary=test-boundary",
+        multipart(&epub(), true),
+        "localhost:3000",
+        true,
+    )
+    .await;
+    assert_eq!(status, 200, "{result}");
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let id = result["id"].as_str().unwrap().to_owned();
+    state
+        .call(move |library| {
+            let mut snapshot = settings::Preferences::load(&library.db)?;
+            snapshot.language = "en".into();
+            snapshot.english_level = "A1".into();
+            snapshot.font_size = 26.5;
+            let mut newer = snapshot.clone();
+            newer.language = "zh-CN".into();
+            newer.english_level = "C3".into();
+            newer.font_size = 32.0;
+            newer.save(&library.db)?;
+            let reader = library
+                .reader_with_preferences(&id, 0, snapshot.clone())?
+                .unwrap();
+            assert_eq!(reader.preferences, snapshot);
+            assert!(
+                reader.blocks.iter().any(|block| block.contains("<ruby")),
+                "annotation must use the request's A1 snapshot, not the newer database C3 setting"
+            );
+            assert_eq!(settings::Preferences::load(&library.db)?, newer);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
