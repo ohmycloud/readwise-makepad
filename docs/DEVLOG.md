@@ -2,6 +2,14 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-10-26 — 修复原生选文色块保存与默认颜色写入竞争
+
+- 用户手机端点击选文圆形色块后提示“高亮操作失败，error returned from database”。色块处理器会分别启动默认阅读设置保存和 `apply_highlight` 两个后台任务；后者原先使用 deferred 事务，先 SELECT 再 DELETE/INSERT。另一个连接持有写锁时，读事务升级不能靠 busy timeout 等待，会立即返回 `SQLITE_BUSY`。使用真实文件数据库、生产 schema／外键及两个连接，分别在 DELETE 和 WAL 日志模式稳定复现 `(code: 5) database is locked`；旧实现两项测试均失败，日志 `/tmp/readwise-highlight-lock-baseline.log`。
+- `core/src/books/queries.rs` 的 `apply_highlight` 改用 `BEGIN IMMEDIATE`，在读取范围前取得写事务，让连接既有的有限 busy timeout 在后台等待其他写入。保留同一事务内的部分换色、前后旧色片段、章节快照及失败回滚；没有关闭外键、吞掉错误、全局切换日志模式或拆成先删后存。各数据库步骤补充错误上下文，保留 SQLite 原错误及错误码。未修改 UI、正文、注音槽位、源坐标、布局签名、分页缓存或数据库 schema。
+- 新增两项并发回归：持有默认颜色写事务时，高亮不能提前失败；释放后准确保存黄／蓝／黄三段，重开数据库仍保持范围与默认色，其他章节旧橙色不变。既有失败回滚／重试、跨章／跨书隔离及已认识布局签名回归继续通过。
+- `cargo test --workspace --offline -- --test-threads=1` **505 项通过（289 app + 177 core + 7 math + 32 web）**，3 项 core 原有 ignored；生产桌面构建及 core Clippy 通过，保留原有链接器和 Clippy warnings。日志 `/tmp/readwise-highlight-lock-{fixed,workspace,build,clippy}.log`。仅使用隔离临时数据库，未操作用户书库。未更改绘制路径，本轮未做桌面 GPU 交互或 Android／iOS 真机验收。
+- 随后按用户要求运行 `scripts/package_android.sh`，生成约 **76 MiB** 的 `target/dist/ReadWise-android-aarch64-0.1.0.apk`，包含本次高亮修复。首次被独立 wrapper 的 `--locked` 检查拦住：离线解析 wrapper 锁文件后，确认没有新增或升级 package，仅裁剪工作区不相关依赖，以临时 `app/Cargo.lock` 供原脚本使用，退出后清理；未改根锁文件或打包脚本。另将 rustup 的 `$HOME/.cargo/bin` 前置，避免 Homebrew rustc 找不到已安装的 Android 标准库。最终脚本退出 0，Java 导入／局域网桥接自检通过，`aapt` 确认包名 `org.ohmycloud.readwise`、versionCode 2、API 26／35、arm64-v8a，`apksigner` 确认开发证书 v2／v3 签名有效。SHA-256：`6b1b925e562c71410d6ae762f52aa580ce65362bf4cd5d4572682fe17a35ee3e`；日志 `/tmp/readwise-highlight-package-android.log`。未安装到手机，不将 APK 构建成功计为真机交互验收。
+
 ## 2026-10-25 — 迁移 Topcoat 0.11.0、统一页面设置快照与 Fluent 界面文案
 
 - 将 Web 依赖锁定到 Topcoat 0.11.0，最低 Rust 更新为 1.99，并同步 CLI 校验、启动说明及界面版本。以独立 `target/topcoat-0.11/bin/topcoat` 完成资源打包和校验，未覆盖用户全局 0.10.0 CLI；运行新版前需按 README 安装匹配版本。新增依赖是 Fluent 及其 ICU 数字／语言支持，未引入 Toasty、Tailwind、Topcoat UI、客户端导航或 Popover。

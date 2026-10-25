@@ -558,10 +558,18 @@ pub async fn apply_highlight(
     let (Some(start), Some(end)) = (start, end) else {
         return Err("高亮范围无效".into());
     };
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    // Swatches also save the default colour on another connection. A deferred
+    // transaction can read while that writer holds RESERVED, but SQLite cannot
+    // wait when upgrading that read lock to a write lock (SQLITE_BUSY, or a
+    // stale snapshot under WAL). Reserve the writer before reading so the
+    // connection's busy timeout can wait without losing atomic replacement.
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| format!("开始高亮事务失败: {e}"))?;
     let rows = sqlx::query("SELECT id,norm_start,norm_end,color FROM book_notes WHERE book_id=? AND section_id=? AND type='annotation' AND style='highlight' AND norm_start<? AND norm_end>?")
         .bind(book_id).bind(chapter.to_string()).bind(end).bind(start)
-        .fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
+        .fetch_all(&mut *tx).await.map_err(|e| format!("读取重叠高亮失败: {e}"))?;
     let mut additions = vec![(start, end, color.to_owned())];
     for row in rows {
         let id: String = row.get("id");
@@ -573,7 +581,7 @@ pub async fn apply_highlight(
             .bind(book_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("替换重叠高亮失败: {e}"))?;
         if a < start {
             additions.push((a, start, old.clone()));
         }
@@ -588,7 +596,7 @@ pub async fn apply_highlight(
             .bind(a).bind(b).bind(now).bind(now).execute(&mut *tx).await.map_err(|e| format!("保存高亮失败: {e}"))?;
     }
     let rows = sqlx::query("SELECT id,norm_start,norm_end,color FROM book_notes WHERE book_id=? AND section_id=? AND type='annotation' AND style='highlight' ORDER BY norm_start,norm_end,id")
-        .bind(book_id).bind(chapter.to_string()).fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
+        .bind(book_id).bind(chapter.to_string()).fetch_all(&mut *tx).await.map_err(|e| format!("读取高亮结果失败: {e}"))?;
     let result = rows
         .into_iter()
         .map(|row| {
@@ -604,7 +612,9 @@ pub async fn apply_highlight(
             }
         })
         .collect();
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("提交高亮事务失败: {e}"))?;
     Ok(result)
 }
 
@@ -900,6 +910,140 @@ mod highlight_tests {
                 .len(),
             1
         );
+    }
+
+    fn swatch_waits_for_settings_writer(journal_mode: sqlx::sqlite::SqliteJournalMode) {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::{sync::mpsc, time::Duration};
+
+        // An in-memory database cannot reproduce SQLite's file lock upgrade
+        // failure. Use the production schema, foreign keys and two connections.
+        let path =
+            std::env::temp_dir().join(format!("readwise-highlight-{}.db", uuid::Uuid::new_v4()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(journal_mode)
+            .busy_timeout(Duration::from_secs(3));
+        let pool = runtime
+            .block_on(
+                SqlitePoolOptions::new()
+                    .max_connections(2)
+                    .connect_with(options.clone()),
+            )
+            .unwrap();
+        runtime.block_on(async {
+            sqlx::query(include_str!("../schema.sql")).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO books (id,title,author,format,file_path,file_size,language,created_at,updated_at) VALUES ('book','Test','','epub','',0,'en',0,0)")
+                .execute(&pool).await.unwrap();
+            add_highlight(&pool, "book", 0, (0, 0, 0, 20), "marker-yellow").await.unwrap();
+            add_highlight(&pool, "book", 1, (0, 0, 0, 20), "orange").await.unwrap();
+        });
+
+        // The swatch also persists its default colour on a separate background
+        // thread. Hold that writer open while apply_highlight starts.
+        let mut settings = runtime.block_on(pool.begin()).unwrap();
+        runtime
+            .block_on(
+                sqlx::query(
+                    "INSERT INTO app_settings VALUES ('reader.highlight_color_slot','6',0)",
+                )
+                .execute(&mut *settings),
+            )
+            .unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let worker_pool = pool.clone();
+        let worker = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                // Acquire the second connection before signalling readiness.
+                let connection = worker_pool.acquire().await.unwrap();
+                drop(connection);
+                started_tx.send(()).unwrap();
+                let result =
+                    apply_highlight(&worker_pool, "book", 0, (0, 5, 0, 10), "marker-blue").await;
+                finished_tx.send(()).unwrap();
+                result
+            })
+        });
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let early = finished_rx.recv_timeout(Duration::from_millis(200));
+        // Always release/join before asserting, including the failing baseline.
+        runtime.block_on(settings.commit()).unwrap();
+        let result = worker.join().unwrap();
+        runtime.block_on(pool.close());
+        assert!(
+            matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
+            "highlight must wait for the settings writer, got {result:?}"
+        );
+        let highlights = result.unwrap();
+        let ranges = highlights
+            .iter()
+            .map(|h| {
+                (
+                    (h.start_block, h.start_char, h.end_block, h.end_char),
+                    h.color.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranges,
+            vec![
+                ((0, 0, 0, 5), "marker-yellow"),
+                ((0, 5, 0, 10), "marker-blue"),
+                ((0, 10, 0, 20), "marker-yellow")
+            ]
+        );
+
+        // Reopening must preserve both writes and the untouched chapter.
+        let reopened = runtime
+            .block_on(
+                SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(options),
+            )
+            .unwrap();
+        let saved = runtime
+            .block_on(get_highlights_by_chapter(&reopened, "book"))
+            .unwrap();
+        assert_eq!(saved[&0].len(), 3);
+        for h in &highlights {
+            assert!(saved[&0].iter().any(|s| s.id == h.id
+                && s.color == h.color
+                && s.start_char == h.start_char
+                && s.end_char == h.end_char));
+        }
+        assert_eq!(saved[&1][0].color, "orange");
+        let slot: String = runtime
+            .block_on(
+                sqlx::query_scalar(
+                    "SELECT value FROM app_settings WHERE key='reader.highlight_color_slot'",
+                )
+                .fetch_one(&reopened),
+            )
+            .unwrap();
+        assert_eq!(slot, "6");
+        runtime.block_on(reopened.close());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn swatch_waits_for_settings_writer_with_delete_journal() {
+        swatch_waits_for_settings_writer(sqlx::sqlite::SqliteJournalMode::Delete);
+    }
+
+    #[test]
+    fn swatch_waits_for_settings_writer_with_wal_journal() {
+        swatch_waits_for_settings_writer(sqlx::sqlite::SqliteJournalMode::Wal);
     }
 
     #[test]
