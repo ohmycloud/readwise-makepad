@@ -2562,6 +2562,149 @@ mod reader_pagination_tests {
         assert_eq!(pager.take_pending_turn(false), Some(false));
     }
 
+    fn reflow_metrics(
+        stride: usize,
+        pitch: f64,
+    ) -> Vec<Option<crate::reader_columns::BlockMetrics>> {
+        use crate::reader_columns::{BlockMetrics, LineBoundary};
+        let lines = 50_000usize.div_ceil(stride);
+        vec![Some(BlockMetrics {
+            height: lines as f64 * pitch,
+            boundaries: (0..=lines)
+                .map(|row| LineBoundary {
+                    y: row as f64 * pitch,
+                    source: (row * stride).min(50_000),
+                })
+                .collect(),
+            keep_together: false,
+        })]
+    }
+
+    #[test]
+    fn repeated_column_round_trips_keep_logical_source_and_canonical_pages() {
+        use crate::reader_columns::{PageAnchor, PageIndex};
+        for pitch in [20.0, 19.7] {
+            let original_metrics = reflow_metrics(120, pitch);
+            let mut original_index = PageIndex::default();
+            original_index.advance(&original_metrics, 113.4);
+            let original = original_index.starts[14];
+            let source = original_metrics[0].as_ref().unwrap().source_at(original.y);
+            let mut pager = ReaderPagedState {
+                active: true,
+                content_version: 1,
+                anchor: original,
+                metrics: original_metrics,
+                page_index: original_index,
+                ..Default::default()
+            };
+            let mut double_page = None;
+            for _ in 0..40 {
+                for stride in [65, 120] {
+                    pager.begin_reflow(pager.anchor, 1);
+                    assert_eq!(pager.pending_source, Some((0, source)));
+                    pager.metrics = reflow_metrics(stride, pitch);
+                    pager.page_index = PageIndex::default();
+                    pager.page_index.advance(&pager.metrics, 113.4);
+                    let (block, byte) = pager.pending_source.take().unwrap();
+                    let projected = PageAnchor {
+                        block,
+                        y: pager.metrics[block].as_ref().unwrap().y_at(byte),
+                    };
+                    // This is the same line rounding + canonical page snap as draw_pages.
+                    pager.anchor = pager.page_index.containing(projected).unwrap();
+                    assert_eq!(
+                        pager.source_anchor(block, -pager.anchor.y, 1),
+                        Some((0, source))
+                    );
+                    let page = pager.page_index.page_number(pager.anchor).unwrap();
+                    if stride == 120 {
+                        assert_eq!(pager.anchor, original);
+                        assert_eq!(page, 14);
+                    } else {
+                        assert_eq!(page, *double_page.get_or_insert(page));
+                        // The projected page's first byte really is earlier. Recapturing
+                        // it on the next switch is precisely the old cumulative bug.
+                        assert!(
+                            pager.metrics[0].as_ref().unwrap().source_at(pager.anchor.y) < source
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reflow_progress_preserves_the_logical_block_and_byte_pair() {
+        let mut pager = ReaderPagedState {
+            active: true,
+            content_version: 1,
+            reflow_source: Some((3, 150)),
+            metrics: vec![reflow_metrics(120, 20.0)[0].clone(); 4],
+            ..Default::default()
+        };
+        // The new canonical page begins in block 1, but the original reading
+        // point is still in block 3. Saving block 1 + byte 150 corrupts resume.
+        assert_eq!(pager.source_location(1, -47.3, 1), Some((3, -20.0, 150)));
+        pager.did_navigate();
+        assert_eq!(pager.source_location(1, -47.3, 1), Some((1, -47.3, 240)));
+        // A footer/progress refresh must not rebind the logical source byte
+        // to the visual first block immediately after a correct snapshot.
+        let progress = include_str!("app.rs")
+            .rsplit_once("    fn update_progress_label(&self, cx: &mut Cx)")
+            .unwrap()
+            .1;
+        assert!(progress.contains("self.current_reader_progress_snapshot(cx)"));
+        assert!(!progress.contains("CURRENT_READER_BLOCK.store"));
+        assert!(!progress.contains("CURRENT_READER_SCROLL_BITS.store"));
+    }
+
+    #[test]
+    fn pending_and_explicit_sources_survive_fast_reflow_before_measurement() {
+        use crate::reader_columns::PageAnchor;
+        let mut pager = ReaderPagedState {
+            active: true,
+            content_version: 1,
+            reflow_source: Some((5, 30)),
+            pending_source: Some((5, 30)),
+            metrics: vec![None; 10],
+            ..Default::default()
+        };
+        for _ in 0..20 {
+            pager.begin_reflow(PageAnchor::default(), 1);
+            assert_eq!(pager.pending_source, Some((5, 30)));
+        }
+        pager.requested_source = Some((7, 13));
+        pager.begin_reflow(PageAnchor::default(), 1);
+        assert_eq!(pager.reflow_source, Some((7, 13)));
+        assert_eq!(pager.pending_source, Some((7, 13)));
+    }
+
+    #[test]
+    fn real_navigation_and_changed_content_do_not_reuse_old_reflow_targets() {
+        use crate::reader_columns::PageAnchor;
+        let mut pager = ReaderPagedState {
+            active: true,
+            content_version: 1,
+            reflow_source: Some((0, 150)),
+            pending_source: Some((0, 150)),
+            requested_source: Some((0, 150)),
+            metrics: reflow_metrics(120, 20.0),
+            ..Default::default()
+        };
+        pager.did_navigate();
+        assert_eq!(pager.reflow_source, None);
+        pager.begin_reflow(PageAnchor { block: 0, y: 400.0 }, 1);
+        assert_eq!(pager.reflow_source, Some((0, 2400)));
+        pager.begin_reflow(PageAnchor::default(), 2);
+        assert_eq!(pager.reflow_source, None);
+        assert_eq!(pager.pending_source, None);
+        // An explicit bookmark/open target belongs to the new content, not
+        // the obsolete layout, so it is allowed to override the invalidation.
+        pager.requested_source = Some((8, 70));
+        pager.begin_reflow(PageAnchor::default(), 2);
+        assert_eq!(pager.reflow_source, Some((8, 70)));
+    }
+
     #[test]
     fn previous_chapter_opens_on_its_last_page_boundary() {
         assert_eq!(reader_last_page_start(13, 4), 12);
@@ -9566,6 +9709,9 @@ struct ReaderPagedState {
     page_index: crate::reader_columns::PageIndex,
     pending_source: Option<(usize, usize)>,
     requested_source: Option<(usize, usize)>,
+    // The logical reading point survives line/page rounding during reflow.
+    // Never recapture it from the (possibly earlier) projected page start.
+    reflow_source: Option<(usize, usize)>,
     scroll_gesture: crate::reader_scroll::ScrollGesture,
     measure_frame: NextFrame,
     requested_last_page: bool,
@@ -9580,6 +9726,62 @@ struct ReaderPagedState {
 }
 
 impl ReaderPagedState {
+    fn source_anchor(
+        &self,
+        block: usize,
+        scroll: f64,
+        content_version: u64,
+    ) -> Option<(usize, usize)> {
+        self.requested_source.or(self.pending_source).or_else(|| {
+            (self.content_version == content_version)
+                .then(|| {
+                    self.reflow_source.or_else(|| {
+                        self.metrics
+                            .get(block)
+                            .and_then(Option::as_ref)
+                            .filter(|metric| scroll >= -0.5 || !metric.boundaries.is_empty())
+                            .map(|metric| (block, metric.source_at((-scroll).max(0.0))))
+                    })
+                })
+                .flatten()
+        })
+    }
+
+    fn source_location(
+        &self,
+        block: usize,
+        scroll: f64,
+        content_version: u64,
+    ) -> Option<(usize, f64, usize)> {
+        let (source_block, source) = self.source_anchor(block, scroll, content_version)?;
+        let scroll = if source_block == block {
+            scroll
+        } else {
+            self.metrics
+                .get(source_block)
+                .and_then(Option::as_ref)
+                .map_or(0.0, |metric| -metric.y_at(source))
+        };
+        Some((source_block, scroll, source))
+    }
+
+    fn begin_reflow(&mut self, anchor: crate::reader_columns::PageAnchor, content_version: u64) {
+        let requested = self.requested_source.take();
+        let source = requested.or_else(|| {
+            (self.active && self.content_version == content_version)
+                .then(|| self.source_anchor(anchor.block, -anchor.y, content_version))
+                .flatten()
+        });
+        self.reflow_source = source;
+        self.pending_source = source;
+    }
+
+    fn did_navigate(&mut self) {
+        self.reflow_source = None;
+        self.pending_source = None;
+        self.requested_source = None;
+    }
+
     fn page_ready(&self) -> bool {
         self.spread_ready && !self.requested_last_page && self.pending_source.is_none()
     }
@@ -10153,17 +10355,11 @@ impl ChapterList {
     }
 
     fn source_anchor(&self, block: usize, scroll: f64) -> Option<(usize, usize)> {
-        self.pager
-            .requested_source
-            .or(self.pager.pending_source)
-            .filter(|(id, _)| *id == block)
-            .or_else(|| {
-                (self.pager.content_version == READER_CONTENT_VERSION.load(Ordering::Relaxed))
-                    .then(|| self.pager.metrics.get(block).and_then(Option::as_ref))
-                    .flatten()
-                    .filter(|metric| scroll >= -0.5 || !metric.boundaries.is_empty())
-                    .map(|metric| (block, metric.source_at((-scroll).max(0.0))))
-            })
+        self.pager.source_anchor(
+            block,
+            scroll,
+            READER_CONTENT_VERSION.load(Ordering::Relaxed),
+        )
     }
 
     fn draw_scrolling(
@@ -10174,6 +10370,10 @@ impl ChapterList {
         viewport: Rect,
     ) -> DrawStep {
         self.page_turn.cancel();
+        // Scrolling establishes its own reading point as the viewport moves.
+        // A paged-to-scroll transition already captured the old logical point
+        // in requested_source before entering this draw path.
+        self.pager.reflow_source = None;
         let list_ref = self.view.portal_list(cx, ids!(list));
         let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
         let signature = reader_source_hash(&format!(
@@ -10397,17 +10597,7 @@ impl ChapterList {
         let codes = CODE_BLOCKS.read().unwrap();
         if self.pager.signature != signature || self.pager.metrics.len() != paragraphs.len() {
             self.pager.needs_page_alignment = true;
-            if self.pager.content_version == content_version && self.pager.active {
-                self.pager.pending_source = self.pager.pending_source.or_else(|| {
-                    self.pager
-                        .metrics
-                        .get(anchor.block)
-                        .and_then(Option::as_ref)
-                        .map(|metric| (anchor.block, metric.source_at(anchor.y)))
-                });
-            } else {
-                self.pager.pending_source = None;
-            }
+            self.pager.begin_reflow(anchor, content_version);
             (self.pager.metrics, self.pager.page_index) = self
                 .book_pages
                 .restore(chapter, paragraphs.len())
@@ -10415,9 +10605,6 @@ impl ChapterList {
             self.pager.turn_history.clear();
             self.pager.signature = signature;
             self.pager.content_version = content_version;
-            if let Some(requested) = self.pager.requested_source.take() {
-                self.pager.pending_source = Some(requested);
-            }
             self.range_geometry_cache.clear();
             self.item_layout_widths.clear();
             self.hit_runs.clear();
@@ -10426,12 +10613,17 @@ impl ChapterList {
         self.pager.active = true;
         if let Some(requested) = self.pager.requested_source.take() {
             self.pager.pending_source = Some(requested);
+            self.pager.reflow_source = Some(requested);
             self.pager.needs_page_alignment = true;
             self.pager.turn_history.clear();
         }
         self.pager.pending_source = self
             .pager
             .pending_source
+            .filter(|(block, _)| *block < paragraphs.len());
+        self.pager.reflow_source = self
+            .pager
+            .reflow_source
             .filter(|(block, _)| *block < paragraphs.len());
         self.pager.layout = layout;
         self.pager.drawn.clear();
@@ -10778,6 +10970,7 @@ impl ChapterList {
             .portal_list(cx, ids!(list))
             .set_first_id_and_scroll(target.block, -target.y);
         self.pager.anchor = target;
+        self.pager.did_navigate();
         // This is an intentional reading move, not a restored offset. Do not
         // snap it backwards later when the rest of the index becomes available.
         self.pager.needs_page_alignment = false;
@@ -18732,8 +18925,7 @@ impl App {
             reader.pager.requested_last_page = block == usize::MAX;
             reader.page_turn.finish();
             reader.pager.spread_ready = false;
-            reader.pager.pending_source = None;
-            reader.pager.requested_source = None;
+            reader.pager.did_navigate();
             reader.pager.pending_turn = None;
             reader.pager.turn_history.clear();
         }
@@ -18977,6 +19169,7 @@ impl App {
                     reader.page_turn.cancel();
                     reader.pager.pending_turn = None;
                     reader.pager.turn_history.clear();
+                    reader.pager.did_navigate();
                 }
                 self.ui
                     .widget(cx, ids!(chapter_list))
@@ -24263,15 +24456,23 @@ impl ReaderControls<'_> {
         let block = list.first_id().min(block_count.saturating_sub(1));
         let scroll = list.scroll_position();
         let scroll = if scroll.is_finite() { scroll } else { 0.0 };
-        let source = self
+        let location = self
             .ui
             .widget(cx, ids!(chapter_list))
             .borrow::<ChapterList>()
             .and_then(|reader| {
-                reader
-                    .source_anchor(block, scroll)
-                    .map(|(_, source)| source)
+                reader.pager.source_location(
+                    block,
+                    scroll,
+                    READER_CONTENT_VERSION.load(Ordering::Relaxed),
+                )
             });
+        // The logical point can be in a later block than the displayed page
+        // start. Persist the matching block/byte pair, not a byte offset from
+        // that later block attached to the earlier visual block.
+        let (block, scroll, source) = location
+            .map(|(block, scroll, source)| (block, scroll, Some(source)))
+            .unwrap_or((block, scroll, None));
         CURRENT_READER_BLOCK.store(block, Ordering::Relaxed);
         CURRENT_READER_SCROLL_BITS.store(scroll.to_bits(), Ordering::Relaxed);
         CURRENT_READER_SOURCE.store(source.unwrap_or(usize::MAX), Ordering::Relaxed);
@@ -24391,8 +24592,9 @@ impl ReaderControls<'_> {
             .ui
             .widget(cx, ids!(chapter_list))
             .portal_list(cx, ids!(list));
-        CURRENT_READER_BLOCK.store(list.first_id(), Ordering::Relaxed);
-        CURRENT_READER_SCROLL_BITS.store(list.scroll_position().to_bits(), Ordering::Relaxed);
+        // Keep process-lifetime resume state as the same logical block/byte
+        // pair used for persistence; the visible page may start earlier.
+        let _ = self.current_reader_progress_snapshot(cx);
         let blocks = PARAGRAPHS.read().unwrap().len().max(1);
         let read_to = self
             .ui
