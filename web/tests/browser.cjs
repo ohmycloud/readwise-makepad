@@ -91,6 +91,29 @@ async function run() {
   assert.equal(await image.evaluate(node => node.naturalWidth), 1);
   console.log("PASS: streamed Chinese EPUB import, real chapter, ruby and private image route");
 
+  const chapterLink = page.locator('.reader-block a', { hasText: 'Other chapter' });
+  const assertLinkStyle = async () => {
+    assert.deepEqual(await chapterLink.evaluate(node => {
+      const style = getComputedStyle(node);
+      return { decoration: style.textDecorationLine, color: style.color };
+    }), { decoration: 'none', color: 'rgb(69, 107, 117)' });
+  };
+  await assertLinkStyle();
+  await chapterLink.scrollIntoViewIfNeeded();
+  await chapterLink.hover();
+  await assertLinkStyle();
+  await chapterLink.focus();
+  await assertLinkStyle();
+  assert.notEqual(await chapterLink.evaluate(node => getComputedStyle(node).outlineStyle), 'none');
+  await page.mouse.down();
+  await assertLinkStyle();
+  await page.mouse.up();
+  await page.waitForURL(`**/read/${bookId}/1`);
+  await page.goBack();
+  await page.evaluate(() => scrollTo(0, 0));
+  await settle();
+  console.log("PASS: reader links keep their color and keyboard focus, without underlines in normal/hover/focus/active states; real click still navigates");
+
   await ruby("solitude").first().click();
   await page.locator("#word-card[open]").waitFor();
   await page.evaluate(() => { window.__qaRuby = document.querySelector('#reading-content ruby[data-lemma="solitude"]'); });

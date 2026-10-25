@@ -93,7 +93,7 @@ h2 { font-size: 20px; font-weight: 550; line-height: 1.4; }
 .reader-block pre, .reader-block table, .reader-block img { max-width: 100%; break-inside: avoid-column; }
 .reader-block h1, .reader-block h2, .reader-block h3 { line-height: 2; letter-spacing: 0; }
 .reader-block img { display: block; max-width: 100%; max-height: 75vh; object-fit: contain; margin: 24px auto; }
-.reader-block a { color: #456b75; text-decoration: underline; text-underline-offset: 3px; }
+.reader-block a { color: #456b75; text-decoration: none; }
 .reader-block pre { font: .75em/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #f5f3ee; color: #24292e; background: light-dark(#f5f3ee, #2b3036); color: light-dark(#24292e, #d8d4ca); padding: 20px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; white-space: pre; tab-size: 4; }
 .reader-block code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 /* Typst outlines are server-rendered before layout. Keep original UTF-8 text
