@@ -4348,6 +4348,8 @@ name = "readwise-math"
 version = "0.1.0"
 dependencies = [
  "ammonia",
+ "base64 0.22.1",
+ "hayro",
  "html-escape",
  "pdf_oxide",
  "readwise-core",

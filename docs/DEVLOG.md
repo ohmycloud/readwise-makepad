@@ -2,6 +2,51 @@
 
 > 约定：每次开发会话在此追加一节，记录做了什么、遇到的问题、决策及理由。倒序排列（最新在上）。
 
+## 2026-10-27 — 继续降低 PDF 翻页开销：等价快速路径、邻页预热与图片测量去解码
+
+- 用户反馈第一轮优化后同书 EPUB 仍更顺。继续拆分投影、后台任务、原生图片处理和目的页分页就绪耗时；没有通过重导入、改写正文快照、清空当前页缓存或扩大投影缓存掩盖差异。
+- 共享 PDF 投影对完全没有 math glyph 的页立即返回原本就为空的数学结果，保留完整流程等价性测试；图形识别先检查已有字符／旋转标签证据，满足必要条件才提取昂贵的矢量路径。没有按书名、文本猜测公式，也没有关闭图形。只读 Agents 原始页号 10／11／12／13／14／11 调试探针：逐页重开现在 **31.5–51.9 ms**；保留会话首个 **45.9 ms**，后续 **0.59–12.38 ms**。这些仍只是投影阶段，不是完整 UI 翻页指标，日志 `/tmp/readwise-pdf-continue-projection.log`。
+- 原生只预热前后相邻原始页，最多一个编译在途，前台目的页优先，仍用六页／8 MiB 投影预算；记录已尝试邻页，避免超预算页面反复预热／淘汰。非空投影的全书页码版本变更延迟到该章实际显示时消费；纯预热完成不重载正文、不触碰当前页几何或重启全书计数。
+- Metal 隔离诊断发现普通 PNG 图示在分页测量与可见组件里反复解码、调色，单次 UI 处理约 **100–240 ms**。新增独立 **32 MiB／24 项** CPU LRU，按路径、文件长度／修改时间和完整纸墨色键复用相同像素；解码／调色不持共享锁，PDF 当前页与邻页在原有后台 worker 中准备。编码文件仍限 16 MiB，不接纳超过单缓存预算的位图进行投机解码，避免准备后又因不能缓存而在 UI 重做。图片测量通过有界 PNG chunk header 扫描／seek 跳过压缩像素，不解码、不调色、不上传 GPU；APNG atlas、EXIF 旋转（含 IDAT 后元数据）、异常／不支持的图片保留原加载路径。测量作用域嵌套／panic 均恢复，可见复用仍加载纹理。
+- 不改图示调色算法、图片尺寸、原文件或共享原图缓存；逐像素回归确认 CPU 准备结果与旧算法一致。原图查看器仍读未调色原图。跨章末尾只请求阅读组件重绘，标题／页脚控件各自重绘，不额外失效整个应用树。诊断中 PDF 可见图片均命中准备缓存，其 UI 处理未再出现 >5 ms 的旧解码／调色停顿；对应约 88–188 ms 的准备出现在后台线程。
+- 不将局部优化当作已追平 EPUB：最终隔离原生 QA 等待确切书籍／目的页就绪后，Agents 原始页号 15–18 连续目的页就绪为 **92.4／24.6／274.2／333.7 ms**；关闭邻页预热对照为 **502.8／75.8／490.6／431.3 ms**（16 页已在打开时访问过）。同设置 EPUB 后续屏约 **55.9–101.2 ms**。首次跳到未预热的 14 页仍约 **947 ms**，个别后续页仍明显慢于 EPUB；早期尚未打开书籍就发出的命令结果已丢弃。stdin/Metal QA 的异步动作交付另有约 2–315 ms 波动，不把该探针视为真机帧率或包含 0.32 秒翻页动画结束的测量。记录 `target/pdf-turn-qa/native-{with,without}-warming.log`、`/tmp/readwise-pdf-continue-final-native-profile.log`。
+- 正式 Web 二进制／真实 Chromium 再测下一章链接 10→18：后续完整导航 **200–284 ms**，投影淘汰后回到 10 为 **194 ms**；冷开约 **8.18 s**。本轮共享快速路径降低投影工作，但没有声称完整 Web 导航继续大幅缩短或已等同 EPUB 的章内翻屏。数据 `target/pdf-turn-qa/web-times.json`。
+- 回归：workspace **525 项通过（300 app + 177 core + 14 math + 34 web）**，3 项既有 ignored；桌面／Web 正式构建，Chromium 数学、矢量图形、配色三项专项通过（不是全量 npm 套件）。原生 PDF 大图 Paper→Night→Paper 几何相同，真实点击预览仍为白底原图、源图片 SHA-256 不变；该页 actuators 标为已认识后注音隐藏、卡片关闭、签名／锚点／历史／实测数／正文及图片矩形／实际源位置不变，跨章返回结果相同。另完整回归 Columns QA 首页 Paragraph、后续页 reader 的消注与前后翻页；390×700 和 640×320 图片可达且完整适配。截图 `target/pdf-turn-qa/native-final-*.png`，日志 `/tmp/readwise-pdf-continue-native-checks.log`。只操作隔离数据库和副本，未动正式书库。
+- 新增缓存字节／项数／LRU、调色逐像素一致／复用、palette／文件版本键、PNG 尺寸、动画／异常／EXIF 旋转、测量作用域回归。首轮测试出现既有局域网 socket 断开竞态，完整重跑后全部通过，未修改传书实现。math／Web all-target Clippy 通过；app 标准 Clippy 被既有 `ruby_word.rs:43` 的 `255.0 / 255.0`（deny `eq_op`）阻断，临时命令行允许该 lint 后通过且仍有既有 warnings，未修改无关代码。格式和 diff 检查通过。Android／iOS 真机及其他浏览器未验收。
+
+## 2026-10-26 — 复用 PDF 阅读解析会话，修复桌面／Web 跨原始页翻页卡顿
+
+- 用户反馈两端 PDF 翻页缓慢，并反复输出 `LiberationSerif` 等嵌入字体 Info 日志。确认原生 `BookMath::compile` 和 Web `Library::reader_with_preferences` 在每次页面投影缓存未命中时均调用一次性 `MathPage::pdf`，重新创建 `PdfDocument`。pdf_oxide 的字体、CMap、字形和逐页几何缓存属于文档实例；保存正文快照和少量最终投影并不能保住它们。纯正文页也会走这条几何检查路径，并非只有公式页受影响。
+- 共享 `PdfSession` 惰性打开一次不可变书籍，缓存打开失败并复用库内有界缓存；原生每本打开的书持有 Arc 会话，全部后台编译共用，页面淘汰和已认识操作不重开解析器。Web 另设最多两份文档会话的 LRU，独立于原有六页／8 MiB 投影缓存，删书同步释放。保留后台／spawn_blocking、完整目的页准备后才切换、旧任务 token、当前页保护及所有正文坐标／迁移版本。未重建快照或通过清空分页缓存提速，也未更改绘制、注音、分页失效或 DOM 替换路径。
+- 桌面 logger 将 `pdf_oxide` 的普通 Info 过滤到 Warn，仍保留警告／错误和应用自身 Info；日志过滤不是性能修复的替代品。增加只读 `math/examples/pdf_turn_profile.rs`，对同一源文字分别测试逐页重开与保留会话。
+- 调试构建实测 `An Illustrated Guide to AI Agents`（LiberationSerif）原始页号 10／11／12／13／14／11：旧路径每页 **5903–5935 ms**，会话首屏 **5908 ms**，之后 **1–38 ms**，六次合计 **35539 → 6029 ms**；Attention 同样从逐页 **704–804 ms** 降到首屏后 **22–123 ms**。这是投影阶段，不是完整帧指标。日志 `/tmp/readwise-pdf-turn-{agents,profile}.log`。
+- 真实 Chromium 使用隔离复制的 QA 书库及正式 Web 二进制，实际点击上述 Agents PDF 的下一章链接，从原始页号 10 连续到 18；完整导航约 **202–275 ms**，超过六页缓存后再回到 10 约 **200 ms**。首屏包含正文／快照初始化仍约 **13.8 s**，没有宣称解决首次打开成本；服务重启／解析会话淘汰同样会重新初始化。结果 `target/pdf-turn-qa/web-times.json`，截图 `web-return.png`；未操作用户正式书库或外部原 PDF。
+- 回归新增会话惰性初始化／Send+Sync、冷暖投影逐块一致及全部源字符不变、非 PDF／超预算不打开文件、失败不在分页循环内重试、新会话可以重试、Web 页面淘汰不丢解析会话、两文档上限与删书释放；原生既有当前页保护／过期任务测试补充会话身份保持。完整 workspace **515 项通过（291 app + 177 core + 13 math + 34 web）**，3 项 core 原有 ignored；正式桌面／Web 重建及资源打包通过。数学和图形 Chromium 专项分别完整退出 0，含公式／整段复制高亮、图外正文、已认识和真实重启；未宣称完整 npm 套件通过。
+- 隔离原生 QA／Metal 实际点击首页 `Paragraph` 和后续页 `reader` 注音词，标为已认识后卡片关闭、注音隐藏，签名／锚点／历史／实测数／绘制矩形／逻辑源完全不变，前后翻页保持原几何；日志 `/tmp/readwise-pdf-session-native-known.log`。Attention 首页→下一原始页→返回的投影文字、锚点及绘制矩形一致，数据 `target/reader-qa/math-native/state-pdf-session-stable-*.json`。首次 QA 命令在后台打开尚未结束时取到旧书，已丢弃该次结果并等待完成后重测；未扩大为手机真机验证。
+- 共享 math／Web 的 all-targets Clippy 通过，仅有既有 core warnings；`cargo clippy --workspace --all-targets -- -D warnings` 被已有 core 的 `chunks_exact_to_as_chunks`／`useless_vec` 等告警阻断，未顺带修改无关代码。Android／iOS、Safari／Firefox、全量性能帧分析未验收。
+
+## 2026-10-26 — 将 PDF 图形投影收窄到图形本身，保留标题、图注和正文文本
+
+- 用户指出上一轮整页原图将 `Attention Visualizations` 标题及 Figure 说明一起变成了图片。该范围确实过大，撤销“整页可视投影”的实现方式：现在只保留图形区域及图内旋转标签的 PNG，**标题、图注、普通正文、页码都留作文本**，不以“并非所有页都变图片”代替图文分离。
+- `math/src/figures.rs` 以旋转字原始 origin／字号和矢量路径限定候选，再以所有水平字符的实际 ascent／descent 和左右边界隔开周围文字；裁切边上仍有墨迹、正文与图形重叠、不支持的页面变换或映射不唯一均回退文本，不再有整页图片兜底。渲染继续使用受限后台 Hayro，先确定不含正文的区域，再去除区域内空白。去掉原先独立数字页脚的整页裁剪策略，页码本身仍是普通文字。
+- 对旧块逐 span 做唯一匹配并保护图外文字范围，剩余源字必须能对应原始旋转字集合，才投影为图形／隐藏标签；给匹配工作量加预算。特别覆盖旧提取器把 Figure 说明、普通正文、页码和图内词混进同一块的情况，不能一隐藏就把整段正文一起隐藏。MathPage 只移除**整块纯标签**的排版壳；混合块仍保留原壳及正常文字。图外公式与图形投影合并，继续走原有 Typst 代码，不能因本页有图而禁用公式。
+- 所有原块号、原 UTF-8 字节、提取顺序和存储的高亮／进度保持既有坐标体系；没有改核心提取器或版本迁移，没有删／重建正文快照。**这次不更改旧快照原有的图注倒序、标题拆块或图注在前的提取顺序**，不宣称通过裁图修复了这些文本阅读顺序问题；那需要独立的坐标安全迁移，不能偷偷改写被冻结的 v8。图内标签保持原图，图外文字可以注音、选词、复制和高亮。
+- 自有 fixture 扩为六页：图形、正文、水印、独立页码、正文与图形交叠、普通词和图内词同名造成的歧义。标题／图注／正文使用三个图中不存在的哨兵墨色，真实 Chromium 扫描 PNG 要求对应像素数 **0**，同时彩色路径仍存在，排除“DOM 上额外复制了一份文字但原图中仍含正文”的假修复。检查标题保留 h1、正文词真实打开词卡并标为已认识后原图节点／矩形和源字不变；桌面、360×740、640×320、重载、真进程重启、快照／源文件不变及两类负例通过。HTTP 回归继续保留旧高亮、进度及快照。真实 Attention 第 13–15 页均一幅裁切图，Figure 说明和标题不在图形源代理内；截图 `target/web-qa/vector-figure/`。
+- 隔离原生 QA／Metal 实查第 13–15 页分别具有裁切图形及真实文字图注，360×740／640×320／600×1000 适配通过，日志 `/tmp/readwise-figure-regions-native-viewports.log`、截图 `target/reader-qa/screenshot-174{03,10,18,19,20,21}.png`。第 13 页图注中的 `verb` 实际点击查词、标为已认识后卡片关闭，布局签名／锚点／历史／实测数／绘制矩形及源位置不变；裁切图单独预览截图 `screenshot-17200.png`。另完整重跑首页 `Paragraph`／后续页 `reader` 已认识及前后翻页连续性，日志 `/tmp/readwise-figure-regions-native-known.log`。未操作正式书库。
+- 最终 workspace **511 项通过（290 app + 177 core + 11 math + 33 web）**，3 项 core 原有 ignored；正式原生／Web 构建、math／Web Clippy（仅既有 core warnings）及相关格式／diff 检查通过。新增图形 Chromium 专项与既有完整数学专项独立退出 0，原 PDF 第 4／5／7 页公式、复制、整段高亮、行距、刷新／移除及字形不染色保持。日志 `/tmp/readwise-figure-regions-{workspace,browser,existing-math,build,clippy}.log`。未声称完整 npm 套件或手机真机通过；临时诊断 example 已清理。
+- 再次按未修改的 `scripts/package_android.sh` 打包，Java 桥接检查及 APK v2／v3 开发签名验证通过；更新 `target/dist/ReadWise-android-aarch64-0.1.0.apk`，约 76 MiB，SHA-256 `115f2e4b79d32500a19c760c7e506292bb425e88ae7bf19a5c5b00ab437f4f53`，日志 `/tmp/readwise-figure-regions-package-android.log`。仅临时 wrapper 锁及 rustup PATH 处理，未改脚本；未做安卓真机安装验收。
+
+## 2026-10-26 — 恢复 PDF 矢量图形页，避免注意力连线图退化为散乱文字
+
+- 用户正确截图对应《Attention Is All You Need》的注意力可视化图。只读检查本地 `Attention.pdf`：第 13 页有 624 条路径、322 个旋转字符，彩色连线是 PDF 矢量路径而不是可提取的图片 XObject；既有位图提取只留下图中标签。这不是 EPUB callout 图片转文字问题，未改相关 EPUB 路径。
+- 在桌面／Web 共用的 `readwise-math` 新增 `figures.rs`：只对至少 32 条有效绘制路径、至少 24 个约 90° 标签字且占比至少 20% 的页面使用 Hayro 0.7.1 原图投影。普通正文、数学公式和稀疏旋转水印仍沿原文本／Typst 路径；不能确认、源块文字不一致或渲染失败时保守回退。文件最多 200 MiB，路径／字符／块数有预算，串行渲染，最长边 1800 像素、PNG 最多 4 MiB，并捕获 renderer panic；这些不是任意恶意 PDF 的进程级沙箱。没有引入新版本的 Hayro 依赖。
+- 图形页保留每个源块及全部原 UTF-8 字节，只替换显示层，不修改原 PDF、核心提取器版本、v1／历史迁移快照、数据库 schema 或高亮范围。原图裁去空白边缘；独立数字页脚仅在零旋转、匹配 MediaBox、下方无路径／位图且正文远离页脚时去除，避免图缩成带巨大页底留白的小图。原生旧位置落在隐藏图中标签时显示所属图形，不显示空白代理；图内不叠加注音，复制仍为旧提取文字，不伪称恢复逐字视觉坐标。
+- 原生 `ReaderMath` 保留 Typst SVG 绘制，新增受限 PNG 纹理分支，复用图片尺寸／阅读页高度限制及图片查看器；真实轻点打开内存图片预览，拖动不作为轻点。原生源代理保留 TextFlow 文字但使用零布局高度，消除第 14 页原先由 33 个隐藏块累积出来的第二张空白页；复用普通段落时恢复模板高度与 margin。Web 以随 SSR 内嵌的图片和透明源代理显示，不等异步 DOM 替换，隐藏源块不占行。
+- 新增自有四页 `vector-figure.pdf` 及可复现生成器：彩色纯矢量图、普通正文、旋转水印及独立数字页脚。Rust／HTTP 回归检查单一图像、PNG 预算、原块和每字节不变、进度／旧高亮／快照保留、普通页对照、原生注册表和图中标签不生成空白页。`vector-figure.cjs` 接入 npm test，真实 Chromium 检查彩色像素、360×740／640×320／桌面、重载与真实进程重启、原文件和快照不变；另实际导入只读参考 PDF，第 13–15 页各有一幅原图。必须执行 `target/topcoat-0.11/bin/topcoat asset bundle -p readwise-web` 更新 CSS 资源，不能只重建 Rust。截图 `target/web-qa/vector-figure/`。
+- 隔离原生 QA app／数据库、真实 Metal 绘制及鼠标：第 13–15 页均有彩色图和说明，分别 21／34／3 个源块仍各只占一张阅读页；前后切换、360×740／640×320／600×800 适配通过，点击图形打开既有预览。截图 `target/reader-qa/screenshot-162{04,11,18}.png`、`math-native/vector-final-*.png`，最终预览截图 `screenshot-16601.png`。首页 `Paragraph`、后续页 `reader` 实际点击注音、标为已认识：注音隐藏、卡片关闭，签名／锚点／实测数／绘制矩形／历史／逻辑源不变，前后翻页仍保持；日志 `/tmp/readwise-vector-native-known-final.log`。先前 QA 命令未等待后台目的页完成，不能计作第 14／15 页验收，最终改为轮询精确章节投影后再检查。
+- 最终 workspace 串行 **510 项通过（290 app + 177 core + 10 math + 33 web）**，3 项 core 原有 ignored；桌面／Web 构建、共享 math／Web Clippy（保留既有 core warnings）、相关格式与 diff 检查通过。新增图形 Chromium 专项以及原有完整数学 Chromium 专项均独立退出 0，后者继续覆盖原 PDF 第 4／5／7 页的公式、整段混选、高亮、行距、重载／移除与不染色字形。日志 `/tmp/readwise-vector-{workspace-final,browser-final,existing-math-final,clippy-final}.log`。未将这等同于完整 npm 套件通过，也未修改其既有高亮基线失败；未操作用户正式书库，外部原 PDF 字节不变。临时私有 PDF 诊断 examples 已删除。
+- 重新按原 `scripts/package_android.sh` 打包（仅临时 wrapper 锁文件及 rustup PATH 处理，脚本未改），输出约 **76 MiB** 的 `target/dist/ReadWise-android-aarch64-0.1.0.apk`；Java 导入／局域网桥接自检通过，`apksigner` 验证开发证书 v2／v3 签名有效。SHA-256：`97d5ef949419c7d1e538284500c16c6d15951e493d5ad19f882790d160a2c0fe`，日志 `/tmp/readwise-vector-package-android.log`。未做 Android／iOS 真机安装与手势验收；APK 成功不等于真机已验证。
+
 ## 2026-10-26 — 修复原生选文色块保存与默认颜色写入竞争
 
 - 用户手机端点击选文圆形色块后提示“高亮操作失败，error returned from database”。色块处理器会分别启动默认阅读设置保存和 `apply_highlight` 两个后台任务；后者原先使用 deferred 事务，先 SELECT 再 DELETE/INSERT。另一个连接持有写锁时，读事务升级不能靠 busy timeout 等待，会立即返回 `SQLITE_BUSY`。使用真实文件数据库、生产 schema／外键及两个连接，分别在 DELETE 和 WAL 日志模式稳定复现 `(code: 5) database is locked`；旧实现两项测试均失败，日志 `/tmp/readwise-highlight-lock-baseline.log`。

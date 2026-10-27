@@ -1339,6 +1339,92 @@ async fn pdf_typst_keeps_snapshot_utf8_anchors_and_existing_highlights() {
 }
 
 #[tokio::test]
+async fn pdf_vector_figure_preserves_source_progress_highlights_and_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let assets = tempfile::tempdir().unwrap();
+    let state = State::open(root.path().to_owned(), vec!["localhost:3000".into()])
+        .await
+        .unwrap();
+    let router = router(state.clone(), test_assets(assets.path()));
+    let source = include_bytes!("../tests/fixtures/vector-figure.pdf");
+    let (status, _, body) = request(
+        &router,
+        "POST",
+        "/api/import",
+        "multipart/form-data; boundary=test-boundary",
+        multipart_file(source, true, "vector-figure.pdf"),
+        "localhost:3000",
+        true,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let imported: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let id = imported["id"].as_str().unwrap().to_owned();
+    let canonical = state
+        .call({
+            let id = id.clone();
+            move |l| {
+                let book = l.book(&id)?.unwrap();
+                Ok(l.content(&book)?.chapters[0].text.clone())
+            }
+        })
+        .await
+        .unwrap();
+    let directory = root.path().join("books").join(&id);
+    let snapshot_path = directory.join("pdf-text-v1.json");
+    let snapshot = std::fs::read(&snapshot_path).unwrap();
+    assert_eq!(
+        post(
+            &router,
+            "/api/progress",
+            serde_json::json!({"book_id":id,"location":{"chapter":0,"block":0,"offset":2}})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(post(&router, "/api/highlights", serde_json::json!({"book_id":id,"chapter":0,"start":{"block":0,"offset":0},"end":{"block":0,"offset":2},"color":1})).await.0, 200);
+    let (status, _, html) = get(&router, &format!("/read/{id}/0")).await;
+    assert_eq!(status, 200);
+    assert!(html.contains("data-math-renderer=\"pdf-graphics\""));
+    let projection = state
+        .call({
+            let id = id.clone();
+            move |l| Ok(l.reader(&id, 0)?.unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!((projection.resume.block, projection.resume.offset), (0, 2));
+    let texts = projection
+        .blocks
+        .iter()
+        .map(|html| {
+            let plain = ammonia::Builder::default()
+                .tags(Default::default())
+                .clean_content_tags(["rt", "rp", "svg"].into_iter().collect())
+                .clean(html)
+                .to_string();
+            content::plain_text(&plain)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts, canonical);
+    let marks: serde_json::Value =
+        serde_json::from_str(&get(&router, &format!("/api/highlights/{id}/0")).await.2).unwrap();
+    assert_eq!(marks.as_array().unwrap().len(), 1);
+    assert_eq!(marks[0]["end"]["offset"], 2);
+    assert_eq!(std::fs::read(snapshot_path).unwrap(), snapshot);
+    assert_eq!(std::fs::read(directory.join("book.pdf")).unwrap(), source);
+    for chapter in [1, 2] {
+        assert!(
+            !get(&router, &format!("/read/{id}/{chapter}"))
+                .await
+                .2
+                .contains("pdf-region-figure")
+        );
+    }
+}
+
+#[tokio::test]
 async fn pdf_import_uses_the_existing_snapshot_and_ruby_pipeline() {
     let root = tempfile::tempdir().unwrap();
     let assets = tempfile::tempdir().unwrap();

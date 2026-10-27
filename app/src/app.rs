@@ -399,6 +399,7 @@ fn reader_tap_opens_inline(action: &Action) -> bool {
             matches!(
                 action.cast(),
                 crate::chapter_image::ChapterImageAction::Open(_)
+                    | crate::chapter_image::ChapterImageAction::OpenData(_)
             )
         })
 }
@@ -11661,6 +11662,20 @@ impl ChapterList {
         };
         let line_spacing = reader_spacing.plain_line_spacing();
         let item = list.item(cx, cache_id, template);
+        let figure_source = crate::reader_math::is_figure_source(para);
+        if template == id!(Para) {
+            if let Some(mut view) = item.borrow_mut::<View>() {
+                // Source-only diagram labels keep their native text buffer,
+                // but must not accumulate padding/list gaps into blank pages.
+                // Reset both properties when the PortalList slot is reused.
+                view.walk.height = if figure_source {
+                    Size::Fixed(0.)
+                } else {
+                    Size::fit()
+                };
+                view.walk.margin.bottom = if figure_source { -6. } else { 0. };
+            }
+        }
         let previous_layout_width = self
             .item_layout_widths
             .get(&(chapter_idx, item_id))
@@ -11836,7 +11851,9 @@ impl ChapterList {
         } else {
             0.0
         };
-        crate::chapter_image::with_page_height(page_height, || item.draw_all_unscoped(cx));
+        crate::chapter_image::with_measurement(measure, || {
+            crate::chapter_image::with_page_height(page_height, || item.draw_all_unscoped(cx));
+        });
         if code_cache_changed {
             if let Some(mut view) = item.borrow_mut::<View>() {
                 view.set_optimize(cx, ViewOptimize::DrawList);
@@ -12117,9 +12134,13 @@ impl ChapterList {
         boundaries.sort_by(|a, b| a.y.total_cmp(&b.y));
         boundaries.dedup_by(|a, b| (a.y - b.y).abs() < 0.5);
         crate::reader_columns::BlockMetrics {
-            height: reader_block_visual_height(item_rect.size.y, painted_bottom)
-                + item_margin.top
-                + item_margin.bottom,
+            height: if figure_source {
+                0.
+            } else {
+                reader_block_visual_height(item_rect.size.y, painted_bottom)
+                    + item_margin.top
+                    + item_margin.bottom
+            },
             boundaries,
             keep_together: is_table || code_text.is_some() || para.contains("<img"),
         }
@@ -15274,6 +15295,18 @@ impl App {
             );
             return;
         }
+        self.layout_reader_image_viewer(cx);
+        self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
+        self.ui.modal(cx, ids!(reader_image_modal)).open(cx);
+    }
+
+    fn open_reader_figure_viewer(&mut self, cx: &mut Cx, png: &[u8]) {
+        let image = self.ui.image(cx, ids!(image_viewer_image));
+        if let Err(error) = image.load_png_from_data(cx, png) {
+            ::log::error!("PDF 图形预览加载失败: {error:?}");
+            return;
+        }
+        self.clear_reader_selection(cx);
         self.layout_reader_image_viewer(cx);
         self.apply_reader_background(cx, *READER_BACKGROUND.read().unwrap());
         self.ui.modal(cx, ids!(reader_image_modal)).open(cx);
@@ -18872,9 +18905,13 @@ impl App {
             {
                 return;
             }
+            if book.math.take_pagination_change(idx) {
+                READER_BOOK_PAGINATION_REVISION.fetch_add(1, Ordering::Relaxed);
+            }
             let Some(chunks) = build_chapter_chunks(book, idx) else {
                 return;
             };
+            book.math.warm_neighbors(&book.chapters);
             (
                 book.id.clone(),
                 book.title.clone(),
@@ -18887,7 +18924,18 @@ impl App {
         } else {
             block.min(chunks.len().saturating_sub(1))
         };
-        let restored_scroll = if scroll.is_finite() { scroll } else { 0.0 };
+        // An old text-only PDF location may point at a now-hidden diagram
+        // label. Restore its visible figure, not an empty page of proxies;
+        // source blocks/bytes and stored highlights remain untouched.
+        let figure_owner = crate::reader_math::figure_owner_block(&chunks, restored_block);
+        let restored_block = figure_owner.unwrap_or(restored_block);
+        let restored_scroll = if figure_owner.is_some() {
+            0.
+        } else if scroll.is_finite() {
+            scroll
+        } else {
+            0.0
+        };
         let mut ui = AppUiIndex::default();
         ui.begin_projection(&self.ui);
         let chapter_list = ui.widget(cx, ids!(chapter_list));
@@ -18958,7 +19006,10 @@ impl App {
             });
         }
         self.update_reader_page_footer(cx);
-        self.ui.redraw(cx);
+        // A PDF crosses a source-page/chapter boundary every few screens. Only
+        // reader content changed; labels above redraw themselves. Invalidating
+        // the whole application also repaints unrelated shelf/settings trees.
+        chapter_list.redraw(cx);
     }
 
     fn set_chapter(&mut self, cx: &mut Cx, idx: usize) {
@@ -21247,17 +21298,24 @@ impl MatchEvent for App {
                         if ready.page.bytes > 0 {
                             book.glossed_chapter_chunks[ready.chapter] = None;
                         }
+                        let current_changed = ready.chapter == self.chapter_idx
+                            && book.math.take_pagination_change(ready.chapter);
                         let navigation = book.math.take_navigation(ready.chapter);
                         if navigation.is_none() {
                             if let Some(chapter) = book.math.waiting_navigation() {
                                 book.math.page(chapter, &book.chapters[chapter]);
+                            } else {
+                                book.math.warm_neighbors(&book.chapters);
                             }
                         }
-                        Some(navigation)
+                        Some((navigation, current_changed))
                     })
                 };
-                if let Some(navigation) = accepted {
-                    if ready.page.bytes > 0 {
+                if let Some((navigation, current_changed)) = accepted {
+                    // Speculative completion must not restart whole-book
+                    // pagination or touch visible geometry. Apply its revision
+                    // only when that projected chapter actually becomes visible.
+                    if current_changed {
                         READER_BOOK_PAGINATION_REVISION.fetch_add(1, Ordering::Relaxed);
                     }
                     if let Some((chapter, block, scroll, persist)) = navigation {
@@ -21652,9 +21710,16 @@ impl MatchEvent for App {
             let Some(action) = action.as_widget_action() else {
                 continue;
             };
-            if let ChapterImageAction::Open(path) = action.cast() {
-                self.open_reader_image_viewer(cx, &path);
-                continue;
+            match action.cast() {
+                ChapterImageAction::Open(path) => {
+                    self.open_reader_image_viewer(cx, &path);
+                    continue;
+                }
+                ChapterImageAction::OpenData(png) => {
+                    self.open_reader_figure_viewer(cx, &png);
+                    continue;
+                }
+                ChapterImageAction::None => {}
             }
             if let HtmlLinkAction::Clicked { url, .. } = action.cast() {
                 if let Some(word) = url.strip_prefix("w:") {

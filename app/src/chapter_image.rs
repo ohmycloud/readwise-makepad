@@ -20,6 +20,18 @@ const INLINE_IMAGE_MAX_HEIGHT: f64 = 520.0;
 
 thread_local! {
     static PAGE_HEIGHT: std::cell::Cell<f64> = const { std::cell::Cell::new(INLINE_IMAGE_MAX_HEIGHT) };
+    static MEASURING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn with_measurement<T>(measure: bool, draw: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MEASURING.set(self.0);
+        }
+    }
+    let _restore = Restore(MEASURING.replace(measure));
+    draw()
 }
 
 /// Measurement and visible drawing must use the same image size, including
@@ -37,7 +49,7 @@ pub(crate) fn with_page_height<T>(height: f64, draw: impl FnOnce() -> T) -> T {
     })
 }
 
-fn inline_image_display_size(
+pub(crate) fn inline_image_display_size(
     pixel_size: (usize, usize),
     available_width: f64,
     dpi_factor: f64,
@@ -59,6 +71,7 @@ fn inline_image_display_size(
 #[derive(Clone, Debug, Default)]
 pub enum ChapterImageAction {
     Open(String),
+    OpenData(std::sync::Arc<Vec<u8>>),
     #[default]
     None,
 }
@@ -100,6 +113,50 @@ impl ScriptHook for ChapterImage {
 impl Widget for ChapterImage {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let img = self.view.image(cx, ids!(chapter_img));
+        if MEASURING.get() {
+            let size = self.pixel_size.or_else(|| {
+                crate::reader_image_cache::measurement_size(std::path::Path::new(&self.src))
+            });
+            if let Some(size) = size {
+                self.pixel_size = Some(size);
+                let available_width = cx.peek_walk_turtle(walk).size.x;
+                let display =
+                    inline_image_display_size(size, available_width, cx.current_dpi_factor());
+                if let Some(mut inner) = img.borrow_mut() {
+                    inner.walk.width = Size::Fixed(display.x);
+                    inner.walk.height = Size::Fixed(display.y);
+                }
+                // The zero-height measurement clip only needs the same walk.
+                // Leave load_attempted false so visible reuse still loads pixels.
+                return self.view.draw_walk(cx, scope, walk);
+            }
+        }
+        let palette = crate::app::current_reader_image_palette();
+        if !self.load_attempted || self.image_palette.is_some_and(|p| p != palette) {
+            if let Some(prepared) = crate::reader_image_cache::prepared_image(
+                std::path::Path::new(&self.src),
+                palette.0,
+                palette.1,
+            ) {
+                self.pixel_size = Some((prepared.width, prepared.height));
+                let bitmap = makepad_widgets::image_cache::ImageBuffer {
+                    width: prepared.width,
+                    height: prepared.height,
+                    data: prepared.data.clone(),
+                    animation: None,
+                };
+                let texture = bitmap.into_new_texture(cx);
+                img.set_texture(cx, Some(texture));
+                self.image_palette = Some(palette);
+                self.load_attempted = true;
+                self.preserve_original = true; // prepared pixels already use the palette
+            } else if self.load_attempted {
+                // A failed new-palette preparation must not keep old tinted
+                // pixels. The original loader/cache remains the fallback.
+                self.load_attempted = false;
+                self.preserve_original = false;
+            }
+        }
         if !self.load_attempted && !self.src.is_empty() {
             self.load_attempted = true;
             let path = std::path::Path::new(&self.src);
@@ -180,6 +237,19 @@ impl Widget for ChapterImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_measurement_scope_does_not_leak_to_visible_drawing_even_after_panic() {
+        assert!(!MEASURING.get());
+        with_measurement(true, || {
+            assert!(MEASURING.get());
+            with_measurement(false, || assert!(!MEASURING.get()));
+            assert!(MEASURING.get());
+        });
+        assert!(!MEASURING.get());
+        let _ = std::panic::catch_unwind(|| with_measurement(true, || panic!("test")));
+        assert!(!MEASURING.get());
+    }
 
     #[test]
     fn paged_images_fit_short_viewports_and_restore_the_normal_limit() {

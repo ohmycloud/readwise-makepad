@@ -248,6 +248,7 @@ fn cuts_word(text: &str, start: usize, end: usize) -> bool {
 }
 
 pub(super) fn project(
+    doc: &PdfDocument,
     path: &Path,
     page: usize,
     blocks: &[String],
@@ -262,9 +263,61 @@ pub(super) fn project(
     if texts.iter().map(String::len).sum::<usize>() > 512 * 1024 {
         return None;
     }
-    let doc = PdfDocument::open(path).ok()?;
-    let mut glyphs = glyphs(&doc, page)?;
-    let mut locations = super::scattered::locations(&doc, page, &glyphs, texts);
+    let figure = super::figures::project(doc, path, page, blocks, texts);
+    let normal = project_text(doc, page, blocks, texts);
+    match (figure, normal) {
+        (Some(mut figure), Some(normal)) => {
+            // Preserve Typst formulas outside the diagram; never overlay its
+            // protected source ranges with an unrelated formula projection.
+            for (block, parts) in normal.fragments {
+                let existing = figure.fragments.entry(block).or_default();
+                for part in parts {
+                    if !existing
+                        .iter()
+                        .any(|p| p.start < part.end && part.start < p.end)
+                    {
+                        existing.push(part);
+                    }
+                }
+                existing.sort_by_key(|p| p.start);
+            }
+            figure.bytes = figure
+                .fragments
+                .values()
+                .flatten()
+                .map(Fragment::bytes)
+                .sum();
+            Some(figure)
+        }
+        (figure, normal) => figure.or(normal),
+    }
+}
+
+fn project_text(
+    doc: &PdfDocument,
+    page: usize,
+    blocks: &[String],
+    texts: &[String],
+) -> Option<MathPage> {
+    let glyphs = glyphs(doc, page)?;
+    // Both projection paths require at least one math-marked glyph. Without
+    // one, clusters() selects nothing and every band is skipped. Avoid building
+    // the quadratic span/source map, parsing paths and grouping prose lines on
+    // ordinary PDF pages. This is the same empty result, not a text heuristic.
+    if !glyphs.iter().any(|g| g.math) {
+        return Some(MathPage::empty());
+    }
+    project_glyphs(doc, page, blocks, texts, glyphs)
+}
+
+fn project_glyphs(
+    doc: &PdfDocument,
+    page: usize,
+    blocks: &[String],
+    texts: &[String],
+    mut glyphs: Vec<Glyph>,
+) -> Option<MathPage> {
+    let mut locations = super::scattered::locations(doc, page, &glyphs, texts);
     for g in &mut glyphs {
         if g.paint != g.ch {
             g.y -= g.size * 0.8;
@@ -501,6 +554,30 @@ pub(super) fn rules_for(glyphs: &[Glyph], rules: &[Rule]) -> Vec<Rule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prose_fast_path_is_identical_to_the_full_geometry_pipeline() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/tests/fixtures/vector-figure.pdf");
+        let loaded = readwise_core::books::pdf::load_pages(&path).unwrap();
+        let doc = PdfDocument::open(&path).unwrap();
+        for page in [1, 2] {
+            let blocks = readwise_core::books::epub_meta::split_blocks(&loaded.chapters[page].html);
+            let texts: Vec<_> = blocks
+                .iter()
+                .map(|b| readwise_core::vocab::annotate::rendered_text(b))
+                .collect();
+            let glyphs = glyphs(&doc, page).unwrap();
+            assert!(!glyphs.is_empty() && !glyphs.iter().any(|g| g.math));
+            let full = project_glyphs(&doc, page, &blocks, &texts, glyphs).unwrap();
+            let fast = project_text(&doc, page, &blocks, &texts).unwrap();
+            assert_eq!(full.bytes, 0);
+            assert_eq!(fast.bytes, full.bytes);
+            for (i, html) in blocks.iter().enumerate() {
+                assert_eq!(full.annotate(i, html, str::to_owned), *html);
+                assert_eq!(fast.annotate(i, html, str::to_owned), *html);
+            }
+        }
+    }
     #[test]
     fn cmex_sum_slots_change_only_paint_not_roman_letters() {
         assert_eq!(legacy_symbol("ABCDEF+CMEX9", 'P'), '∑');

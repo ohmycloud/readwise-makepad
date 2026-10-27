@@ -1,8 +1,11 @@
 //! Shared offline Typst/PDF visual projection over immutable source text.
 //! Do not infer TeX from flattened words or rewrite native/Web source offsets.
 mod content;
+mod figures;
 mod pdf;
 mod scattered;
+#[cfg(test)]
+mod session_tests;
 mod typeset;
 use std::collections::HashMap;
 
@@ -47,6 +50,7 @@ impl Fragment {
         self.html.len()
             + match &self.projection {
                 Projection::Formula(f) => f.svg.len(),
+                Projection::Figure(f) => f.png.len(),
                 Projection::Hidden { owner } => owner.len(),
             }
     }
@@ -61,18 +65,66 @@ pub struct Formula {
     pub align_em: f64,
     pub display: bool,
 }
+/// Original PDF graphics rendered off-thread. Never replaces persisted text.
+#[derive(Clone, Debug)]
+pub struct Figure {
+    pub id: String,
+    pub png: std::sync::Arc<Vec<u8>>,
+    pub width: u16,
+    pub height: u16,
+}
 #[derive(Debug)]
 pub enum Projection {
     Formula(Formula),
+    Figure(Figure),
     Hidden { owner: String },
 }
 
+/// One immutable book's visual-projection session. Keep it for the lifetime of
+/// the open book, NOT one page: pdf_oxide caches embedded fonts, CMaps and page
+/// geometry on PdfDocument. Reopening per page discards all of those caches.
+/// Creation is cheap; opening/parsing occurs on the caller's background worker.
+/// Do not reuse a session for a different source file or book revision.
+pub struct PdfSession {
+    path: std::path::PathBuf,
+    document: std::sync::OnceLock<Option<pdf_oxide::PdfDocument>>,
+}
+impl PdfSession {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            document: std::sync::OnceLock::new(),
+        }
+    }
+    pub fn page(&self, page: usize, blocks: &[String], text: &[String]) -> MathPage {
+        if !self
+            .path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+            || text.iter().map(String::len).sum::<usize>() > 512 * 1024
+        {
+            return MathPage::empty();
+        }
+        // Cache failures too: a missing/unsupported source must not cause a
+        // new open attempt on every pagination pass. Reopen the book to retry.
+        self.document
+            .get_or_init(|| pdf_oxide::PdfDocument::open(&self.path).ok())
+            .as_ref()
+            .and_then(|doc| pdf::project(doc, &self.path, page, blocks, text))
+            .unwrap_or_else(MathPage::empty)
+    }
+}
+
 impl MathPage {
-    pub fn pdf(path: &std::path::Path, page: usize, blocks: &[String], text: &[String]) -> Self {
-        pdf::project(path, page, blocks, text).unwrap_or(Self {
+    fn empty() -> Self {
+        Self {
             fragments: HashMap::new(),
             bytes: 0,
-        })
+        }
+    }
+    /// One-shot convenience. Readers must retain a PdfSession across pages.
+    pub fn pdf(path: &std::path::Path, page: usize, blocks: &[String], text: &[String]) -> Self {
+        PdfSession::new(path).page(page, blocks, text)
     }
     pub fn annotate(
         &self,
@@ -93,6 +145,19 @@ impl MathPage {
             return annotate(html);
         };
         let (text, positions) = text_positions(html);
+        // Only complete diagram-label blocks lose their display wrappers.
+        // Captions, headings, mixed blocks and ordinary formulas keep theirs.
+        if let [fragment] = fragments.as_slice()
+            && fragment.start == 0
+            && fragment.end == text.len()
+            && match &fragment.projection {
+                Projection::Figure(_) => true,
+                Projection::Hidden { owner } => owner.starts_with("pdf-figure-"),
+                Projection::Formula(_) => false,
+            }
+        {
+            return render(&fragment.projection, &text, &fragment.html);
+        }
         let mut protected = String::new();
         let mut cursor = 0;
         for (index, fragment) in fragments.iter().enumerate() {

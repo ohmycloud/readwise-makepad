@@ -106,6 +106,24 @@ fn theme_pixel(pixel: u32, surface: Vec4f, text: Vec4f) -> u32 {
         | channel(b, surface.z, text.z)
 }
 
+pub(crate) fn theme_static_image(
+    image: &mut ImageBuffer,
+    path: &Path,
+    surface: Vec4f,
+    text: Vec4f,
+) {
+    let cover = path.file_stem().is_some_and(|name| {
+        name.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("cover")
+    });
+    if !cover && is_paper_diagram(image) {
+        for pixel in &mut image.data {
+            *pixel = theme_pixel(*pixel, surface, text);
+        }
+    }
+}
+
 /// Decode only on first display / palette changes, never on hover or click.
 /// Do not keep a second CPU bitmap alive after uploading the derived texture.
 pub fn themed_paper_image(path: &Path, surface: Vec4f, text: Vec4f) -> Option<ImageBuffer> {

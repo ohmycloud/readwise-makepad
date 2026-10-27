@@ -19,6 +19,7 @@ mod reader_columns;
 mod reader_fonts;
 mod reader_hit;
 mod reader_image;
+mod reader_image_cache;
 mod reader_inline_code;
 mod reader_link;
 mod reader_lists;
@@ -45,7 +46,15 @@ struct StderrLogger;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 impl log::Log for StderrLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Info
+        // Embedded-font/CMap diagnostics are verbose and synchronous on stderr.
+        // Keep parser warnings/errors, without dumping font tables in normal use.
+        let limit =
+            if metadata.target() == "pdf_oxide" || metadata.target().starts_with("pdf_oxide::") {
+                log::Level::Warn
+            } else {
+                log::Level::Info
+            };
+        metadata.level() <= limit
     }
 
     fn log(&self, record: &log::Record) {
@@ -69,4 +78,21 @@ static LOGGER: StderrLogger = StderrLogger;
 fn main() {
     let _ = log::set_logger(&LOGGER).map(|_| log::set_max_level(log::LevelFilter::Info));
     app::app_main()
+}
+
+#[cfg(all(test, not(any(target_os = "android", target_env = "ohos"))))]
+mod logger_tests {
+    use super::*;
+    use log::Log;
+
+    #[test]
+    fn pdf_font_diagnostics_are_quiet_but_warnings_and_app_info_remain() {
+        let enabled = |target, level| {
+            LOGGER.enabled(&log::Metadata::builder().target(target).level(level).build())
+        };
+        assert!(!enabled("pdf_oxide::fonts::font_dict", log::Level::Info));
+        assert!(enabled("pdf_oxide::fonts::font_dict", log::Level::Warn));
+        assert!(enabled("pdf_oxide", log::Level::Error));
+        assert!(enabled("readwise_core::books", log::Level::Info));
+    }
 }

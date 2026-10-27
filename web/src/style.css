@@ -106,6 +106,13 @@ h2 { font-size: 20px; font-weight: 550; line-height: 1.4; }
 .math-source { position: absolute; inset: 0; display: block; color: transparent; white-space: pre; line-height: 1; }
 .math-source > span { position: absolute; display: block; height: 1em; white-space: pre; line-height: 1; color: transparent; }
 .math-source ::selection { color: transparent; }
+/* Only the diagram region is raster artwork; captions/headings stay text.
+   Per-block source proxies retain existing byte anchors without extra rows. */
+.pdf-region-figure { max-width: 100%; }
+.pdf-region-figure .math-canvas { width: 100%; }
+.pdf-region-figure img { width: 100%; height: 100%; max-height: none; margin: 0; pointer-events: none; user-select: none; }
+.pdf-region-figure .math-source { overflow: hidden; font-size: 0; }
+.reader-block:has(> .math-remote-source:only-child) { margin: 0; height: 0; min-height: 0; line-height: 0; overflow: hidden; }
 .reader-block :not(pre) > code { font-size: .85em; padding: .1em .3em; border-radius: 4px; background: #ede8de; }
 .reader-block pre > code { font: inherit; padding: 0; background: transparent; }
 .reader-block table { display: block; overflow-x: auto; border-collapse: collapse; font-size: .8em; }

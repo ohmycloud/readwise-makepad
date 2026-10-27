@@ -22,6 +22,10 @@ use tokio::sync::Semaphore;
 pub const MAX_UPLOAD: usize = 200 * 1024 * 1024;
 const CACHE_BYTES: usize = 32 * 1024 * 1024;
 
+#[cfg(test)]
+#[path = "pdf_session_tests.rs"]
+mod pdf_session_tests;
+
 #[derive(Clone)]
 pub struct State {
     inner: Arc<Mutex<Library>>,
@@ -37,6 +41,9 @@ pub struct Library {
     pub db: BlockingDb,
     cache: VecDeque<(String, Arc<BookContent>)>,
     math_cache: VecDeque<(String, usize, Arc<crate::math::MathPage>)>,
+    // Retain parser/font caches across page-cache evictions, but bound the
+    // number of open documents. These are released on deletion/server shutdown.
+    pdf_sessions: VecDeque<(String, readwise_math::PdfSession)>,
 }
 
 /// A native runtime must also be destroyed outside an async runtime context.
@@ -149,6 +156,7 @@ impl State {
                 db: BlockingDb(Some(db)),
                 cache: VecDeque::new(),
                 math_cache: VecDeque::new(),
+                pdf_sessions: VecDeque::new(),
             })),
             jobs: Arc::new(Semaphore::new(4)),
             data_dir,
@@ -191,6 +199,7 @@ impl Library {
         self.db.delete_book(id)?;
         self.cache.retain(|(book_id, _)| book_id != id);
         self.math_cache.retain(|(book_id, _, _)| book_id != id);
+        self.pdf_sessions.retain(|(book_id, _)| book_id != id);
         Ok(())
     }
 
@@ -249,12 +258,35 @@ impl Library {
             self.math_cache.push_back(entry);
             math
         } else {
-            let math = Arc::new(crate::math::MathPage::pdf(
-                Path::new(&book.file_abs_path),
-                chapter,
-                &selected.blocks,
-                &selected.text,
-            ));
+            let math = if Path::new(&book.file_abs_path)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+            {
+                let session = self
+                    .pdf_sessions
+                    .iter()
+                    .position(|(id, _)| id == &book.id)
+                    .and_then(|i| self.pdf_sessions.remove(i))
+                    .unwrap_or_else(|| {
+                        (
+                            book.id.clone(),
+                            readwise_math::PdfSession::new(&book.file_abs_path),
+                        )
+                    });
+                let math = Arc::new(session.1.page(chapter, &selected.blocks, &selected.text));
+                while self.pdf_sessions.len() >= 2 {
+                    self.pdf_sessions.pop_front();
+                }
+                self.pdf_sessions.push_back(session);
+                math
+            } else {
+                Arc::new(crate::math::MathPage::pdf(
+                    Path::new(&book.file_abs_path),
+                    chapter,
+                    &selected.blocks,
+                    &selected.text,
+                ))
+            };
             while self.math_cache.len() >= 6
                 || self
                     .math_cache
