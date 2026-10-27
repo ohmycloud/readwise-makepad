@@ -1,10 +1,11 @@
 use super::*;
 
-fn opened(request_id: u64, id: &str) -> ReaderAction {
+pub(super) fn opened(request_id: u64, id: &str) -> ReaderAction {
     ReaderAction::Opened {
         request_id,
         book: Mutex::new(Some(OpenBook {
             id: id.into(),
+            source_key: None,
             title: format!("Book {id}"),
             chapters: vec![format!("<p>Content belonging to {id}</p>")],
             chapter_paths: vec!["chapter.xhtml".into()],
@@ -102,7 +103,11 @@ fn book_open_saves_old_location_before_reset_and_only_ui_publishes_results() {
         .unwrap();
     assert!(!worker.contains("CURRENT_BOOK.write()"));
     assert!(!worker.contains("replace_paragraphs("));
-    assert!(worker.contains("book: Mutex::new(Some(book))"));
+    assert!(worker.contains("reader_prepare::Prepared"));
+    let preparation = include_str!("reader_prepare.rs");
+    assert!(preparation.contains("book: Mutex::new(Some(self.book))"));
+    assert!(!preparation.contains("CURRENT_BOOK.write()"));
+    assert!(!preparation.contains("replace_paragraphs("));
     let reset = source
         .split("fn begin_open_book_request(")
         .nth(1)
@@ -144,6 +149,9 @@ fn loading_and_failure_surfaces_survive_both_reload_paths_without_old_pages() {
     // All desktop/mobile title controls show the book name only. Loading or
     // failure belongs to the one body placeholder, not a second title message.
     assert!(sync.contains("self.set_reader_title_text(cx, &title)"));
+    assert!(!sync.contains("Loading"));
+    assert!(!sync.contains("加载中"));
+    assert!(sync.contains("message.as_deref().unwrap_or_default()"));
     assert!(!sync.contains("self.set_reader_title_text(cx, &message)"));
     let reload = source
         .rsplit_once("    fn restore_after_script_reload(")

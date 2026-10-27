@@ -3452,8 +3452,12 @@ const READER_FONT_DEFAULT: f32 = 11.0;
 const READER_FONT_MIN: f32 = 8.0;
 const READER_FONT_MAX: f32 = 20.0;
 
+#[path = "reader_prepare.rs"]
+mod reader_prepare;
+
 struct OpenBook {
     id: String,
+    source_key: Option<reader_prepare::Key>,
     title: String,
     /// 各章原始 body HTML（已消毒，不含运行时注音）。
     chapters: Vec<String>,
@@ -3703,6 +3707,7 @@ mod lazy_gloss_tests {
     fn book() -> OpenBook {
         OpenBook {
             id: "book".to_string(),
+            source_key: None,
             math: Default::default(),
             title: "Book".to_string(),
             chapters: vec![
@@ -4856,102 +4861,101 @@ fn begin_open_book_request(item: ShelfItem) -> u64 {
 
 /// 后台加载整本书章节 + 恢复进度；结果由 UI 原子投影。
 fn spawn_open_book(item: ShelfItem, request_id: u64) {
-    std::thread::spawn(move || {
-        if OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id {
-            return;
-        }
-        let open_started = std::time::Instant::now();
-        let loaded = match DB
-            .get()
-            .ok_or_else(|| "数据库尚未就绪".to_string())
-            .and_then(|db| db.load_book_chapters(&item.id, std::path::Path::new(&item.file_path)))
-        {
-            Ok(list) => list,
-            Err(e) => {
-                Cx::post_action(ReaderAction::OpenError {
-                    request_id,
-                    error: e,
-                });
-                return;
-            }
-        };
-        let mut chapters = Vec::with_capacity(loaded.chapters.len());
-        let mut chapter_paths = Vec::with_capacity(loaded.chapters.len());
-        let mut figure_targets = Vec::with_capacity(loaded.chapters.len());
-        for info in loaded.chapters {
-            chapter_paths.push(info.source_path);
-            figure_targets.push(info.figure_targets);
-            chapters.push(info.html);
-        }
-        let parse_ms = open_started.elapsed().as_millis();
-        let total = chapters.len();
-        let resume = DB
-            .get()
-            .and_then(|db| db.get_status(&item.id).ok().flatten())
-            .map(|status| ReaderLocation::decode(&status.location, total))
-            .unwrap_or_default();
-        let highlights = DB
-            .get()
-            .and_then(|db| db.get_highlights_by_chapter(&item.id).ok())
-            .unwrap_or_default();
-        let bookmarks = DB
-            .get()
-            .and_then(|db| db.get_bookmarks(&item.id).ok())
-            .unwrap_or_default();
-        let (lexicon, known_words) = DB
-            .get()
-            .and_then(|db| db.gloss_context(Some(&item.id)).ok())
-            .unwrap_or_default();
-        if OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id {
-            return;
-        }
-        let english_level = *ENGLISH_LEVEL.read().unwrap();
-        let glosses = lexicon.select(english_level);
-        let gloss_count = glosses.len();
-        let mut math = crate::reader_math::BookMath::new(&item.file_path, &item.id, request_id);
-        if let Some(raw) = chapters.get(resume.chapter) {
-            math.prepare_initial(resume.chapter, raw);
-        }
-        let mut book = OpenBook {
-            id: item.id,
-            math,
-            title: item.title,
-            glossed_chapter_chunks: vec![None; chapters.len()],
-            chapters,
-            chapter_paths,
-            figure_targets,
-            toc: loaded.toc,
-            glosses,
-            lexicon,
-            english_level,
-            known_words,
-            highlights,
-        };
-        let gloss_started = std::time::Instant::now();
-        if *GLOSS_ENABLED.read().unwrap() {
-            let _ = book.chapter_chunks(resume.chapter, true);
-        }
-        let initial_gloss_ms = gloss_started.elapsed().as_millis();
-        let requested_item = CURRENT_ITEM.read().unwrap();
-        if OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id
-            || requested_item
-                .as_ref()
-                .is_none_or(|item| item.id != book.id)
-        {
-            return;
-        }
-        drop(requested_item);
-        Cx::post_action(ReaderAction::Opened {
-            request_id,
-            book: Mutex::new(Some(book)),
-            resume,
-            bookmarks,
-            gloss_count,
-            parse_ms,
-            prepare_ms: open_started.elapsed().as_millis(),
-            initial_gloss_ms,
-        });
-    });
+    reader_prepare::request(item, request_id);
+}
+
+fn prepare_open_book(item: ShelfItem, request_id: u64) -> Result<reader_prepare::Prepared, String> {
+    let source_key = reader_prepare::Key::capture(&item);
+    let open_started = std::time::Instant::now();
+    let loaded = DB
+        .get()
+        .ok_or_else(|| "数据库尚未就绪".to_string())?
+        .load_book_chapters(&item.id, std::path::Path::new(&item.file_path))?;
+    let mut chapters = Vec::with_capacity(loaded.chapters.len());
+    let mut chapter_paths = Vec::with_capacity(loaded.chapters.len());
+    let mut figure_targets = Vec::with_capacity(loaded.chapters.len());
+    for info in loaded.chapters {
+        chapter_paths.push(info.source_path);
+        figure_targets.push(info.figure_targets);
+        chapters.push(info.html);
+    }
+    let parse_ms = open_started.elapsed().as_millis();
+    let total = chapters.len();
+    let mut auxiliary_ready = true;
+    let resume = DB
+        .get()
+        .and_then(|db| {
+            db.get_status(&item.id)
+                .inspect_err(|_| auxiliary_ready = false)
+                .ok()
+                .flatten()
+        })
+        .map(|status| ReaderLocation::decode(&status.location, total))
+        .unwrap_or_default();
+    let highlights = DB
+        .get()
+        .and_then(|db| {
+            db.get_highlights_by_chapter(&item.id)
+                .inspect_err(|_| auxiliary_ready = false)
+                .ok()
+        })
+        .unwrap_or_default();
+    let bookmarks = DB
+        .get()
+        .and_then(|db| {
+            db.get_bookmarks(&item.id)
+                .inspect_err(|_| auxiliary_ready = false)
+                .ok()
+        })
+        .unwrap_or_default();
+    let (lexicon, known_words) = DB
+        .get()
+        .and_then(|db| {
+            db.gloss_context(Some(&item.id))
+                .inspect_err(|_| auxiliary_ready = false)
+                .ok()
+        })
+        .unwrap_or_default();
+    if request_id != 0 && OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id {
+        return Err("Open request superseded".into());
+    }
+    let english_level = *ENGLISH_LEVEL.read().unwrap();
+    let glosses = lexicon.select(english_level);
+    let mut math = crate::reader_math::BookMath::new(&item.file_path, &item.id, request_id);
+    if let Some(raw) = chapters.get(resume.chapter) {
+        math.prepare_initial(resume.chapter, raw);
+    }
+    let mut book = OpenBook {
+        id: item.id.clone(),
+        source_key: None,
+        math,
+        title: item.title.clone(),
+        glossed_chapter_chunks: vec![None; chapters.len()],
+        chapters,
+        chapter_paths,
+        figure_targets,
+        toc: loaded.toc,
+        glosses,
+        lexicon,
+        english_level,
+        known_words,
+        highlights,
+    };
+    let gloss_started = std::time::Instant::now();
+    if *GLOSS_ENABLED.read().unwrap() {
+        let _ = book.chapter_chunks(resume.chapter, true);
+    }
+    let initial_gloss_ms = gloss_started.elapsed().as_millis();
+    book.source_key = source_key
+        .filter(|key| auxiliary_ready && Some(key) == reader_prepare::Key::capture(&item).as_ref());
+    Ok(reader_prepare::Prepared {
+        book,
+        resume,
+        bookmarks,
+        parse_ms,
+        prepare_ms: open_started.elapsed().as_millis(),
+        initial_gloss_ms,
+    })
 }
 
 /// 章节 → PortalList 块。永久高亮只保留数据库坐标，由 ChapterList 在正文
@@ -5020,6 +5024,7 @@ mod highlight_overlap_tests {
     fn failed_delete_restores_only_removed_highlights_in_original_order() {
         let mut book = OpenBook {
             id: "book".into(),
+            source_key: None,
             math: Default::default(),
             title: String::new(),
             chapters: Vec::new(),
@@ -14640,6 +14645,8 @@ impl App {
                 .borrow_mut::<ChapterList>()
             {
                 reader.page_turn.cancel();
+                reader.scrollbar_pointer.cancel();
+                reader.view.reader_list(cx, ids!(list)).stop_scrolling();
             }
         }
         if page != AppPage::Library && self.library_action_book_id.is_some() {
@@ -15225,23 +15232,117 @@ impl App {
         self.ui.widget(cx, ids!(library_action_layer)).redraw(cx);
     }
 
+    fn handle_reader_open_notice(&mut self, cx: &mut Cx, reader: &ReaderAction) {
+        match reader {
+            ReaderAction::Opened {
+                resume,
+                bookmarks,
+                gloss_count,
+                parse_ms,
+                prepare_ms,
+                initial_gloss_ms,
+                ..
+            } => {
+                let requested_id = CURRENT_ITEM
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(|item| item.id.clone());
+                let Some(mut book) = reader.take_opened_book(
+                    OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire),
+                    requested_id.as_deref(),
+                ) else {
+                    return;
+                };
+                // A queued result may predate a word/annotation write. Do not
+                // publish a stale reusable context, even if its request is current.
+                if book
+                    .source_key
+                    .as_ref()
+                    .is_some_and(|key| !key.current_data())
+                {
+                    if let Some(item) = CURRENT_ITEM.read().unwrap().clone() {
+                        spawn_open_book(item, OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire));
+                    }
+                    std::thread::spawn(move || drop(book));
+                    return;
+                }
+                // Settings may have changed while the worker was busy.
+                book.set_english_level(*ENGLISH_LEVEL.read().unwrap());
+                *CURRENT_BOOK.write().unwrap() = Some(book);
+                *READER_OPEN_ERROR.write().unwrap() = None;
+                ::log::info!(
+                            "Opened book: core={}ms, prepared={}ms, initial chapter gloss={}ms, lazy remaining chapters",
+                            parse_ms,
+                            prepare_ms,
+                            initial_gloss_ms
+                        );
+                *READER_BOOKMARKS.write().unwrap() = bookmarks.clone();
+                self.reader_page_span = 0;
+                // The reader can receive a TOC click while the first
+                // book is still loading. Project the panel again now
+                // that its chapter titles are available.
+                self.sync_reader_panel_layout(cx);
+                self.ui.widget(cx, ids!(toc_list)).redraw(cx);
+                if self.note_open {
+                    self.refresh_reader_highlights(cx);
+                }
+                self.set_chapter_at(cx, resume.chapter, resume.block, resume.scroll, false);
+                self.sync_reader_open_state(cx);
+                if let Some(mut reader) = self
+                    .ui
+                    .widget(cx, ids!(chapter_list))
+                    .borrow_mut::<ChapterList>()
+                {
+                    reader.pager.requested_source =
+                        resume.source.map(|source| (resume.block, source));
+                }
+                self.update_progress_label(cx);
+                if *GLOSS_ENABLED.read().unwrap() && *gloss_count == 0 {
+                    self.ui.label(cx, ids!(status)).set_text(
+                        cx,
+                        localized(
+                            "注音未显示：释义库为空（需生成或导入词义数据）",
+                            "Glosses are hidden because the definition library is empty",
+                        ),
+                    );
+                }
+                if let Some((book_id, key, _)) = reader_book_content_key() {
+                    spawn_load_notes(book_id.clone());
+                    self.reader_pagination_content_key = key;
+                    spawn_build_reader_pagination(book_id, key);
+                }
+                self.start_reading_timer();
+            }
+            ReaderAction::OpenError { request_id, error } => {
+                if *request_id != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) {
+                    return;
+                }
+                *READER_OPEN_ERROR.write().unwrap() = Some(error.clone());
+                self.sync_reader_open_state(cx);
+            }
+        }
+    }
+
     fn sync_reader_open_state(&self, cx: &mut Cx) {
         let ready = requested_book_is_ready();
         let requested = CURRENT_ITEM.read().unwrap();
         let title = requested.as_ref().map(|item| format!("《{}》", item.title));
-        let message = requested.as_ref().filter(|_| !ready).map(|item| {
-            if let Some(error) = READER_OPEN_ERROR.read().unwrap().as_deref() {
-                if app_language() == AppLanguage::English {
-                    format!("Failed to open “{}”: {error}", item.title)
+        let message = requested
+            .as_ref()
+            .filter(|_| !ready)
+            .map(|item| {
+                if let Some(error) = READER_OPEN_ERROR.read().unwrap().as_deref() {
+                    if app_language() == AppLanguage::English {
+                        format!("Failed to open “{}”: {error}", item.title)
+                    } else {
+                        format!("《{}》打开失败：{error}", item.title)
+                    }
                 } else {
-                    format!("《{}》打开失败：{error}", item.title)
+                    String::new()
                 }
-            } else if app_language() == AppLanguage::English {
-                format!("Loading “{}”…", item.title)
-            } else {
-                format!("《{}》加载中…", item.title)
-            }
-        });
+            })
+            .filter(|message| !message.is_empty());
         drop(requested);
         self.ui
             .widget(cx, ids!(chapter_list))
@@ -15255,11 +15356,9 @@ impl App {
         if let Some(title) = title {
             self.set_reader_title_text(cx, &title);
         }
-        if let Some(message) = message {
-            self.ui
-                .label(cx, ids!(reader_open_message))
-                .set_text(cx, &message);
-        }
+        self.ui
+            .label(cx, ids!(reader_open_message))
+            .set_text(cx, message.as_deref().unwrap_or_default());
         self.ui.widget(cx, ids!(reader_surface)).redraw(cx);
     }
 
@@ -15272,6 +15371,38 @@ impl App {
         self.close_note_composer(cx);
         self.reader_swipe.cancel();
         self.close_library_action_menu(cx);
+        let key = reader_prepare::Key::capture(&book);
+        let same_ready = requested_book_is_ready()
+            && key.as_ref().is_some_and(|key| {
+                CURRENT_BOOK
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|current| {
+                        current.id == book.id && current.source_key.as_ref() == Some(key)
+                    })
+            });
+        if same_ready {
+            // Returning to the SAME validated reader must not reconstruct its
+            // paragraphs, native layout, page measurements or turn history.
+            *CURRENT_ITEM.write().unwrap() = Some(book.clone());
+            if let Some(current) = CURRENT_BOOK.write().unwrap().as_mut() {
+                current.title = book.title;
+            }
+            self.activate_page(cx, AppPage::Reader);
+            self.sync_reader_open_state(cx);
+            self.start_reading_timer();
+            ::log::info!("Opened book: retained current reader");
+            return;
+        }
+        let prepared = reader_prepare::take(&book, key.as_ref());
+        let old_location = self
+            .current_reader_progress_snapshot(cx)
+            .map(|p| p.location);
+        let previous = CURRENT_BOOK.write().unwrap().take();
+        if let (Some(previous), Some(location)) = (previous, old_location) {
+            reader_prepare::remember(previous, location, READER_BOOKMARKS.read().unwrap().clone());
+        }
         let request_id = begin_open_book_request(book.clone());
         let chapter_list = self.ui.widget(cx, ids!(chapter_list));
         if let Some(mut reader) = chapter_list.borrow_mut::<ChapterList>() {
@@ -15303,7 +15434,12 @@ impl App {
         self.sync_reader_open_state(cx);
         self.activate_page(cx, AppPage::Reader);
         self.sync_reader_panel_layout(cx);
-        spawn_open_book(book, request_id);
+        if let Some(prepared) = prepared {
+            // Publish in this click, before a draw can show an empty reader.
+            self.handle_reader_open_notice(cx, &prepared.into_action(request_id));
+        } else {
+            spawn_open_book(book, request_id);
+        }
     }
 
     fn open_library_rename_editor(&mut self, cx: &mut Cx, book: &ShelfItem) {
@@ -21509,82 +21645,7 @@ impl MatchEvent for App {
                 continue;
             }
             if let Some(reader) = action.downcast_ref::<ReaderAction>() {
-                match reader {
-                    ReaderAction::Opened {
-                        resume,
-                        bookmarks,
-                        gloss_count,
-                        parse_ms,
-                        prepare_ms,
-                        initial_gloss_ms,
-                        ..
-                    } => {
-                        let requested_id = CURRENT_ITEM
-                            .read()
-                            .unwrap()
-                            .as_ref()
-                            .map(|item| item.id.clone());
-                        let Some(mut book) = reader.take_opened_book(
-                            OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire),
-                            requested_id.as_deref(),
-                        ) else {
-                            continue;
-                        };
-                        // Settings may have changed while the worker was busy.
-                        book.set_english_level(*ENGLISH_LEVEL.read().unwrap());
-                        *CURRENT_BOOK.write().unwrap() = Some(book);
-                        *READER_OPEN_ERROR.write().unwrap() = None;
-                        ::log::info!(
-                            "Opened book: core={}ms, prepared={}ms, initial chapter gloss={}ms, lazy remaining chapters",
-                            parse_ms,
-                            prepare_ms,
-                            initial_gloss_ms
-                        );
-                        *READER_BOOKMARKS.write().unwrap() = bookmarks.clone();
-                        self.reader_page_span = 0;
-                        // The reader can receive a TOC click while the first
-                        // book is still loading. Project the panel again now
-                        // that its chapter titles are available.
-                        self.sync_reader_panel_layout(cx);
-                        self.ui.widget(cx, ids!(toc_list)).redraw(cx);
-                        if self.note_open {
-                            self.refresh_reader_highlights(cx);
-                        }
-                        self.set_chapter_at(cx, resume.chapter, resume.block, resume.scroll, false);
-                        self.sync_reader_open_state(cx);
-                        if let Some(mut reader) = self
-                            .ui
-                            .widget(cx, ids!(chapter_list))
-                            .borrow_mut::<ChapterList>()
-                        {
-                            reader.pager.requested_source =
-                                resume.source.map(|source| (resume.block, source));
-                        }
-                        self.update_progress_label(cx);
-                        if *GLOSS_ENABLED.read().unwrap() && *gloss_count == 0 {
-                            self.ui.label(cx, ids!(status)).set_text(
-                                cx,
-                                localized(
-                                    "注音未显示：释义库为空（需生成或导入词义数据）",
-                                    "Glosses are hidden because the definition library is empty",
-                                ),
-                            );
-                        }
-                        if let Some((book_id, key, _)) = reader_book_content_key() {
-                            spawn_load_notes(book_id.clone());
-                            self.reader_pagination_content_key = key;
-                            spawn_build_reader_pagination(book_id, key);
-                        }
-                        self.start_reading_timer();
-                    }
-                    ReaderAction::OpenError { request_id, error } => {
-                        if *request_id != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) {
-                            continue;
-                        }
-                        *READER_OPEN_ERROR.write().unwrap() = Some(error.clone());
-                        self.sync_reader_open_state(cx);
-                    }
-                }
+                self.handle_reader_open_notice(cx, reader);
                 continue;
             }
             if let Some(bookmark_action) = action.downcast_ref::<BookmarkAction>() {
@@ -21687,6 +21748,7 @@ impl MatchEvent for App {
                         import_error,
                     } => {
                         self.shelf_ready = true;
+                        reader_prepare::warm_recent();
                         spawn_pdf_cover_backfill();
                         if !INITIAL_LIBRARY_READY_LOGGED.swap(true, Ordering::Relaxed) {
                             if let Some(elapsed) = startup_elapsed_ms() {

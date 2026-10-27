@@ -115,6 +115,15 @@ impl PdfSession {
             cache,
         }
     }
+    /// Keep immutable presentation-cache identity, but not a parsed PDF/font
+    /// document in a dormant frontend reader. Does not read/write the source.
+    pub fn without_document(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            document: Default::default(),
+            cache: self.cache.clone(),
+        }
+    }
     /// Cheap lookup before a frontend's compilation lock. A hit must not open
     /// the PDF, load fonts, run Typst or wait behind speculative neighbor work.
     pub fn cached_page(&self, page: usize, blocks: &[String], text: &[String]) -> Option<MathPage> {

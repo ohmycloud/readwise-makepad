@@ -28,7 +28,7 @@ mod reflow;
 mod reflow_v8;
 mod structure;
 mod toc;
-pub(crate) use migration::load_reader_pages;
+pub(crate) use migration::{load_reader_pages, reader_identity};
 
 const LEGACY_EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v1";
 const EXTRACTOR: &str = "pdf_oxide-0.3.78/semantic-v2";

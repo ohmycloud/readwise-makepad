@@ -14,6 +14,7 @@ use std::{
 };
 
 static COMPILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static NEXT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// The import worker prepares the first display before publishing the shelf
 /// result. Kept out of core: database/text extraction does not depend on Typst.
@@ -81,7 +82,10 @@ impl BookMath {
                         readwise_math::PdfSession::new(path)
                     })
                 }),
-            token: format!("{id}/{request}/"),
+            token: format!(
+                "{id}/{request}-{}/",
+                NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
             pages: VecDeque::new(),
             pending: HashSet::new(),
             navigation: None,
@@ -89,6 +93,19 @@ impl BookMath {
             warmed: HashSet::new(),
             pagination_changes: HashSet::new(),
         }
+    }
+    pub fn prepared_bytes(&self) -> usize {
+        self.pages.iter().map(|(_, p)| p.bytes).sum()
+    }
+    pub fn suspend(&mut self) -> Option<Arc<readwise_math::PdfSession>> {
+        self.pending.clear();
+        self.navigation = None;
+        self.warmed.clear();
+        let fresh = self
+            .session
+            .as_ref()
+            .map(|s| Arc::new(s.without_document()));
+        std::mem::replace(&mut self.session, fresh)
     }
     fn compile(session: &readwise_math::PdfSession, chapter: usize, raw: &str) -> Arc<MathPage> {
         let blocks = readwise_core::books::epub_meta::split_blocks(raw);
@@ -643,21 +660,24 @@ mod tests {
                 .count(),
             2
         );
-        let worker = source
-            .split("fn spawn_open_book(")
-            .nth(1)
-            .unwrap()
-            .split("fn build_chapter_chunks(")
-            .next()
-            .unwrap();
+        let worker = include_str!("reader_prepare.rs");
+        assert!(worker.contains("wanted != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire)"));
         assert!(
             worker
-                .matches("OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id")
+                .matches("request == OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire)")
                 .count()
-                >= 3
+                >= 2
         );
     }
 
+    #[test]
+    fn warm_and_foreground_sessions_have_disjoint_visual_ownership() {
+        let a = BookMath::new("book.epub", "same-book", 0);
+        let b = BookMath::new("book.epub", "same-book", 0);
+        assert_ne!(a.token, b.token);
+        assert!(!a.token.starts_with(&b.token));
+        assert!(!b.token.starts_with(&a.token));
+    }
     fn fixture() -> (BookMath, Vec<String>) {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../web/tests/fixtures/math-scattered.pdf");

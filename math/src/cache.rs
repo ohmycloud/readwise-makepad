@@ -50,6 +50,7 @@ fn identity(path: &Path) -> Option<String> {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct PageCache {
     pdf: PathBuf,
     identity: String,

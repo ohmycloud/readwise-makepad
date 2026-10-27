@@ -1,7 +1,7 @@
 //! Reader-only copy of Makepad PortalList at 4f9ce7a8bb3fd19e5c61dcf13edd2e6d4a04cefc.
 //! Copyright (c) 2023 Makepad B.V. MIT license: ../../vendor/makepad-draw/LICENSE.
-//! Only type/module names and the scrollbar type differ from upstream. Keep the
-//! native height tree, scrolling, selection and pagination behavior unchanged.
+//! The compact scrollbar and a pause-inertia ref adapter are the only additions.
+//! Keep the native height tree, scrolling, selection and pagination unchanged.
 #![allow(dead_code)]
 
 use {
@@ -2428,6 +2428,14 @@ impl Widget for ReaderList {
 }
 
 impl ReaderListRef {
+    /// Suspend hidden-reader inertia without touching its anchor or height tree.
+    pub fn stop_scrolling(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.scroll_state = ScrollState::Stopped;
+            inner.select_scroll_state = None;
+        }
+    }
+
     /// Sets the first item to be shown and its scroll offset.
     pub fn set_first_id_and_scroll(&self, id: usize, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {

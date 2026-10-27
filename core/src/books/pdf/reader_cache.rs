@@ -78,6 +78,69 @@ impl Dependencies {
     }
 }
 
+/// A lease for already-validated *in-memory* text. It does not deserialize or
+/// trust the disposable checkpoint. Recheck source/projection identities and
+/// committed coordinate pins before reusing a native prepared reader.
+fn asset_identity(directory: &Path) -> Option<Option<Vec<(PathBuf, FileStamp)>>> {
+    if !directory.try_exists().ok()? {
+        return Some(None);
+    }
+    let started = std::time::Instant::now();
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory).ok()? {
+        // Do not turn a fast UI lease check into an unbounded directory walk.
+        // Large/busy asset sets simply retain the normal background reader path.
+        if files.len() >= 256 || started.elapsed() > std::time::Duration::from_millis(2) {
+            return None;
+        }
+        let entry = entry.ok()?;
+        files.push((PathBuf::from(entry.file_name()), stamp(&entry.path())?));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(Some(files))
+}
+
+pub(crate) async fn reader_identity(pool: &SqlitePool, id: &str, path: &Path) -> Option<String> {
+    let canonical = path.canonicalize().ok()?;
+    // Bound parsing on the native event thread; large unrelated metadata only
+    // disables reuse, never rejects the normal full-validation reader path.
+    let raw: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT metadata FROM book_status WHERE book_id = ? AND (metadata IS NULL OR length(metadata) <= 65536)")
+        .bind(id).fetch_optional(pool).await.ok()?;
+    let raw = raw?;
+    let metadata = match raw.as_deref().filter(|s| !s.trim().is_empty()) {
+        None => serde_json::json!({}),
+        Some(s) if s.len() <= 65536 => match serde_json::from_str::<serde_json::Value>(s).ok()? {
+            serde_json::Value::Null => serde_json::json!({}),
+            v if v.is_object() => v,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let files = if path
+        .extension()
+        .is_some_and(|s| s.eq_ignore_ascii_case("pdf"))
+    {
+        serde_json::to_value(Dependencies::capture(path)?).ok()?
+    } else {
+        serde_json::to_value(stamp(path)?).ok()?
+    };
+    let root = path.parent()?;
+    let assets = asset_identity(
+        &root.join(
+            if path
+                .extension()
+                .is_some_and(|s| s.eq_ignore_ascii_case("pdf"))
+            {
+                "pdf-assets-v3"
+            } else {
+                "res"
+            },
+        ),
+    )?;
+    serde_json::to_string(&(id, canonical, files, assets, markers(&metadata))).ok()
+}
+
 #[derive(Serialize, Deserialize)]
 struct Record {
     version: u32,

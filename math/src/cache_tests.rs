@@ -38,7 +38,7 @@ fn fresh_sessions_restore_identical_formulas_figures_and_source_without_opening_
         let a = cold.page(0, &blocks, &text);
         assert!(a.bytes > 0);
         assert!(cold.document.get().unwrap().is_some());
-        let warm = PdfSession::with_cache(&path, &dir);
+        let warm = cold.without_document();
         let b = warm
             .cached_page(0, &blocks, &text)
             .expect("cache hit before any parsing/Typst");

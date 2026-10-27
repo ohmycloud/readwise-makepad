@@ -165,11 +165,13 @@ const REQUIRED_SCHEMA: &[(&str, &[&str])] = &[
 ];
 
 /// 同步门面：内部持有 tokio 运行时，UI 侧（Makepad 后台线程）直接调用阻塞方法，
-/// 不必在 App 里铺设 async 管线。所有方法在后台线程调用，结果经 Cx::post_action 回 UI。
+/// 不必在 App 里铺设 async 管线。加载／写入在后台，结果经 Cx::post_action 回 UI；
+/// reader_identity 是唯一有小额时间／大小上限的 UI 内存复用租约查询。
 pub struct Db {
     rt: tokio::runtime::Runtime,
     pool: SqlitePool,
     data_dir: std::path::PathBuf,
+    reader_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl Db {
@@ -186,12 +188,45 @@ impl Db {
             .build()
             .map_err(|e| format!("创建运行时失败: {}", e))?;
         let pool = rt.block_on(initialize(&data_dir))?;
-        Ok(Self { rt, pool, data_dir })
+        Ok(Self {
+            rt,
+            pool,
+            data_dir,
+            reader_epoch: Default::default(),
+        })
     }
 
     /// 数据目录（books/ 与 import/ 都在其下）。
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// Process-local invalidation for native CPU preparations. Progress/session
+    /// saves deliberately do not invalidate text/gloss/annotation preparation.
+    pub fn reader_epoch(&self) -> u64 {
+        self.reader_epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn reader_changed<T>(&self, result: Result<T, String>) -> Result<T, String> {
+        // Also invalidate on failed attempts: a multi-statement writer may
+        // have committed a subset before reporting an error.
+        self.reader_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        result
+    }
+
+    /// Small, bounded identity read for an already-validated in-memory reader.
+    /// Never loads/rebuilds PDF text on the UI thread; busy/unsupported => miss.
+    pub fn reader_identity(&self, id: &str, path: &Path) -> Option<String> {
+        self.rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(4),
+                books::pdf::reader_identity(&self.pool, id, path),
+            )
+            .await
+            .ok()
+            .flatten()
+        })
     }
 
     // —— 书库 ——
@@ -231,8 +266,10 @@ impl Db {
     }
 
     pub fn delete_book(&self, id: &str) -> Result<(), String> {
-        self.rt
-            .block_on(books::delete_book(&self.pool, &self.data_dir, id))
+        self.reader_changed({
+            self.rt
+                .block_on(books::delete_book(&self.pool, &self.data_dir, id))
+        })
     }
 
     pub fn set_book_tags(&self, id: &str, tags: &[String]) -> Result<Vec<String>, String> {
@@ -275,9 +312,11 @@ impl Db {
         range: (usize, usize, usize, usize),
         color: &str,
     ) -> Result<String, String> {
-        self.rt.block_on(books::add_highlight(
-            &self.pool, book_id, chapter, range, color,
-        ))
+        self.reader_changed({
+            self.rt.block_on(books::add_highlight(
+                &self.pool, book_id, chapter, range, color,
+            ))
+        })
     }
 
     pub fn apply_highlight(
@@ -287,9 +326,11 @@ impl Db {
         range: (usize, usize, usize, usize),
         color: &str,
     ) -> Result<Vec<books::Highlight>, String> {
-        self.rt.block_on(books::apply_highlight(
-            &self.pool, book_id, chapter, range, color,
-        ))
+        self.reader_changed({
+            self.rt.block_on(books::apply_highlight(
+                &self.pool, book_id, chapter, range, color,
+            ))
+        })
     }
 
     pub fn get_highlights_by_chapter(
@@ -305,18 +346,24 @@ impl Db {
     }
 
     pub fn add_bookmark(&self, book_id: &str, location: &str, label: &str) -> Result<(), String> {
-        self.rt
-            .block_on(books::add_bookmark(&self.pool, book_id, location, label))
+        self.reader_changed({
+            self.rt
+                .block_on(books::add_bookmark(&self.pool, book_id, location, label))
+        })
     }
 
     pub fn delete_bookmark(&self, book_id: &str, bookmark_id: &str) -> Result<(), String> {
-        self.rt
-            .block_on(books::delete_bookmark(&self.pool, book_id, bookmark_id))
+        self.reader_changed({
+            self.rt
+                .block_on(books::delete_bookmark(&self.pool, book_id, bookmark_id))
+        })
     }
 
     pub fn delete_highlights(&self, book_id: &str, ids: &[String]) -> Result<usize, String> {
-        self.rt
-            .block_on(books::delete_highlights(&self.pool, book_id, ids))
+        self.reader_changed({
+            self.rt
+                .block_on(books::delete_highlights(&self.pool, book_id, ids))
+        })
     }
 
     // —— 阅读统计 ——
@@ -755,18 +802,22 @@ impl Db {
         book_author: &str,
         content: &str,
     ) -> Result<Note, String> {
-        self.rt.block_on(notes::create_note(
-            &self.pool,
-            book_id,
-            book_title,
-            book_author,
-            content,
-        ))
+        self.reader_changed({
+            self.rt.block_on(notes::create_note(
+                &self.pool,
+                book_id,
+                book_title,
+                book_author,
+                content,
+            ))
+        })
     }
 
     pub fn update_note(&self, id: &str, content: &str) -> Result<Note, String> {
-        self.rt
-            .block_on(notes::update_note(&self.pool, id, content))
+        self.reader_changed({
+            self.rt
+                .block_on(notes::update_note(&self.pool, id, content))
+        })
     }
 
     pub fn get_all_notes(&self) -> Result<Vec<crate::notes::models::Note>, String> {
@@ -779,7 +830,7 @@ impl Db {
     }
 
     pub fn delete_note(&self, id: &str) -> Result<(), String> {
-        self.rt.block_on(notes::delete_note(&self.pool, id))
+        self.reader_changed(self.rt.block_on(notes::delete_note(&self.pool, id)))
     }
 
     /// 扫描导入目录，返回新导入数量。
@@ -803,8 +854,10 @@ impl Db {
     }
 
     pub fn save_book_glosses(&self, book_id: &str, glosses: &[GlossInput]) -> Result<(), String> {
-        self.rt
-            .block_on(vocab::save_book_glosses(&self.pool, book_id, glosses))
+        self.reader_changed({
+            self.rt
+                .block_on(vocab::save_book_glosses(&self.pool, book_id, glosses))
+        })
     }
 
     pub fn get_book_glosses(&self, book_id: &str) -> Result<Vec<WordGloss>, String> {
@@ -818,13 +871,17 @@ impl Db {
     }
 
     pub fn add_known_word(&self, lemma: &str, source: &str) -> Result<(), String> {
-        self.rt
-            .block_on(vocab::add_known_word(&self.pool, lemma, source))
+        self.reader_changed({
+            self.rt
+                .block_on(vocab::add_known_word(&self.pool, lemma, source))
+        })
     }
 
     pub fn remove_known_word(&self, lemma: &str) -> Result<(), String> {
-        self.rt
-            .block_on(vocab::remove_known_word(&self.pool, lemma))
+        self.reader_changed({
+            self.rt
+                .block_on(vocab::remove_known_word(&self.pool, lemma))
+        })
     }
 
     pub fn get_known_words(&self) -> Result<Vec<String>, String> {
@@ -832,7 +889,7 @@ impl Db {
     }
 
     pub fn vocab_book_add(&self, entry: &VocabBookAddInput) -> Result<bool, String> {
-        self.rt.block_on(vocab::vocab_book_add(&self.pool, entry))
+        self.reader_changed(self.rt.block_on(vocab::vocab_book_add(&self.pool, entry)))
     }
 
     pub fn vocab_book_list(&self) -> Result<Vec<VocabBookEntry>, String> {
@@ -840,24 +897,32 @@ impl Db {
     }
 
     pub fn vocab_book_remove(&self, lemma: &str) -> Result<(), String> {
-        self.rt
-            .block_on(vocab::vocab_book_remove(&self.pool, lemma))
+        self.reader_changed({
+            self.rt
+                .block_on(vocab::vocab_book_remove(&self.pool, lemma))
+        })
     }
 
     pub fn vocab_book_set_status(&self, lemma: &str, status: &str) -> Result<(), String> {
-        self.rt
-            .block_on(vocab::vocab_book_set_status(&self.pool, lemma, status))
+        self.reader_changed({
+            self.rt
+                .block_on(vocab::vocab_book_set_status(&self.pool, lemma, status))
+        })
     }
 
     pub fn vocab_book_review(&self, lemma: &str) -> Result<(), String> {
-        self.rt
-            .block_on(vocab::vocab_book_review(&self.pool, lemma))
+        self.reader_changed({
+            self.rt
+                .block_on(vocab::vocab_book_review(&self.pool, lemma))
+        })
     }
 
     pub fn vocab_book_review_with_status(&self, lemma: &str, status: &str) -> Result<(), String> {
-        self.rt.block_on(vocab::vocab_book_review_with_status(
-            &self.pool, lemma, status,
-        ))
+        self.reader_changed({
+            self.rt.block_on(vocab::vocab_book_review_with_status(
+                &self.pool, lemma, status,
+            ))
+        })
     }
 
     /// 注音上下文：常规词库与 C3 导入词库分开；已认识词在两种模式下均排除。
@@ -1130,6 +1195,10 @@ async fn initialize_default_skills(pool: &SqlitePool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+#[path = "reader_reuse_tests.rs"]
+mod reader_reuse_tests;
+
 #[cfg(test)]
 mod migration_tests {
     use super::*;
@@ -1148,6 +1217,7 @@ mod migration_tests {
                 .execute(&pool).await.unwrap();
         });
         let db = Db {
+            reader_epoch: Default::default(),
             rt,
             pool,
             data_dir: Default::default(),
@@ -1177,6 +1247,7 @@ mod migration_tests {
         let (rt, pool) = runtime_and_pool();
         rt.block_on(initialize_schema(&pool)).unwrap();
         let db = Db {
+            reader_epoch: Default::default(),
             rt,
             pool,
             data_dir: std::path::PathBuf::new(),
@@ -1209,6 +1280,7 @@ mod migration_tests {
         let (rt, pool) = runtime_and_pool();
         rt.block_on(initialize_schema(&pool)).unwrap();
         let db = Db {
+            reader_epoch: Default::default(),
             rt,
             pool,
             data_dir: std::path::PathBuf::new(),
@@ -1244,6 +1316,7 @@ mod migration_tests {
         let (rt, pool) = runtime_and_pool();
         rt.block_on(initialize_schema(&pool)).unwrap();
         let db = Db {
+            reader_epoch: Default::default(),
             rt,
             pool,
             data_dir: std::path::PathBuf::new(),
@@ -1266,6 +1339,7 @@ mod migration_tests {
         let (rt, pool) = runtime_and_pool();
         rt.block_on(initialize_schema(&pool)).unwrap();
         let db = Db {
+            reader_epoch: Default::default(),
             rt,
             pool,
             data_dir: std::path::PathBuf::new(),
@@ -1301,6 +1375,7 @@ mod migration_tests {
         let (rt, pool) = runtime_and_pool();
         rt.block_on(initialize_schema(&pool)).unwrap();
         let db = Db {
+            reader_epoch: Default::default(),
             rt,
             pool,
             data_dir: std::path::PathBuf::new(),
@@ -1346,6 +1421,7 @@ mod migration_tests {
                 .unwrap();
         });
         let db = Db {
+            reader_epoch: Default::default(),
             rt,
             pool,
             data_dir: std::path::PathBuf::new(),

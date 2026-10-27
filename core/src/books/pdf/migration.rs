@@ -16,6 +16,7 @@ const PACK: i64 = 1_000_000;
 
 #[path = "reader_cache.rs"]
 mod reader_cache;
+pub(crate) use reader_cache::reader_identity;
 #[path = "reflow_migration.rs"]
 mod reflow_migration;
 #[path = "reflow_v8_migration.rs"]
