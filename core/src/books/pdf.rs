@@ -8,6 +8,17 @@ use std::{collections::HashMap, path::Path};
 
 const SNAPSHOT_FILE: &str = "pdf-text-v1.json";
 const SNAPSHOT_VERSION: u32 = 1;
+const ORIGINAL_MARKER: &str = "pdf_original_snapshot_v1";
+
+// Bind freshly imported coordinates in the book's own DB transaction. This is
+// independent of the disposable reader checkpoint or whether it can be written.
+pub(super) fn coordinate_metadata(path: &Path) -> Result<String, String> {
+    let data = std::fs::read(path.parent().ok_or("PDF 目录无效")?.join(SNAPSHOT_FILE))
+        .map_err(|e| e.to_string())?;
+    let snapshot: Snapshot = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+    let token = fingerprint(&serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?);
+    Ok(serde_json::json!({ORIGINAL_MARKER: token}).to_string())
+}
 mod content;
 pub(crate) mod cover;
 mod headings;
@@ -285,10 +296,14 @@ pub fn load_pages(path: &Path) -> Result<LoadedChapters, String> {
     extract(bytes, hash).map(Snapshot::into_chapters)
 }
 
-/// Source snapshot for the app-owned copy in books/<id>/. Also extracts PDFs
-/// imported by the former image reader. Persisted reading must go through
-/// `Db::load_book_chapters` to apply heading repairs and coordinate migration.
+/// Prepare the app-owned copy during import. Persisted reading must go through
+/// `Db::load_book_chapters`, which cannot recreate its coordinate source.
 pub fn load_imported_pages(path: &Path) -> Result<LoadedChapters, String> {
+    let (_, snapshot) = load_source_snapshot(path, true)?;
+    Ok(content::resolve_assets(snapshot.into_chapters(), path))
+}
+
+fn load_source_snapshot(path: &Path, create: bool) -> Result<(Vec<u8>, Snapshot), String> {
     let bytes = read_pdf(path)?;
     let hash = fingerprint(&bytes);
     let directory = path.parent().ok_or("PDF 书籍目录无效")?;
@@ -307,23 +322,26 @@ pub fn load_imported_pages(path: &Path) -> Result<LoadedChapters, String> {
             {
                 return Err("PDF 原文件或文本快照已变化，请重新导入书籍以避免标注错位".into());
             }
-            let loaded = snapshot.into_chapters();
-            content::ensure_assets(path, &loaded)?;
-            return Ok(content::resolve_assets(loaded, path));
+            content::ensure_assets(path, &snapshot.clone().into_chapters())?;
+            return Ok((data, snapshot));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !create {
+                return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
+            }
+        }
         Err(error) => return Err(format!("读取 PDF 文本快照失败: {error}")),
     }
     let snapshot = extract_with_assets(bytes, hash, Some(directory))?;
     let data = serde_json::to_vec(&snapshot).map_err(|e| format!("编码 PDF 文本快照失败: {e}"))?;
     let temporary = directory.join(format!(".pdf-text-{}.tmp", uuid::Uuid::new_v4()));
     if let Err(error) =
-        std::fs::write(&temporary, data).and_then(|_| std::fs::rename(&temporary, &cache))
+        std::fs::write(&temporary, &data).and_then(|_| std::fs::rename(&temporary, &cache))
     {
         let _ = std::fs::remove_file(&temporary);
         return Err(format!("保存 PDF 文本快照失败: {error}"));
     }
-    Ok(content::resolve_assets(snapshot.into_chapters(), path))
+    Ok((data, snapshot))
 }
 
 #[cfg(test)]

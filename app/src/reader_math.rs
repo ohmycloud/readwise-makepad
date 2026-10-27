@@ -14,6 +14,27 @@ use std::{
 };
 
 static COMPILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The import worker prepares the first display before publishing the shelf
+/// result. Kept out of core: database/text extraction does not depend on Typst.
+pub fn prepare_import(db: &readwise_core::Db, id: &str, relative: &str) {
+    let path = db.data_dir().join(relative);
+    if !path
+        .extension()
+        .is_some_and(|s| s.eq_ignore_ascii_case("pdf"))
+    {
+        return;
+    }
+    match db.load_book_chapters(id, &path) {
+        Ok(loaded) => {
+            if let Some(first) = loaded.chapters.first() {
+                let mut book = BookMath::new(&path.to_string_lossy(), id, 0);
+                book.prepare_initial(0, &first.html);
+            }
+        }
+        Err(error) => ::log::warn!("PDF initial presentation preparation skipped: {error}"),
+    }
+}
 enum Visual {
     Formula(Formula),
     Figure(Figure),
@@ -44,7 +65,22 @@ impl BookMath {
             session: path
                 .extension()
                 .is_some_and(|s| s.eq_ignore_ascii_case("pdf"))
-                .then(|| Arc::new(readwise_math::PdfSession::new(path))),
+                .then(|| {
+                    // Only app-owned copies get disk writes, never arbitrary
+                    // sources/fixtures passed to the standalone projection API.
+                    let managed = path.file_name().is_some_and(|s| s == "book.pdf")
+                        && path
+                            .parent()
+                            .and_then(std::path::Path::parent)
+                            .and_then(std::path::Path::file_name)
+                            .is_some_and(|s| s == "books");
+                    Arc::new(if managed {
+                        let directory = path.parent().unwrap().join("pdf-visual-cache");
+                        readwise_math::PdfSession::with_cache(path, directory)
+                    } else {
+                        readwise_math::PdfSession::new(path)
+                    })
+                }),
             token: format!("{id}/{request}/"),
             pages: VecDeque::new(),
             pending: HashSet::new(),
@@ -55,14 +91,21 @@ impl BookMath {
         }
     }
     fn compile(session: &readwise_math::PdfSession, chapter: usize, raw: &str) -> Arc<MathPage> {
-        let _compile = COMPILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let blocks = readwise_core::books::epub_meta::split_blocks(raw);
         let texts = blocks
             .iter()
             .map(|b| readwise_core::vocab::annotate::rendered_text(b))
             .collect::<Vec<_>>();
-        let page = Arc::new(session.page(chapter, &blocks, &texts));
-        drop(_compile);
+        let page = Arc::new(
+            session
+                .cached_page(chapter, &blocks, &texts)
+                .unwrap_or_else(|| {
+                    let _compile = COMPILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    // Recheck inside page(): a different worker may have prepared it
+                    // while we were waiting. Cache hits never wait for neighbor work.
+                    session.page(chapter, &blocks, &texts)
+                }),
+        );
         // PDF source pages often contain large PNG diagrams. Prepare their
         // unchanged theme projection here, never in the UI's pagination probes.
         let (bg, fg) = crate::app::current_reader_image_palette();
@@ -561,6 +604,60 @@ impl Widget for ReaderMath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn imported_first_page_reopens_without_waiting_for_a_speculative_compile() {
+        let root =
+            std::env::temp_dir().join(format!("readwise-visual-import-{}", uuid::Uuid::new_v4()));
+        let db = readwise_core::Db::open_in(root.clone()).unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../web/tests/fixtures/math-scattered.pdf");
+        let book = db.import_book(&source).unwrap();
+        prepare_import(&db, &book.id, &book.file_path);
+        let path = root.join(&book.file_path);
+        let raw = db.load_book_chapters(&book.id, &path).unwrap().chapters[0]
+            .html
+            .clone();
+        let lock = COMPILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut next = BookMath::new(&path.to_string_lossy(), &book.id, 99);
+            next.prepare_initial(0, &raw);
+            tx.send(next.pages[0].1.bytes).unwrap();
+        });
+        let bytes = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop(lock);
+        worker.join().unwrap();
+        assert!(bytes.expect("cache hit must bypass the global compilation lock") > 0);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn both_import_workers_prepare_the_initial_pdf_presentation_before_publishing() {
+        let source = include_str!("app.rs");
+        assert_eq!(
+            source
+                .matches("crate::reader_math::prepare_import(db, &book.id, &book.file_path)")
+                .count(),
+            2
+        );
+        let worker = source
+            .split("fn spawn_open_book(")
+            .nth(1)
+            .unwrap()
+            .split("fn build_chapter_chunks(")
+            .next()
+            .unwrap();
+        assert!(
+            worker
+                .matches("OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id")
+                .count()
+                >= 3
+        );
+    }
+
     fn fixture() -> (BookMath, Vec<String>) {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../web/tests/fixtures/math-scattered.pdf");

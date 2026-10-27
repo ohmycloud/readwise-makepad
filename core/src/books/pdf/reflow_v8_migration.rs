@@ -2,13 +2,14 @@
 //! natively imported as v7. Never regenerate v7 with the new algorithm.
 use super::super::{reflow_v8 as reflow, EXTENDED_REFLOW_EXTRACTOR as REFLOW_EXTRACTOR};
 use super::*;
-const REFLOW_FILE: &str = "pdf-reflow-v8.json";
-const REFLOW_MARKER: &str = "pdf_reflow_projection_v8";
+pub(super) const REFLOW_FILE: &str = "pdf-reflow-v8.json";
+pub(super) const REFLOW_MARKER: &str = "pdf_reflow_projection_v8";
 
 pub(crate) async fn load_reader_pages(
     pool: &SqlitePool,
     book_id: &str,
     path: &Path,
+    source: &ReaderSource<'_>,
 ) -> Result<LoadedChapters, String> {
     let directory = path.parent().ok_or("PDF 目录无效")?;
     let metadata: Option<String> =
@@ -27,9 +28,8 @@ pub(crate) async fn load_reader_pages(
     if committed && !directory.join(SNAPSHOT_FILE).is_file() {
         return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
     }
-    let loaded = load_imported_pages(path)?;
-    let bytes = std::fs::read(directory.join(SNAPSHOT_FILE)).map_err(|e| e.to_string())?;
-    let mut base: Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let loaded = source.loaded()?;
+    let mut base = source.original()?.1.clone();
     if base.extractor == REFLOW_EXTRACTOR {
         if markers.as_ref().is_some_and(|m| {
             [
@@ -48,7 +48,7 @@ pub(crate) async fn load_reader_pages(
         }
         return Ok(loaded);
     }
-    super::reflow_migration::load_reader_pages(pool, book_id, path).await?;
+    super::reflow_migration::load_reader_pages(pool, book_id, path, source).await?;
     if base.extractor != super::super::REFLOW_EXTRACTOR {
         let data = std::fs::read(directory.join(super::reflow_migration::REFLOW_FILE))
             .map_err(|e| e.to_string())?;

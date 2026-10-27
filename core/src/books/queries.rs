@@ -49,11 +49,13 @@ pub async fn import_book(
 
     let epub_rel = format!("books/{}/book.{format}", id);
     fs::copy(src, data_dir.join(&epub_rel)).map_err(|e| format!("复制书籍失败: {}", e))?;
-    if format == "pdf" {
-        // Validate text extraction before reporting import success, and freeze
-        // the source coordinates used by selection / highlights / ruby.
+    let coordinate_metadata = if format == "pdf" {
+        // Validate and bind source coordinates before committing the book.
         super::pdf::load_imported_pages(&data_dir.join(&epub_rel))?;
-    }
+        Some(super::pdf::coordinate_metadata(&data_dir.join(&epub_rel))?)
+    } else {
+        None
+    };
 
     let cover_rel = if format == "pdf" {
         match super::pdf::cover::save(&data_dir.join(&epub_rel), &directory.path) {
@@ -97,12 +99,13 @@ pub async fn import_book(
     .map_err(|e| format!("插入书籍失败: {}", e))?;
 
     sqlx::query(
-        r#"INSERT INTO book_status (book_id, status, progress_current, progress_total, location, created_at, updated_at)
-           VALUES (?, 'unread', 0, 0, '', ?, ?)"#,
+        r#"INSERT INTO book_status (book_id, status, progress_current, progress_total, location, created_at, updated_at, metadata)
+           VALUES (?, 'unread', 0, 0, '', ?, ?, ?)"#,
     )
     .bind(&id)
     .bind(now)
     .bind(now)
+    .bind(coordinate_metadata)
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("创建书籍状态失败: {}", e))?;
@@ -111,6 +114,16 @@ pub async fn import_book(
         .await
         .map_err(|e| format!("提交事务失败: {}", e))?;
     directory.committed = true;
+    if format == "pdf" && cfg!(unix) {
+        // The immutable source was prepared above; publish the validated reader
+        // checkpoint during import, not on the user's first shelf click.
+        // This disposable optimization must not roll back a successful import.
+        if let Err(error) =
+            super::pdf::load_reader_pages(pool, &id, &data_dir.join(&epub_rel)).await
+        {
+            log::debug!("PDF reader checkpoint preparation skipped: {error}");
+        }
+    }
 
     Ok(SimpleBook {
         id,

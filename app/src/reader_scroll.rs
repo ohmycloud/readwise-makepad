@@ -1,25 +1,60 @@
-//! Scroll geometry, a transient reading indicator, and paged gesture ownership.
+//! Bounded large-scroll seeking and paged gesture ownership.
+//! PortalList owns the authoritative scrolling height tree and scrollbar.
 //! Keep this state across redraws/chapter changes: inertia belongs to the old
 //! gesture even after the incoming page is ready.
 use crate::reader_columns::BlockMetrics;
-use makepad_widgets::makepad_platform::event::ScrollEvent;
+use makepad_widgets::makepad_platform::event::{ScrollEvent, TouchState};
+use makepad_widgets::{Event, MouseButton, Rect};
 
-/// Native wheel/trackpad motion already contains its own timing. This only
-/// controls the overlay's lifetime; it never filters or interpolates motion.
+/// A thumb drag belongs to the scrollbar until release, including outside the
+/// reader. It must not start text selection, a word card or a toolbar tap.
 #[derive(Default)]
-pub struct ScrollIndicator {
-    last_motion: Option<f64>,
+pub struct ScrollbarPointer {
+    mouse: bool,
+    touch: Option<u64>,
 }
 
-impl ScrollIndicator {
-    pub fn moved(&mut self, now: f64) {
-        self.last_motion = Some(now);
+impl ScrollbarPointer {
+    pub fn cancel(&mut self) {
+        *self = Self::default();
     }
 
-    pub fn opacity(&self, now: f64) -> f32 {
-        self.last_motion.map_or(0.0, |last| {
-            (1.0 - ((now - last - 0.45) / 0.18).max(0.0)).clamp(0.0, 1.0) as f32
-        })
+    pub fn track(&mut self, event: &Event, rect: Rect) -> bool {
+        let on_rail =
+            |p: makepad_widgets::DVec2| rect.contains(p) && p.x >= rect.pos.x + rect.size.x - 10.0;
+        match event {
+            Event::MouseDown(e) if e.button == MouseButton::PRIMARY => {
+                self.mouse = on_rail(e.abs);
+                self.mouse
+            }
+            Event::MouseMove(_) => self.mouse,
+            Event::MouseUp(e) if e.button == MouseButton::PRIMARY => {
+                std::mem::take(&mut self.mouse)
+            }
+            Event::TouchUpdate(e) => {
+                if self.touch.is_none() {
+                    self.touch = e
+                        .touches
+                        .iter()
+                        .find(|t| t.state == TouchState::Start && on_rail(t.abs))
+                        .map(|t| t.uid);
+                }
+                let owned = self.touch.is_some();
+                if e.touches
+                    .iter()
+                    .any(|t| Some(t.uid) == self.touch && t.state == TouchState::Stop)
+                {
+                    self.touch = None;
+                }
+                owned
+            }
+            Event::LongPress(_) => self.touch.is_some(),
+            Event::WindowLostFocus(_) | Event::LiveEdit | Event::ScriptReapply => {
+                self.cancel();
+                false
+            }
+            _ => false,
+        }
     }
 }
 
@@ -328,6 +363,10 @@ fn native_phase(_event: &ScrollEvent) -> Option<Phase> {
 }
 
 #[cfg(test)]
+#[path = "reader_scrollbar_tests.rs"]
+mod scrollbar_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -416,15 +455,43 @@ mod tests {
     }
 
     #[test]
-    fn scroll_indicator_hides_after_quiet_time_and_restarts_on_motion() {
-        let mut indicator = ScrollIndicator::default();
-        assert_eq!(indicator.opacity(10.0), 0.0);
-        indicator.moved(10.0);
-        assert_eq!(indicator.opacity(10.4), 1.0);
-        assert!((indicator.opacity(10.54) - 0.5).abs() < 0.001);
-        assert_eq!(indicator.opacity(10.7), 0.0);
-        indicator.moved(10.8);
-        assert_eq!(indicator.opacity(10.8), 1.0);
+    fn one_native_scrollbar_tracks_the_body_and_same_count_chapters_reset_its_heights() {
+        let app = include_str!("app.rs");
+        let template = app
+            .split("mod.widgets.ChapterList =")
+            .nth(1)
+            .unwrap()
+            .split("Para := View")
+            .next()
+            .unwrap();
+        assert!(template
+            .contains("scroll_bar: mod.widgets.ReaderScrollBar{\n                bar_size: 10.0"));
+        assert!(template.contains("max_handle_size: 40.0"));
+        assert!(template.contains("min_handle_size: 24.0"));
+        assert!(template.contains("size: 4.0"));
+        assert!(template.contains("list := mod.widgets.ReaderList{"));
+        let drawing = app
+            .split("    fn draw_scrolling(")
+            .nth(1)
+            .unwrap()
+            .split("    fn draw_pages(")
+            .next()
+            .unwrap();
+        assert!(
+            drawing.find("list.update_scroll_bar(cx)").unwrap()
+                < drawing.find("self.view.draw_walk").unwrap()
+        );
+        assert!(!drawing.contains("draw_scroll_indicator"));
+        assert!(!drawing.contains("scroll_extent"));
+        let invalidation = drawing
+            .split("self.pager.metrics = vec![None; paragraphs.len()];")
+            .nth(1)
+            .unwrap()
+            .split("if let Some(source)")
+            .next()
+            .unwrap();
+        assert!(invalidation.contains("list.set_item_range(cx, 0, 0);"));
+        assert!(invalidation.contains("list.set_item_range(cx, 0, paragraphs.len());"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Projection-local lookup of fixed app controls. Unlike repeated global tree
 //! searches, one walk also makes missing (uninstantiated) controls cheap. The
-//! reader's projection context owns this index only for a synchronous pass; no
+//! projection / action-routing context owns it only for a synchronous pass; no
 //! areas, geometry or paragraph caches are retained across events/reloads.
 use makepad_widgets::*;
 use std::cell::RefCell;
@@ -57,6 +57,12 @@ impl AppUiIndex {
         index.get(&path[0]).cloned().unwrap_or_default()
     }
 
+    pub fn button(&self, cx: &Cx, path: &[LiveId]) -> ButtonRef {
+        self.widget(cx, path).as_button()
+    }
+    pub fn modal(&self, cx: &Cx, path: &[LiveId]) -> ModalRef {
+        self.widget(cx, path).as_modal()
+    }
     pub fn label(&self, cx: &Cx, path: &[LiveId]) -> LabelRef {
         self.widget(cx, path).as_label()
     }

@@ -4,6 +4,11 @@ use std::path::PathBuf;
 
 #[path = "lists_migration_tests.rs"]
 mod lists;
+#[cfg(unix)]
+#[path = "reader_cache_tests.rs"]
+mod reader_cache_tests;
+#[path = "reader_source_tests.rs"]
+mod reader_source;
 #[path = "reflow_migration_tests.rs"]
 mod reflow;
 #[path = "reflow_v8_migration_tests.rs"]
@@ -50,14 +55,18 @@ impl Case {
         };
         let original = serde_json::to_vec(&snapshot).unwrap();
         std::fs::write(path.parent().unwrap().join(SNAPSHOT_FILE), &original).unwrap();
-        Self {
+        let case = Self {
             root,
             path,
             id: book.id,
             db,
             original,
             last,
-        }
+        };
+        // This fixture represents a pre-checkpoint legacy import, not a native
+        // v8 book whose authenticated original was subsequently overwritten.
+        case.sql("UPDATE book_status SET metadata = NULL;");
+        case
     }
     fn sql(&self, sql: &str) {
         let rt = tokio::runtime::Builder::new_current_thread()

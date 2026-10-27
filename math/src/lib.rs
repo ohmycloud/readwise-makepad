@@ -1,5 +1,6 @@
 //! Shared offline Typst/PDF visual projection over immutable source text.
 //! Do not infer TeX from flattened words or rewrite native/Web source offsets.
+mod cache;
 mod content;
 mod figures;
 mod pdf;
@@ -7,6 +8,7 @@ mod scattered;
 #[cfg(test)]
 mod session_tests;
 mod typeset;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -33,12 +35,12 @@ struct Rule {
     thickness: f32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MathPage {
     fragments: HashMap<usize, Vec<Fragment>>,
     pub bytes: usize,
 }
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Fragment {
     start: usize,
     end: usize,
@@ -55,7 +57,7 @@ impl Fragment {
             }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Formula {
     pub id: String,
     pub svg: String,
@@ -66,14 +68,15 @@ pub struct Formula {
     pub display: bool,
 }
 /// Original PDF graphics rendered off-thread. Never replaces persisted text.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Figure {
     pub id: String,
+    #[serde(with = "cache::png")]
     pub png: std::sync::Arc<Vec<u8>>,
     pub width: u16,
     pub height: u16,
 }
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Projection {
     Formula(Formula),
     Figure(Figure),
@@ -88,13 +91,35 @@ pub enum Projection {
 pub struct PdfSession {
     path: std::path::PathBuf,
     document: std::sync::OnceLock<Option<pdf_oxide::PdfDocument>>,
+    cache: Option<cache::PageCache>,
 }
 impl PdfSession {
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             path: path.into(),
             document: std::sync::OnceLock::new(),
+            cache: None,
         }
+    }
+    /// Opt-in disposable presentation cache. The caller owns this PRIVATE
+    /// directory; never pass the user's source directory as the cache root.
+    pub fn with_cache(
+        path: impl Into<std::path::PathBuf>,
+        directory: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let path = path.into();
+        let cache = cache::PageCache::new(&path, directory.into());
+        Self {
+            path,
+            document: Default::default(),
+            cache,
+        }
+    }
+    /// Cheap lookup before a frontend's compilation lock. A hit must not open
+    /// the PDF, load fonts, run Typst or wait behind speculative neighbor work.
+    pub fn cached_page(&self, page: usize, blocks: &[String], text: &[String]) -> Option<MathPage> {
+        let cache = self.cache.as_ref()?;
+        cache.read(page, blocks, text)
     }
     pub fn page(&self, page: usize, blocks: &[String], text: &[String]) -> MathPage {
         if !self
@@ -105,13 +130,20 @@ impl PdfSession {
         {
             return MathPage::empty();
         }
-        // Cache failures too: a missing/unsupported source must not cause a
-        // new open attempt on every pagination pass. Reopen the book to retry.
-        self.document
+        if let Some(cached) = self.cached_page(page, blocks, text) {
+            return cached;
+        }
+        // Cache document-open failures in memory, not as permanent empty
+        // presentations. Successful empty (ordinary prose) pages are reusable.
+        let projected = self
+            .document
             .get_or_init(|| pdf_oxide::PdfDocument::open(&self.path).ok())
             .as_ref()
-            .and_then(|doc| pdf::project(doc, &self.path, page, blocks, text))
-            .unwrap_or_else(MathPage::empty)
+            .and_then(|doc| pdf::project(doc, &self.path, page, blocks, text));
+        if let (Some(cache), Some(projected)) = (&self.cache, &projected) {
+            let _ = cache.write(page, blocks, text, projected);
+        }
+        projected.unwrap_or_else(MathPage::empty)
     }
 }
 

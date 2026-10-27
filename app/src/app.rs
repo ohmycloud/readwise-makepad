@@ -1,9 +1,11 @@
 use crate::app_ui_index::AppUiIndex;
 use crate::chapter_image::ChapterImageAction;
 use crate::reader_book_pages::BookPages;
+use crate::reader_display::ParagraphCache;
+use crate::reader_list::{ReaderList, ReaderListWidgetExt, ReaderListWidgetRefExt};
 use crate::reader_page_turn::{DrawReaderPageTurn, PageTurn};
 use crate::reader_paint::apply_widget_paint;
-use crate::reader_scroll::{ScrollBoundaryTurn, ScrollIndicator};
+use crate::reader_scroll::{ScrollBoundaryTurn, ScrollbarPointer};
 use crate::reader_settings_panel::{FontMenuTap, ReaderSettingsTab};
 use crate::reader_touch::{DoubleTap, ListTap, TapOutcome, ToolbarTap};
 use crate::reader_word::word_range_at;
@@ -90,6 +92,14 @@ fn reader_scroll_notices_only(actions: &Actions) -> bool {
         })
 }
 
+/// Typed worker notices are fully handled before the control-routing section.
+/// A mixed click/data batch still needs that section; a pure data batch does not.
+fn app_actions_have_widgets(actions: &Actions) -> bool {
+    actions
+        .iter()
+        .any(|action| action.as_widget_action().is_some())
+}
+
 fn reader_boundary_notices_only(actions: &Actions) -> bool {
     !actions.is_empty()
         && actions
@@ -115,6 +125,36 @@ mod passive_action_tests {
             widget_uid: WidgetUid(1),
             group: None,
         })
+    }
+
+    #[test]
+    fn typed_notice_routing_preserves_mixed_clicks_and_handles_data_before_the_guard() {
+        let mut actions: Vec<Action> = vec![Box::new(ReaderAction::OpenError {
+            request_id: 1,
+            error: "missing".into(),
+        })];
+        assert!(!app_actions_have_widgets(&actions));
+        actions.push(widget_action(ButtonAction::Clicked(Default::default())));
+        assert!(app_actions_have_widgets(&actions));
+        assert!(!app_actions_have_widgets(&[]));
+        let source = include_str!("app.rs");
+        let handler = source
+            .rsplit_once("    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions)")
+            .unwrap()
+            .1;
+        let guard = handler
+            .find("if !app_actions_have_widgets(actions)")
+            .unwrap();
+        for typed in [
+            "action.downcast_ref::<ReaderAction>()",
+            "action.downcast_ref::<crate::reader_math::Ready>()",
+            "action.downcast_ref::<ShelfAction>()",
+            "action.downcast_ref::<ReaderPaginationAction>()",
+            "action.downcast_ref::<NoteAction>()",
+        ] {
+            assert!(handler.find(typed).unwrap() < guard);
+        }
+        assert!(guard < handler.find("controls.begin_projection(&self.ui)").unwrap());
     }
 
     #[test]
@@ -2757,6 +2797,8 @@ fn reader_page_layout_signature(chapter: usize, content_version: u64, layout_key
 
 /// 当前打开的书对应的书架项。
 static CURRENT_ITEM: LazyLock<RwLock<Option<ShelfItem>>> = LazyLock::new(|| RwLock::new(None));
+/// Retained across LiveEdit/ScriptReapply, just like the requested book.
+static READER_OPEN_ERROR: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
 
 fn requested_book_is_ready() -> bool {
     let requested_id = CURRENT_ITEM
@@ -3429,6 +3471,15 @@ struct OpenBook {
     toc: Vec<readwise_core::books::epub_meta::TocEntry>,
     /// 各章高亮（章下标 → 区间列表）。
     highlights: HashMap<usize, Vec<readwise_core::books::Highlight>>,
+}
+
+impl std::fmt::Debug for OpenBook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenBook")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenBook {
@@ -4379,10 +4430,14 @@ static CURRENT_READER_SOURCE: AtomicUsize = AtomicUsize::new(usize::MAX);
 enum ReaderAction {
     Opened {
         request_id: u64,
+        // Publish on the UI thread together with its paragraphs/resume point,
+        // never expose a new book paired with the previous book's widgets.
+        book: Mutex<Option<OpenBook>>,
         resume: ReaderLocation,
         bookmarks: Vec<readwise_core::books::Bookmark>,
         gloss_count: usize,
         parse_ms: u128,
+        prepare_ms: u128,
         initial_gloss_ms: u128,
     },
     OpenError {
@@ -4390,6 +4445,36 @@ enum ReaderAction {
         error: String,
     },
 }
+
+impl ReaderAction {
+    fn take_opened_book(
+        &self,
+        current_request_id: u64,
+        requested_id: Option<&str>,
+    ) -> Option<OpenBook> {
+        let Self::Opened {
+            request_id, book, ..
+        } = self
+        else {
+            return None;
+        };
+        if *request_id != current_request_id {
+            return None;
+        }
+        let mut book = book.lock().unwrap();
+        if book
+            .as_ref()
+            .is_none_or(|book| requested_id != Some(book.id.as_str()))
+        {
+            return None;
+        }
+        book.take()
+    }
+}
+
+#[cfg(test)]
+#[path = "reader_open_tests.rs"]
+mod reader_open_tests;
 
 #[derive(Debug)]
 enum BookmarkAction {
@@ -4754,11 +4839,27 @@ fn speak_text(text: String) {
     });
 }
 
-/// 后台加载整本书章节 + 恢复进度。
-fn spawn_open_book(item: ShelfItem) {
+/// Only an explicit book open retires the previous document. Annotation-only
+/// changes must keep their existing paragraphs, geometry and page history.
+fn begin_open_book_request(item: ShelfItem) -> u64 {
     let request_id = OPEN_BOOK_REQUEST_ID.fetch_add(1, Ordering::AcqRel) + 1;
-    *CURRENT_ITEM.write().unwrap() = Some(item.clone());
+    *CURRENT_ITEM.write().unwrap() = Some(item);
+    *CURRENT_BOOK.write().unwrap() = None;
+    *READER_OPEN_ERROR.write().unwrap() = None;
+    replace_paragraphs(Vec::new());
+    CURRENT_CHAPTER.store(0, Ordering::Relaxed);
+    CURRENT_READER_BLOCK.store(0, Ordering::Relaxed);
+    CURRENT_READER_SCROLL_BITS.store(0.0_f64.to_bits(), Ordering::Relaxed);
+    CURRENT_READER_SOURCE.store(usize::MAX, Ordering::Relaxed);
+    request_id
+}
+
+/// 后台加载整本书章节 + 恢复进度；结果由 UI 原子投影。
+fn spawn_open_book(item: ShelfItem, request_id: u64) {
     std::thread::spawn(move || {
+        if OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id {
+            return;
+        }
         let open_started = std::time::Instant::now();
         let loaded = match DB
             .get()
@@ -4801,6 +4902,9 @@ fn spawn_open_book(item: ShelfItem) {
             .get()
             .and_then(|db| db.gloss_context(Some(&item.id)).ok())
             .unwrap_or_default();
+        if OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) != request_id {
+            return;
+        }
         let english_level = *ENGLISH_LEVEL.read().unwrap();
         let glosses = lexicon.select(english_level);
         let gloss_count = glosses.len();
@@ -4836,18 +4940,15 @@ fn spawn_open_book(item: ShelfItem) {
         {
             return;
         }
-        let mut current = CURRENT_BOOK.write().unwrap();
-        // The reader may change level while EPUB/DB work is in flight.
-        book.set_english_level(*ENGLISH_LEVEL.read().unwrap());
-        *current = Some(book);
-        drop(current);
         drop(requested_item);
         Cx::post_action(ReaderAction::Opened {
             request_id,
+            book: Mutex::new(Some(book)),
             resume,
             bookmarks,
             gloss_count,
             parse_ms,
+            prepare_ms: open_started.elapsed().as_millis(),
             initial_gloss_ms,
         });
     });
@@ -5528,7 +5629,8 @@ fn spawn_import(paths: Vec<String>, cleanup_sources: bool) {
         let mut errors = Vec::new();
         for p in paths {
             match db.import_book(std::path::Path::new(&p)) {
-                Ok(_) => {
+                Ok(book) => {
+                    crate::reader_math::prepare_import(db, &book.id, &book.file_path);
                     imported += 1;
                     if cleanup_sources {
                         let _ = std::fs::remove_file(&p);
@@ -7035,20 +7137,10 @@ script_mod! {
         font_active_bold_italic: theme.font_bold_italic{}
         html_default_inset: theme.space_1
         draw_reader_selection.color: #0000
-        draw_scroll_indicator +: {
-            color: #0000
-            pixel: fn() {
-                let p = self.pos * self.rect_size
-                let r = self.rect_size.x * 0.5
-                let y = clamp(p.y, r, max(r, self.rect_size.y - r))
-                let a = 1.0 - smoothstep(-0.5, 0.5, length(vec2(p.x - r, p.y - y)) - r)
-                return Pal.premul(vec4(self.color.xyz, self.color.w * a))
-            }
-        }
         draw_page_turn: mod.draw.DrawReaderPageTurn{}
         list_host := View{
         width: Fill height: Fill
-        list := PortalList{
+        list := mod.widgets.ReaderList{
             width: Fill height: Fill
             selectable: true
             // Paragraph/ruby/mark items are resolved from their owning list item,
@@ -7060,7 +7152,20 @@ script_mod! {
             drag_scrolling: #(cfg!(any(target_os = "android", target_os = "ios")))
             padding: Inset{ left: 32 right: 32 top: 8 bottom: 8 }
             spacing: 6
-            scroll_bar: ScrollBar{bar_size: 0.0}
+            // Keep the full native track and a compact, matching drag handle.
+            scroll_bar: mod.widgets.ReaderScrollBar{
+                bar_size: 10.0
+                min_handle_size: 24.0
+                max_handle_size: 40.0
+                draw_bg +: {
+                    size: 4.0
+                    border_radius: 2.0
+                    color: theme.color_text_meta
+                    color_hover: theme.color_text
+                    color_drag: theme.color_text
+                    border_size: 0.0
+                }
+            }
             Para := View{
                 width: Fill height: Fit
                 para_html := Html{
@@ -7464,6 +7569,17 @@ script_mod! {
                                         flow: Down
                                         draw_bg.color: #xf7f4ea
                                         chapter_list := mod.widgets.ChapterList{}
+                                        reader_open_state := View{
+                                            visible: false
+                                            width: Fill height: Fill
+                                            align: Center
+                                            padding: 24
+                                            reader_open_message := Label{
+                                                width: Fill height: Fit
+                                                text: ""
+                                                draw_text.color: theme.color_label_inner_inactive
+                                            }
+                                        }
                                         reader_footer := View{
                                             width: Fill height: 48
                                             flow: Down
@@ -9638,19 +9754,15 @@ struct ChapterList {
     html_default_inset: f64,
     #[live]
     draw_reader_selection: DrawColor,
-    #[live]
-    draw_scroll_indicator: DrawColor,
     #[rust]
-    scroll_indicator: ScrollIndicator,
+    paragraph_cache: ParagraphCache,
     #[rust]
-    scroll_indicator_frame: NextFrame,
-    #[rust]
-    scroll_indicator_position: Option<(usize, f64)>,
+    scrollbar_pointer: ScrollbarPointer,
     #[live]
     draw_page_turn: DrawReaderPageTurn,
     #[rust]
     page_turn: PageTurn,
-    /// 选区自跟踪（PortalList 未暴露区间 API，用公开的命中接口镜像）。
+    /// 选区自跟踪（ReaderList 未暴露区间 API，用公开的命中接口镜像）。
     /// 普通文字与原生选区同步；注音词/链接等交互内联文字由镜像投影绘制。
     #[rust]
     sel_anchor: Option<(usize, usize)>,
@@ -9678,7 +9790,7 @@ struct ChapterList {
     /// 当前选区与保存后的永久高亮共用它，禁止再用另一套纯文本重排几何。
     #[rust]
     range_geometry_cache: HashMap<ReaderRangeGeometryKey, Vec<Rect>>,
-    /// 上一次完成绘制后各段落的真实宽度。PortalList 当前重绘开始后，旧 Area
+    /// 上一次完成绘制后各段落的真实宽度。ReaderList 当前重绘开始后，旧 Area
     /// 可能暂时失效，因此不能直接把 Area 当作可靠的上一帧宽度来源。
     #[rust]
     item_layout_widths: HashMap<(usize, usize), f64>,
@@ -10227,6 +10339,24 @@ fn reader_markup_available_width(
 }
 
 impl ChapterList {
+    /// Book identity changed, not merely its annotations or page-count revision.
+    fn reset_for_book_open(&mut self, cx: &mut Cx) {
+        self.cancel_reader_tap(cx);
+        self.reset_selection_gesture();
+        self.page_turn.cancel();
+        self.pager = ReaderPagedState::default();
+        self.book_pages = BookPages::default();
+        self.range_geometry_cache.clear();
+        self.item_layout_widths.clear();
+        self.hit_runs.clear();
+        self.text_maps.clear();
+        self.paragraph_cache.clear();
+        self.scrollbar_pointer.cancel();
+        self.view
+            .reader_list(cx, ids!(list))
+            .set_first_id_and_scroll(0, 0.0);
+    }
+
     fn redraw_visible_code_views(&mut self, cx: &mut Cx) {
         // Code blocks keep their own draw lists. Repaint both levels after a page
         // switch so glyphs cached while another list was scrolling are refreshed.
@@ -10375,7 +10505,7 @@ impl ChapterList {
         // A paged-to-scroll transition already captured the old logical point
         // in requested_source before entering this draw path.
         self.pager.reflow_source = None;
-        let list_ref = self.view.portal_list(cx, ids!(list));
+        let list_ref = self.view.reader_list(cx, ids!(list));
         let content_version = READER_CONTENT_VERSION.load(Ordering::Relaxed);
         let signature = reader_source_hash(&format!(
             "scroll:{content_version}:{}:{}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{}:{}:{}:{:?}:{}",
@@ -10408,7 +10538,13 @@ impl ChapterList {
             self.item_layout_widths.clear();
             self.hit_runs.clear();
             self.text_maps.clear();
-            self.scroll_indicator_position = None;
+            self.paragraph_cache.clear();
+            // ReaderList owns a separate height tree. A new PDF page with the
+            // same block count must not inherit the preceding page's heights.
+            if let Some(mut list) = list_ref.borrow_mut() {
+                list.set_item_range(cx, 0, 0);
+                list.set_item_range(cx, 0, paragraphs.len());
+            }
         }
         if let Some(source) = self.pager.requested_source.take() {
             self.pager.pending_source = Some(source);
@@ -10433,9 +10569,16 @@ impl ChapterList {
                 list_ref.set_first_id_and_scroll(block, scroll);
             }
         }
+        // ReaderList refreshes its scrollbar position after emitting its draw
+        // instance. Synchronize first as well, so restored/programmatic anchors
+        // do not leave the thumb one draw behind the body.
+        if let Some(mut list) = list_ref.borrow_mut() {
+            list.update_scroll_bar(cx);
+        }
+        let scroll_start = (list_ref.first_id(), list_ref.scroll_position());
         self.view.view(cx, ids!(list_host)).set_visible(cx, true);
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = step.as_portal_list().borrow_mut() {
+            if let Some(mut list) = step.as_reader_list().borrow_mut() {
                 self.hit_runs.clear();
                 let mut drawn_blocks = HashSet::new();
                 list.set_item_range(cx, 0, paragraphs.len());
@@ -10500,42 +10643,14 @@ impl ChapterList {
                 self.pager.measure_frame = cx.new_next_frame();
             }
         }
-        self.pager.scroll_chapter = Some(CURRENT_CHAPTER.load(Ordering::Relaxed));
-        let position = (list_ref.first_id(), list_ref.scroll_position());
-        if self
-            .scroll_indicator_position
-            .is_some_and(|last| last != position)
+        if scroll_start.0 != list_ref.first_id()
+            || (scroll_start.1 - list_ref.scroll_position()).abs() > 0.01
         {
-            self.scroll_indicator.moved(cx.time());
-            self.scroll_indicator_frame = cx.new_next_frame();
+            // A boundary clamp / first-item normalization happened during draw.
+            // One settling draw submits the corrected native thumb geometry.
+            self.pager.measure_frame = cx.new_next_frame();
         }
-        self.scroll_indicator_position = Some(position);
-        let (offset, total) =
-            crate::reader_scroll::scroll_extent(&self.pager.metrics, position.0, position.1);
-        if total > viewport.size.y + 0.5 {
-            let height = 36.0_f64.min((viewport.size.y - 16.0).max(0.0));
-            let progress = (offset / (total - viewport.size.y)).clamp(0.0, 1.0);
-            let mut color = reader_scene_palette(
-                *READER_BACKGROUND.read().unwrap(),
-                *READER_THEME.read().unwrap(),
-            )
-            .text;
-            color.w = self.scroll_indicator.opacity(cx.time()) * 0.45;
-            self.draw_scroll_indicator.color = color;
-            self.draw_scroll_indicator.new_draw_call(cx);
-            self.draw_scroll_indicator.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(
-                        viewport.pos.x + viewport.size.x - 9.0,
-                        viewport.pos.y
-                            + 8.0
-                            + progress * (viewport.size.y - 16.0 - height).max(0.0),
-                    ),
-                    size: dvec2(5.0, height),
-                },
-            );
-        }
+        self.pager.scroll_chapter = Some(CURRENT_CHAPTER.load(Ordering::Relaxed));
         DrawStep::done()
     }
 
@@ -10546,6 +10661,7 @@ impl ChapterList {
         walk: Walk,
         viewport: Rect,
     ) -> DrawStep {
+        self.scrollbar_pointer.cancel();
         use crate::reader_columns::{compose_page, ColumnLayout, PageAnchor};
         let font = READER_FONT_SIZE
             .read()
@@ -10589,7 +10705,7 @@ impl ChapterList {
             self.book_pages.configure(key, layout_signature, chapters);
         }
         let signature = reader_page_layout_signature(chapter, content_version, layout_signature);
-        let list_ref = self.view.portal_list(cx, ids!(list));
+        let list_ref = self.view.reader_list(cx, ids!(list));
         let mut anchor = PageAnchor {
             block: list_ref.first_id(),
             y: (-list_ref.scroll_position()).max(0.0),
@@ -10827,7 +10943,7 @@ impl ChapterList {
                 );
                 // Reuse a bounded set of visible slots, not one retained widget
                 // for every paragraph ever visited in a long book.
-                // Keep IDs dense: native PortalList event dispatch visits
+                // Keep IDs dense: native ReaderList event dispatch visits
                 // min_id..=max_id when switching back to continuous scrolling.
                 // Slots 0..8 are reserved for offscreen measurement above.
                 let cache_id = 8 + slot * 2 + column;
@@ -10899,12 +11015,14 @@ impl ChapterList {
         if self.pager.active {
             return self.pager.drawn.clone();
         }
-        let list = self.view.portal_list(cx, ids!(list));
+        let list = self.view.reader_list(cx, ids!(list));
         (list.first_id()..list.first_id() + list.visible_items() + 1)
             .filter_map(|id| {
-                list.get_item(id).map(|(_, item)| {
-                    let clip = item.area().clipped_rect(cx);
-                    (id, item, clip)
+                list.get_item(id).and_then(|(_, item)| {
+                    let area = item.area();
+                    // Reapply/recycled slots may still reference an older
+                    // draw list; clipped_rect cannot dereference those safely.
+                    area.is_valid(cx).then(|| (id, item, area.clipped_rect(cx)))
                 })
             })
             .collect()
@@ -10914,7 +11032,7 @@ impl ChapterList {
         if self.pager.active {
             self.view.area().rect(cx)
         } else {
-            self.view.portal_list(cx, ids!(list)).area().rect(cx)
+            self.view.reader_list(cx, ids!(list)).area().rect(cx)
         }
     }
 
@@ -10968,7 +11086,7 @@ impl ChapterList {
                 .unwrap_or_default()
         };
         self.view
-            .portal_list(cx, ids!(list))
+            .reader_list(cx, ids!(list))
             .set_first_id_and_scroll(target.block, -target.y);
         self.pager.anchor = target;
         self.pager.did_navigate();
@@ -11011,7 +11129,7 @@ impl ChapterList {
         script_apply_eval!(cx, list_widget, {
             drag_scrolling: #(drag_scrolling)
         });
-        let list = self.view.portal_list(cx, ids!(list));
+        let list = self.view.reader_list(cx, ids!(list));
         if let Some(mut inner) = list.borrow_mut() {
             inner.selectable = !compact_layout;
             inner.clear_selection(cx);
@@ -11170,7 +11288,7 @@ impl ChapterList {
     }
 
     /// 命中可见块的 (块id, 正文字符下标)。点位在视口外或块间隙时吸附到
-    /// 最近边界，与 PortalList 原生选择规则保持一致。
+    /// 最近边界，与 ReaderList 原生选择规则保持一致。
     fn hit_block_char(&self, cx: &mut Cx, abs: DVec2) -> Option<(usize, usize)> {
         let mut abs = abs;
         let mut items = self.active_items(cx);
@@ -11307,12 +11425,12 @@ impl ChapterList {
         self.last_abs = Some(abs);
     }
 
-    /// PortalList 会复用/回收离屏 item，因此每次滚动与重绘都要把全局区间
+    /// ReaderList 会复用/回收离屏 item，因此每次滚动与重绘都要把全局区间
     /// 重新投影到当前可见 widget，而不能依赖上一次的原生选择状态。
     fn apply_visible_selection(&mut self, cx: &mut Cx) {
         let range = *SEL_RANGE.read().unwrap();
         let paragraphs = PARAGRAPHS.read().unwrap();
-        let list = self.view.portal_list(cx, ids!(list));
+        let list = self.view.reader_list(cx, ids!(list));
         for (id, widget, _) in self.active_items(cx) {
             let paragraph = paragraphs.get(id).map(String::as_str).unwrap_or("");
             let source_len = readwise_core::vocab::annotate::rendered_text(paragraph).len();
@@ -11351,7 +11469,7 @@ impl ChapterList {
 
         // 新的可见项会在下一帧才绑定；先按视口比例估算块，再在后续 MouseMove
         // 中用精确字形命中修正。这样按住鼠标滚轮时选区会立即跨块延伸。
-        let list = self.view.portal_list(cx, ids!(list));
+        let list = self.view.reader_list(cx, ids!(list));
         let first = list.first_id();
         let visible = list.visible_items().max(1);
         let rect = list.area().rect(cx);
@@ -11425,7 +11543,7 @@ impl ChapterList {
         // own touch gestures. TextFlow's standalone touch handling selects on
         // finger-down and shows a native copy toolbar, conflicting with scroll
         // and our highlight menu. Inline widgets must still receive ordinary taps.
-        let list = self.view.portal_list(cx, ids!(list));
+        let list = self.view.reader_list(cx, ids!(list));
         let list_selectable = list
             .borrow_mut()
             .map(|mut inner| std::mem::replace(&mut inner.selectable, false));
@@ -11443,7 +11561,7 @@ impl ChapterList {
         }
         if selecting_touch {
             // Deliver long-press/release for capture cleanup (including RubyWord
-            // and PortalList), without opening word cards or activating links.
+            // and ReaderList), without opening word cards or activating links.
             let _ = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
         } else {
             self.view.handle_event(cx, event, scope);
@@ -11553,7 +11671,7 @@ impl ChapterList {
     fn draw_reader_paragraph(
         &mut self,
         cx: &mut Cx2d,
-        list: &mut PortalList,
+        list: &mut ReaderList,
         item_id: usize,
         cache_id: usize,
         para: &str,
@@ -11638,15 +11756,11 @@ impl ChapterList {
 
         // Adapt only the display HTML: list/block IDs and stored
         // selection/highlight offsets still use the original para.
-        let with_inline_code = code_text.is_none().then(|| {
-            crate::reader_inline_code::wrap_html(&crate::reader_paragraph::display_html(
-                &crate::reader_lists::normalize_html(para),
-                *READER_INDENT_PARAGRAPHS.read().unwrap(),
-            ))
+        let prepared = code_text.is_none().then(|| {
+            self.paragraph_cache
+                .get(item_id, para, *READER_INDENT_PARAGRAPHS.read().unwrap())
         });
-        let tracked = with_inline_code
-            .as_deref()
-            .and_then(crate::reader_hit::tracked_html);
+        let tracked = prepared.as_ref().is_some_and(|p| p.tracked);
         let has_gloss = para.contains("<ruby");
         let is_table = is_table_block(para);
         let template = if code_text.is_some() {
@@ -11667,7 +11781,7 @@ impl ChapterList {
             if let Some(mut view) = item.borrow_mut::<View>() {
                 // Source-only diagram labels keep their native text buffer,
                 // but must not accumulate padding/list gaps into blank pages.
-                // Reset both properties when the PortalList slot is reused.
+                // Reset both properties when the ReaderList slot is reused.
                 view.walk.height = if figure_source {
                     Size::Fixed(0.)
                 } else {
@@ -11680,7 +11794,10 @@ impl ChapterList {
             .item_layout_widths
             .get(&(chapter_idx, item_id))
             .copied();
-        let source_text = readwise_core::vocab::annotate::rendered_text(para);
+        let source_text = prepared
+            .as_ref()
+            .map(|p| p.text.clone())
+            .unwrap_or_else(|| readwise_core::vocab::annotate::rendered_text(para));
         let source_len = source_text.len();
         let current_range =
             selection_range.and_then(|range| selection_range_in_block(range, item_id, source_len));
@@ -11733,7 +11850,7 @@ impl ChapterList {
             let code_view = item.widget(cx, ids!(code_view));
             if code_view.text() != code_text {
                 code_view.set_text(cx, code_text);
-                // Paged reading reuses PortalList slots. A code container's
+                // Paged reading reuses ReaderList slots. A code container's
                 // DrawList can still hold the previous block at this slot.
                 // Invalidate it for the next frame, then draw without that
                 // cache now so the first frame's measured height is correct.
@@ -11745,10 +11862,7 @@ impl ChapterList {
             }
         } else {
             let html = item.widget(cx, ids!(para_html));
-            let display_html = tracked
-                .as_deref()
-                .or(with_inline_code.as_deref())
-                .unwrap_or(para);
+            let display_html = prepared.as_ref().map_or(para, |p| p.html.as_str());
             if let Some(mut inner) = html.borrow_mut::<Html>() {
                 if inner.body.as_ref() != display_html {
                     // Html assigns anonymous custom tags (`mark`, `ruby`,
@@ -11900,7 +12014,7 @@ impl ChapterList {
                     .retain(|key, _| key.chapter != chapter_idx || key.block != item_id);
             }
         }
-        let painted_selection = if tracked.is_some() {
+        let painted_selection = if tracked {
             native_probe.and_then(|(start, end)| {
                 let rects = crate::reader_hit::selection_rects(&runs, start, end);
                 (!rects.is_empty()).then_some(rects)
@@ -11909,7 +12023,7 @@ impl ChapterList {
             None
         };
         let used_painted_selection = painted_selection.is_some();
-        if tracked.is_some() {
+        if tracked {
             self.hit_runs
                 .insert(item.widget_uid(), (item_id, reader_source_hash(para), runs));
         } else {
@@ -11991,7 +12105,7 @@ impl ChapterList {
                             .insert(key, rects_relative_to(&normalized, item_rect.pos));
                     }
                 } else if mapping_stable || self.text_map(item_id, para).is_some() {
-                    // The PortalList item was still transitioning from the
+                    // The ReaderList item was still transitioning from the
                     // old window width. Never poison the new-width cache with
                     // this frame; request one stable redraw instead.
                     needs_geometry_redraw = true;
@@ -12003,7 +12117,7 @@ impl ChapterList {
         // TextFlow's single probe. Capture ALL missing marks in this draw;
         // scheduling one redraw per mark can stop after the first cached row
         // when the parent draw-list is reused (notably after partial recolour).
-        if !measure && tracked.is_some() && mapping_stable && width_stable {
+        if !measure && tracked && mapping_stable && width_stable {
             if let Some((_, _, runs)) = self.hit_runs.get(&item.widget_uid()) {
                 for (range, key, _) in &highlight_entries {
                     if self.range_geometry_cache.contains_key(key) {
@@ -12032,7 +12146,7 @@ impl ChapterList {
         if !measure {
             // Permanent highlights and the current selection are drawn from
             // exactly the same captured rich-text geometry. Translate cached
-            // item-relative rectangles so PortalList scrolling cannot stale it.
+            // item-relative rectangles so ReaderList scrolling cannot stale it.
             let mut paint = Vec::new();
             for (_, key, color) in &highlight_entries {
                 if let Some(rects) = self.range_geometry_cache.get(key).cloned() {
@@ -12161,13 +12275,10 @@ impl Widget for ChapterList {
         }
         let mode = *READER_TURN_MODE.read().unwrap();
         if self.turn_mode != mode {
-            self.scroll_indicator = Default::default();
-            self.scroll_indicator_frame = NextFrame::default();
-            self.scroll_indicator_position = None;
             self.page_turn.cancel();
             self.pager.pending_turn = None;
             if self.turn_mode.is_paged() != mode.is_paged() {
-                let list = self.view.portal_list(cx, ids!(list));
+                let list = self.view.reader_list(cx, ids!(list));
                 self.pager.requested_source =
                     self.source_anchor(list.first_id(), list.scroll_position());
             }
@@ -12223,23 +12334,6 @@ impl Widget for ChapterList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.scroll_indicator_frame.is_event(event).is_some() {
-            // Update just the overlay instance. Fading must not re-layout text
-            // or repeatedly rebuild paragraph widgets after scrolling stops.
-            let opacity = self.scroll_indicator.opacity(cx.seconds_since_app_start());
-            self.draw_scroll_indicator.color.w = opacity * 0.45;
-            let color = self.draw_scroll_indicator.color;
-            self.draw_scroll_indicator.draw_vars.set_instance_on_area(
-                cx,
-                id!(color),
-                &[color.x, color.y, color.z, color.w],
-            );
-            self.scroll_indicator_frame = if opacity > 0.0 {
-                cx.new_next_frame()
-            } else {
-                NextFrame::default()
-            };
-        }
         if self.reader_tap_timer.is_event(event).is_some() {
             self.reader_tap_timer = Timer::empty();
             let context = (
@@ -12319,6 +12413,12 @@ impl Widget for ChapterList {
             }
             return;
         }
+        if !self.pager.active && self.scrollbar_pointer.track(event, self.reader_rect(cx)) {
+            self.cancel_reader_tap(cx);
+            self.reset_selection_gesture();
+            self.handle_child_event(cx, event, scope, false);
+            return;
+        }
         let mut tap_outcome = self.word_tap.track(event, self.reader_rect(cx));
         if self.word_tap.second_press() {
             // Hold the second press locally; never open the first tap's card.
@@ -12353,7 +12453,7 @@ impl Widget for ChapterList {
                         e.handled_y.set(true);
                         return;
                     }
-                    let list = self.view.portal_list(cx, ids!(list));
+                    let list = self.view.reader_list(cx, ids!(list));
                     let down = e.scroll.y > 0.0;
                     let boundary = if down {
                         list.is_at_end()
@@ -12413,7 +12513,7 @@ impl Widget for ChapterList {
                     && touch.state == TouchState::Stop
             }));
             self.track_selection(cx, event);
-            // Let PortalList observe the final release so its pre-long-press drag
+            // Let ReaderList observe the final release so its pre-long-press drag
             // state cannot leak into the next gesture. Selection moves stay local.
             if released {
                 self.handle_child_event(cx, event, scope, true);
@@ -12436,7 +12536,7 @@ impl Widget for ChapterList {
             }
         }
         let actions = cx.capture_actions(|cx| self.handle_child_event(cx, event, scope, false));
-        let list = self.view.portal_list(cx, ids!(list));
+        let list = self.view.reader_list(cx, ids!(list));
         if !self.pager.active && (list.was_scrolling() || list.scrolled(&actions)) {
             // A finger that stops inertia is not the first half of a double tap.
             self.cancel_reader_tap(cx);
@@ -13986,6 +14086,7 @@ impl App {
                     |path| {
                         let db = DB.get().ok_or("Library is not ready")?;
                         let book = db.import_book(path)?;
+                        crate::reader_math::prepare_import(db, &book.id, &book.file_path);
                         match refresh_shelf(db) {
                             Ok(items) => Cx::post_action(ShelfAction::Loaded {
                                 items,
@@ -14822,25 +14923,27 @@ impl App {
     }
 
     fn apply_navigation_palette(&self, cx: &mut Cx, page: AppPage) {
+        let mut controls = AppUiIndex::default();
+        controls.begin_projection(&self.ui);
         let theme = *READER_THEME.read().unwrap();
         let palette = navigation_palette_for_page(page, *READER_BACKGROUND.read().unwrap(), theme);
 
         for id in [id!(sidebar), id!(mobile_safe_top), id!(mobile_nav)] {
             apply_reader_surface_palette(
                 cx,
-                self.ui.widget(cx, &[id]),
+                controls.widget(cx, &[id]),
                 palette.surface,
                 palette.border,
             );
         }
         apply_reader_surface_palette(
             cx,
-            self.ui.widget(cx, ids!(main_window.caption_bar)),
+            controls.widget(cx, ids!(main_window.caption_bar)),
             palette.surface,
             palette.surface,
         );
-        apply_reader_label_palette(cx, self.ui.widget(cx, ids!(app_title)), palette.text);
-        apply_reader_label_palette(cx, self.ui.widget(cx, ids!(db_status)), palette.muted);
+        apply_reader_label_palette(cx, controls.widget(cx, ids!(app_title)), palette.text);
+        apply_reader_label_palette(cx, controls.widget(cx, ids!(db_status)), palette.muted);
         for id in [
             id!(nav_library),
             id!(nav_reader),
@@ -14859,7 +14962,7 @@ impl App {
             // animate back to normal when the next button takes focus.
             apply_reader_button_palette_with_focus(
                 cx,
-                self.ui.widget(cx, &[id]),
+                controls.widget(cx, &[id]),
                 palette,
                 palette.field,
             );
@@ -14889,13 +14992,13 @@ impl App {
             } else {
                 palette.muted
             };
-            let mut tab = self.ui.widget(cx, &[id]);
+            let mut tab = controls.widget(cx, &[id]);
             script_apply_eval!(cx, tab, {draw_text +: {color: #(color) color_hover: #(color) color_focus: #(color) color_down: #(color)}});
             apply_reader_icon_palette(cx, tab.clone(), color);
             apply_flat_entry_background(cx, tab, palette);
         }
-        self.ui.widget(cx, ids!(sidebar)).redraw(cx);
-        self.ui.widget(cx, ids!(mobile_nav)).redraw(cx);
+        controls.widget(cx, ids!(sidebar)).redraw(cx);
+        controls.widget(cx, ids!(mobile_nav)).redraw(cx);
     }
 
     fn sync_library_view_controls(&self, cx: &mut Cx, mode: LibraryViewMode) {
@@ -15122,8 +15225,63 @@ impl App {
         self.ui.widget(cx, ids!(library_action_layer)).redraw(cx);
     }
 
+    fn sync_reader_open_state(&self, cx: &mut Cx) {
+        let ready = requested_book_is_ready();
+        let requested = CURRENT_ITEM.read().unwrap();
+        let title = requested.as_ref().map(|item| format!("《{}》", item.title));
+        let message = requested.as_ref().filter(|_| !ready).map(|item| {
+            if let Some(error) = READER_OPEN_ERROR.read().unwrap().as_deref() {
+                if app_language() == AppLanguage::English {
+                    format!("Failed to open “{}”: {error}", item.title)
+                } else {
+                    format!("《{}》打开失败：{error}", item.title)
+                }
+            } else if app_language() == AppLanguage::English {
+                format!("Loading “{}”…", item.title)
+            } else {
+                format!("《{}》加载中…", item.title)
+            }
+        });
+        drop(requested);
+        self.ui
+            .widget(cx, ids!(chapter_list))
+            .set_visible(cx, ready);
+        self.ui
+            .widget(cx, ids!(reader_open_state))
+            .set_visible(cx, message.is_some());
+        self.ui
+            .widget(cx, ids!(reader_footer))
+            .set_visible(cx, ready && READER_TURN_MODE.read().unwrap().is_paged());
+        if let Some(title) = title {
+            self.set_reader_title_text(cx, &title);
+        }
+        if let Some(message) = message {
+            self.ui
+                .label(cx, ids!(reader_open_message))
+                .set_text(cx, &message);
+        }
+        self.ui.widget(cx, ids!(reader_surface)).redraw(cx);
+    }
+
     fn open_book_for_reading(&mut self, cx: &mut Cx, book: ShelfItem) {
+        // Capture the old book's logical position before retiring its identity
+        // and widgets; a loading/error surface must never save a fake location.
+        self.stop_reading_timer(cx, false);
+        self.clear_reader_selection(cx);
+        self.close_word_card(cx);
+        self.close_note_composer(cx);
+        self.reader_swipe.cancel();
         self.close_library_action_menu(cx);
+        let request_id = begin_open_book_request(book.clone());
+        let chapter_list = self.ui.widget(cx, ids!(chapter_list));
+        if let Some(mut reader) = chapter_list.borrow_mut::<ChapterList>() {
+            reader.reset_for_book_open(cx);
+        }
+        self.chapter_idx = 0;
+        self.reader_page_span = 0;
+        self.reader_footer_signature = 0;
+        self.reader_pagination_content_key = 0;
+        self.pending_reader_pagination_layout = false;
         self.toc_open = false;
         self.note_open = false;
         self.reader_ai_open = false;
@@ -15142,17 +15300,10 @@ impl App {
             .shelf_list(cx, ids!(list))
             .set_first_id_and_scroll(0, 0.0);
         self.replace_notes(cx, Vec::new());
-        self.set_reader_title_text(
-            cx,
-            &if app_language() == AppLanguage::English {
-                format!("Loading “{}”…", book.title)
-            } else {
-                format!("《{}》加载中…", book.title)
-            },
-        );
+        self.sync_reader_open_state(cx);
         self.activate_page(cx, AppPage::Reader);
         self.sync_reader_panel_layout(cx);
-        spawn_open_book(book);
+        spawn_open_book(book, request_id);
     }
 
     fn open_library_rename_editor(&mut self, cx: &mut Cx, book: &ShelfItem) {
@@ -16137,6 +16288,22 @@ impl ReaderControls<'_> {
 
     fn apply_reader_background(&self, cx: &mut Cx, background: ReaderBackground) {
         let palette = reader_scene_palette(background, *READER_THEME.read().unwrap());
+        let reader = self.ui.widget(cx, ids!(chapter_list));
+        let list = reader
+            .borrow::<ChapterList>()
+            .map(|reader| reader.view.widget(cx, ids!(list)));
+        if let Some(list) = list {
+            apply_widget_paint(
+                cx,
+                list,
+                &[
+                    (ids!(scroll_bar.draw_bg.color), palette.muted),
+                    (ids!(scroll_bar.draw_bg.color_hover), palette.text),
+                    (ids!(scroll_bar.draw_bg.color_drag), palette.text),
+                ],
+                &[],
+            );
+        }
         for id in [
             id!(library_tag_filter),
             id!(library_view_list),
@@ -16453,6 +16620,7 @@ impl ReaderControls<'_> {
             id!(chapter_pos),
             id!(page_text),
             id!(reader_pages_left),
+            id!(reader_open_message),
             id!(toc_loading),
             id!(note_hint),
             id!(note_empty_hint),
@@ -17150,6 +17318,7 @@ impl App {
         );
         self.apply_reader_settings(cx, current_reader_settings());
         self.sync_reader_panel_layout(cx);
+        self.sync_reader_open_state(cx);
         if self.on_reader_page {
             let title = CURRENT_BOOK
                 .read()
@@ -17238,7 +17407,7 @@ impl App {
                             let list = self
                                 .ui
                                 .widget(cx, ids!(chapter_list))
-                                .portal_list(cx, ids!(list));
+                                .reader_list(cx, ids!(list));
                             self.reader_swipe.vertical = true;
                             self.reader_swipe.allow_next = list.is_at_end();
                             self.reader_swipe.allow_previous =
@@ -17672,6 +17841,8 @@ impl App {
     }
 
     fn apply_statistics(&self, cx: &mut Cx, snapshot: &StatisticsSnapshot) {
+        let mut controls = AppUiIndex::default();
+        controls.begin_projection(&self.ui);
         let english = app_language() == AppLanguage::English;
         for (id, text) in [
             (
@@ -17719,22 +17890,22 @@ impl App {
                 Self::format_reading_duration(snapshot.total_reading_seconds),
             ),
         ] {
-            self.ui
+            controls
                 .widget(cx, &[id])
                 .label(cx, ids!(metric_description))
                 .set_text(cx, &text);
         }
-        self.ui.label(cx, ids!(profile_status)).set_text(cx, "");
-        self.ui.widget(cx, ids!(page_profile)).redraw(cx);
-        self.ui.label(cx, ids!(stat_today)).set_text(
+        controls.label(cx, ids!(profile_status)).set_text(cx, "");
+        controls.widget(cx, ids!(page_profile)).redraw(cx);
+        controls.label(cx, ids!(stat_today)).set_text(
             cx,
             &Self::format_reading_duration(snapshot.today_reading_seconds),
         );
-        self.ui.label(cx, ids!(stat_total)).set_text(
+        controls.label(cx, ids!(stat_total)).set_text(
             cx,
             &Self::format_reading_duration(snapshot.total_reading_seconds),
         );
-        self.ui.label(cx, ids!(stat_days)).set_text(
+        controls.label(cx, ids!(stat_days)).set_text(
             cx,
             &if english {
                 format!("{} days", snapshot.active_days)
@@ -17742,7 +17913,7 @@ impl App {
                 format!("{} 天", snapshot.active_days)
             },
         );
-        self.ui.label(cx, ids!(stat_books)).set_text(
+        controls.label(cx, ids!(stat_books)).set_text(
             cx,
             &format!("{} / {}", snapshot.completed_books, snapshot.total_books),
         );
@@ -17752,8 +17923,7 @@ impl App {
             .iter()
             .map(|day| day.duration_seconds as f64 / 60.0)
             .collect::<Vec<_>>();
-        if let Some(mut chart) = self
-            .ui
+        if let Some(mut chart) = controls
             .widget(cx, ids!(reading_chart))
             .borrow_mut::<StatsBars>()
         {
@@ -17778,7 +17948,7 @@ impl App {
         } else {
             format!("7 天合计 {total_duration} · 单日最高 {peak_duration}")
         };
-        self.ui
+        controls
             .label(cx, ids!(reading_chart_hint))
             .set_text(cx, &reading_hint);
         for (index, day) in snapshot.daily_reading.iter().enumerate() {
@@ -17796,11 +17966,10 @@ impl App {
                 5 => ids!(stat_day_5),
                 _ => ids!(stat_day_6),
             };
-            self.ui.label(cx, id).set_text(cx, &label);
+            controls.label(cx, id).set_text(cx, &label);
         }
 
-        if let Some(mut chart) = self
-            .ui
+        if let Some(mut chart) = controls
             .widget(cx, ids!(vocab_chart))
             .borrow_mut::<StatsBars>()
         {
@@ -17830,10 +17999,10 @@ impl App {
                 snapshot.total_reviews
             )
         };
-        self.ui
+        controls
             .label(cx, ids!(vocab_chart_hint))
             .set_text(cx, &vocab_hint);
-        self.ui.label(cx, ids!(statistics_status)).set_text(
+        controls.label(cx, ids!(statistics_status)).set_text(
             cx,
             if english {
                 "Statistics updated"
@@ -17841,7 +18010,7 @@ impl App {
                 "统计已更新"
             },
         );
-        self.ui.widget(cx, ids!(page_statistics)).redraw(cx);
+        controls.widget(cx, ids!(page_statistics)).redraw(cx);
     }
 
     fn text_input_has_focus(&self, cx: &Cx) -> bool {
@@ -18829,7 +18998,7 @@ impl App {
         let list = self
             .ui
             .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list));
+            .reader_list(cx, ids!(list));
         if !list.scrolled(actions) {
             return;
         }
@@ -18991,7 +19160,7 @@ impl App {
         ui.label(cx, ids!(chapter_pos))
             .set_text(cx, &format!("{}/{}", idx + 1, total));
         chapter_list
-            .portal_list(cx, ids!(list))
+            .reader_list(cx, ids!(list))
             .set_first_id_and_scroll(restored_block, restored_scroll);
         if persist {
             spawn_save_progress(ReaderProgressSnapshot {
@@ -19091,7 +19260,7 @@ impl App {
         let visible = self
             .ui
             .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list))
+            .reader_list(cx, ids!(list))
             .visible_items();
         if visible == 0 {
             return;
@@ -19149,7 +19318,7 @@ impl App {
         let list = self
             .ui
             .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list));
+            .reader_list(cx, ids!(list));
         let first = list.first_id();
         let scroll = list.scroll_position();
         let distance = (list.area().rect(cx).size.y * 0.85).max(1.0);
@@ -19177,7 +19346,8 @@ impl App {
     /// Overlay controls own navigation until dismissed; background page turns
     /// must not close a card or silently change the text behind a popover.
     fn reader_page_navigation_blocked(&self, cx: &Cx) -> bool {
-        self.word_card_anchor.is_some()
+        !requested_book_is_ready()
+            || self.word_card_anchor.is_some()
             || self.toc_open
             || self.bookmarks_open
             || self.note_open
@@ -19224,7 +19394,7 @@ impl App {
                 }
                 self.ui
                     .widget(cx, ids!(chapter_list))
-                    .portal_list(cx, ids!(list))
+                    .reader_list(cx, ids!(list))
                     .set_first_id_and_scroll(0, 0.0);
                 self.ui.redraw(cx);
                 self.update_progress_label(cx);
@@ -19658,6 +19828,8 @@ impl App {
     }
 
     fn reset_selection_action_hover(&self, cx: &mut Cx) {
+        let mut controls = AppUiIndex::default();
+        controls.begin_projection(&self.ui);
         for path in [
             ids!(selection_more_define.hit),
             ids!(selection_more_fact.hit),
@@ -19665,7 +19837,7 @@ impl App {
             ids!(selection_more_counter.hit),
             ids!(selection_more_quote.hit),
         ] {
-            self.ui.button(cx, path).reset_hover(cx);
+            controls.button(cx, path).reset_hover(cx);
         }
         for id in [
             id!(explain_sel_btn),
@@ -19683,16 +19855,18 @@ impl App {
             id!(sel_pink),
             id!(remove_hl_sel_btn),
         ] {
-            self.ui.button(cx, &[id]).reset_hover(cx);
+            controls.button(cx, &[id]).reset_hover(cx);
         }
-        self.ui.button(cx, ids!(copy_sel_btn)).reset_hover(cx);
-        self.ui.button(cx, ids!(note_from_sel_btn)).reset_hover(cx);
-        self.ui.button(cx, ids!(vocab_from_sel_btn)).reset_hover(cx);
-        self.ui.button(cx, ids!(translate_sel_btn)).reset_hover(cx);
-        self.ui.button(cx, ids!(ask_ai_sel_btn)).reset_hover(cx);
-        self.ui.button(cx, ids!(speak_sel_btn)).reset_hover(cx);
-        self.ui.button(cx, ids!(hl_btn)).reset_hover(cx);
-        self.ui.button(cx, ids!(sel_close_btn)).reset_hover(cx);
+        controls.button(cx, ids!(copy_sel_btn)).reset_hover(cx);
+        controls.button(cx, ids!(note_from_sel_btn)).reset_hover(cx);
+        controls
+            .button(cx, ids!(vocab_from_sel_btn))
+            .reset_hover(cx);
+        controls.button(cx, ids!(translate_sel_btn)).reset_hover(cx);
+        controls.button(cx, ids!(ask_ai_sel_btn)).reset_hover(cx);
+        controls.button(cx, ids!(speak_sel_btn)).reset_hover(cx);
+        controls.button(cx, ids!(hl_btn)).reset_hover(cx);
+        controls.button(cx, ids!(sel_close_btn)).reset_hover(cx);
     }
 
     fn set_selection_hint(&mut self, cx: &mut Cx, text: &str) {
@@ -20017,6 +20191,8 @@ impl App {
     }
 
     fn clear_reader_selection(&mut self, cx: &mut Cx) {
+        let mut controls = AppUiIndex::default();
+        controls.begin_projection(&self.ui);
         *SEL_RANGE.write().unwrap() = None;
         SELECTED_TEXT.write().unwrap().clear();
         SELECTION_POPUP_POINTER.store(false, Ordering::Relaxed);
@@ -20026,24 +20202,23 @@ impl App {
         self.selection_ai_focus_pending = false;
         self.selection_more_open = false;
         self.selection_ai_draft.clear();
-        if self
-            .ui
+        if controls
             .text_input(cx, ids!(selection_ai_input))
             .key_focus(cx)
         {
             cx.set_key_focus(Area::Empty);
         }
-        self.ui
+        controls
             .widget(cx, ids!(selection_ai_input))
             .set_text(cx, "");
         self.reset_selection_action_hover(cx);
-        self.ui.widget(cx, ids!(sel_bar)).set_visible(cx, false);
-        let chapter_list = self.ui.widget(cx, ids!(chapter_list));
+        controls.widget(cx, ids!(sel_bar)).set_visible(cx, false);
+        let chapter_list = controls.widget(cx, ids!(chapter_list));
         if let Some(mut inner) = chapter_list.borrow_mut::<ChapterList>() {
             inner.cancel_reader_tap(cx);
             inner.reset_selection_gesture();
         }
-        let list = chapter_list.portal_list(cx, ids!(list));
+        let list = chapter_list.reader_list(cx, ids!(list));
         if let Some(mut inner) = list.borrow_mut() {
             inner.clear_selection(cx);
         };
@@ -20228,10 +20403,12 @@ impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         crate::reader_word::warm_up();
         self.app_in_foreground = true;
-        let has_current_book = CURRENT_BOOK.read().unwrap().is_some();
+        let has_current_book = requested_book_is_ready();
+        let has_reader_context = CURRENT_ITEM.read().unwrap().is_some();
         let page =
-            restored_page_after_rebuild(ACTIVE_PAGE.load(Ordering::Relaxed), has_current_book);
+            restored_page_after_rebuild(ACTIVE_PAGE.load(Ordering::Relaxed), has_reader_context);
         self.activate_page(cx, page);
+        self.sync_reader_open_state(cx);
         self.refresh_shelf_projection(cx);
         if has_current_book {
             self.restore_reader_after_rebuild(cx);
@@ -21334,21 +21511,33 @@ impl MatchEvent for App {
             if let Some(reader) = action.downcast_ref::<ReaderAction>() {
                 match reader {
                     ReaderAction::Opened {
-                        request_id,
                         resume,
                         bookmarks,
                         gloss_count,
                         parse_ms,
+                        prepare_ms,
                         initial_gloss_ms,
+                        ..
                     } => {
-                        if *request_id != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire)
-                            || !requested_book_is_ready()
-                        {
+                        let requested_id = CURRENT_ITEM
+                            .read()
+                            .unwrap()
+                            .as_ref()
+                            .map(|item| item.id.clone());
+                        let Some(mut book) = reader.take_opened_book(
+                            OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire),
+                            requested_id.as_deref(),
+                        ) else {
                             continue;
-                        }
+                        };
+                        // Settings may have changed while the worker was busy.
+                        book.set_english_level(*ENGLISH_LEVEL.read().unwrap());
+                        *CURRENT_BOOK.write().unwrap() = Some(book);
+                        *READER_OPEN_ERROR.write().unwrap() = None;
                         ::log::info!(
-                            "Opened book: parse={}ms, initial chapter gloss={}ms, lazy remaining chapters",
+                            "Opened book: core={}ms, prepared={}ms, initial chapter gloss={}ms, lazy remaining chapters",
                             parse_ms,
+                            prepare_ms,
                             initial_gloss_ms
                         );
                         *READER_BOOKMARKS.write().unwrap() = bookmarks.clone();
@@ -21362,6 +21551,7 @@ impl MatchEvent for App {
                             self.refresh_reader_highlights(cx);
                         }
                         self.set_chapter_at(cx, resume.chapter, resume.block, resume.scroll, false);
+                        self.sync_reader_open_state(cx);
                         if let Some(mut reader) = self
                             .ui
                             .widget(cx, ids!(chapter_list))
@@ -21391,14 +21581,8 @@ impl MatchEvent for App {
                         if *request_id != OPEN_BOOK_REQUEST_ID.load(Ordering::Acquire) {
                             continue;
                         }
-                        self.set_reader_title_text(
-                            cx,
-                            &if app_language() == AppLanguage::English {
-                                format!("Failed to open: {error}")
-                            } else {
-                                format!("打开失败: {error}")
-                            },
-                        );
+                        *READER_OPEN_ERROR.write().unwrap() = Some(error.clone());
+                        self.sync_reader_open_state(cx);
                     }
                 }
                 continue;
@@ -21803,70 +21987,66 @@ impl MatchEvent for App {
                 self.ui.widget(cx, ids!(word_card_layer)).redraw(cx);
             }
         }
-        if let Some(index) = self
-            .ui
+        if !app_actions_have_widgets(actions) {
+            return;
+        }
+        // One projection-local walk, including negative lookups. Never retain
+        // paragraph handles or this index across events / script reapplication.
+        let mut controls = AppUiIndex::default();
+        controls.begin_projection(&self.ui);
+        if let Some(index) = controls
             .drop_down(cx, ids!(library_tag_filter))
             .selected(actions)
         {
             self.set_library_tag_filter(cx, index);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_tag_cancel))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .modal(cx, ids!(library_tag_modal))
                 .dismissed(actions)
         {
             self.editing_book_tags_id = None;
-            self.ui.modal(cx, ids!(library_tag_modal)).close(cx);
+            controls.modal(cx, ids!(library_tag_modal)).close(cx);
         }
-        if self.ui.button(cx, ids!(library_tag_save)).clicked(actions)
-            || self
-                .ui
+        if controls.button(cx, ids!(library_tag_save)).clicked(actions)
+            || controls
                 .text_input(cx, ids!(library_tag_input))
                 .returned(actions)
                 .is_some()
         {
             self.save_library_tag_editor(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_delete_cancel))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .modal(cx, ids!(library_delete_modal))
                 .dismissed(actions)
         {
             self.cancel_delete_book_confirmation(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_delete_confirm))
             .clicked(actions)
         {
             self.confirm_delete_book(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_rename_cancel))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .modal(cx, ids!(library_rename_modal))
                 .dismissed(actions)
         {
             self.editing_book_title_id = None;
-            self.ui.modal(cx, ids!(library_rename_modal)).close(cx);
+            controls.modal(cx, ids!(library_rename_modal)).close(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_rename_save))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .text_input(cx, ids!(library_rename_input))
                 .returned(actions)
                 .is_some()
@@ -21874,8 +22054,7 @@ impl MatchEvent for App {
             self.save_library_rename(cx);
         }
 
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_share_book))
             .clicked(actions)
         {
@@ -21887,7 +22066,7 @@ impl MatchEvent for App {
                 };
                 cx.copy_to_clipboard(&shared);
                 self.close_library_action_menu(cx);
-                self.ui.label(cx, ids!(library_hint)).set_text(
+                controls.label(cx, ids!(library_hint)).set_text(
                     cx,
                     localized(
                         "书籍信息已复制，可粘贴到其他应用分享",
@@ -21896,22 +22075,20 @@ impl MatchEvent for App {
                 );
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_want_to_read))
             .clicked(actions)
         {
             if let Some(book) = self.library_action_book() {
                 let enabled = !book.want_to_read;
                 self.close_library_action_menu(cx);
-                self.ui
+                controls
                     .label(cx, ids!(library_hint))
                     .set_text(cx, localized("正在更新欲读清单…", "Updating Want to Read…"));
                 spawn_set_book_want_to_read(book.id, enabled);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_add_collection))
             .clicked(actions)
         {
@@ -21919,21 +22096,19 @@ impl MatchEvent for App {
                 self.open_library_tag_editor(cx, &book);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_mark_finished))
             .clicked(actions)
         {
             if let Some(book) = self.library_action_book() {
                 self.close_library_action_menu(cx);
-                self.ui
+                controls
                     .label(cx, ids!(library_hint))
                     .set_text(cx, localized("正在标记为已读完…", "Marking as finished…"));
                 spawn_mark_book_completed(book.id, book.title);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_rename_book))
             .clicked(actions)
         {
@@ -21941,8 +22116,7 @@ impl MatchEvent for App {
                 self.open_library_rename_editor(cx, &book);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_delete_book))
             .clicked(actions)
         {
@@ -21950,28 +22124,24 @@ impl MatchEvent for App {
                 self.open_delete_book_confirmation(cx, &book);
             }
         }
-        if self
-            .ui
+        if controls
             .view(cx, ids!(library_action_dismiss))
             .finger_up(actions)
             .is_some()
         {
             self.close_library_action_menu(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(image_viewer_close))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .modal(cx, ids!(reader_image_modal))
                 .dismissed(actions)
         {
-            self.ui.modal(cx, ids!(reader_image_modal)).close(cx);
+            controls.modal(cx, ids!(reader_image_modal)).close(cx);
         }
 
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .radio_button_set(cx, ids_array!(library_view_list, library_view_grid))
             .selected(cx, actions)
         {
@@ -21986,14 +22156,12 @@ impl MatchEvent for App {
         }
 
         let shelf_view_mode = *LIBRARY_VIEW_MODE.read().unwrap();
-        let grid_columns = self
-            .ui
+        let grid_columns = controls
             .widget(cx, ids!(book_shelf))
             .borrow::<BookShelf>()
             .map(|shelf| shelf.grid_columns())
             .unwrap_or_else(|| shelf_grid_columns_for_width(cx.display_context.screen_size.x));
-        let shelf_list = self
-            .ui
+        let shelf_list = controls
             .widget(cx, ids!(book_shelf))
             .shelf_list(cx, ids!(list));
         for (item_id, item) in shelf_list.items_with_actions(actions) {
@@ -22042,40 +22210,34 @@ impl MatchEvent for App {
                 }
             }
         }
-        if self.ui.button(cx, ids!(import_epub_btn)).clicked(actions) {
+        if controls.button(cx, ids!(import_epub_btn)).clicked(actions) {
             self.open_library_import_dialog(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_import_close))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .modal(cx, ids!(library_import_modal))
                 .dismissed(actions)
         {
             self.close_library_import_dialog(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_import_stop))
             .clicked(actions)
         {
             self.stop_lan_transfer(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_import_lan))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .button(cx, ids!(library_import_restart))
                 .clicked(actions)
         {
             self.start_lan_transfer(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_import_copy))
             .clicked(actions)
         {
@@ -22089,8 +22251,7 @@ impl MatchEvent for App {
                 self.sync_library_import_dialog(cx);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_import_background))
             .clicked(actions)
         {
@@ -22103,8 +22264,7 @@ impl MatchEvent for App {
                 self.sync_library_import_dialog(cx);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(library_import_local))
             .clicked(actions)
         {
@@ -22118,14 +22278,14 @@ impl MatchEvent for App {
             }
             #[cfg(target_os = "ios")]
             match crate::mobile_import::open_epub_picker() {
-                Ok(()) => self.ui.label(cx, ids!(library_hint)).set_text(
+                Ok(()) => controls.label(cx, ids!(library_hint)).set_text(
                     cx,
                     localized(
                         "请从“文件”中选择 EPUB / PDF…",
                         "Select EPUB / PDF files in Files…",
                     ),
                 ),
-                Err(error) => self.ui.label(cx, ids!(library_hint)).set_text(
+                Err(error) => controls.label(cx, ids!(library_hint)).set_text(
                     cx,
                     &if app_language() == AppLanguage::English {
                         format!("Could not open the file picker: {error}")
@@ -22136,14 +22296,14 @@ impl MatchEvent for App {
             }
             #[cfg(target_os = "android")]
             match crate::android_import::open_epub_picker() {
-                Ok(()) => self.ui.label(cx, ids!(library_hint)).set_text(
+                Ok(()) => controls.label(cx, ids!(library_hint)).set_text(
                     cx,
                     localized(
                         "请从系统文件选择器中选择 EPUB / PDF…",
                         "Select EPUB / PDF files in the system picker…",
                     ),
                 ),
-                Err(error) => self.ui.label(cx, ids!(library_hint)).set_text(
+                Err(error) => controls.label(cx, ids!(library_hint)).set_text(
                     cx,
                     &if app_language() == AppLanguage::English {
                         format!("Could not open the file picker: {error}")
@@ -22153,15 +22313,14 @@ impl MatchEvent for App {
                 ),
             }
         }
-        let skill_list = self
-            .ui
+        let skill_list = controls
             .widget(cx, ids!(skill_list))
             .portal_list(cx, ids!(list));
         for (item_id, item) in skill_list.items_with_actions(actions) {
             let skill = SKILLS.read().unwrap().entry_for_item_id(item_id).cloned();
             let Some(skill) = skill else { continue };
             if let Some(is_active) = item.check_box(cx, ids!(skill_active)).changed(actions) {
-                self.ui
+                controls
                     .label(cx, ids!(skills_status))
                     .set_text(cx, localized("正在更新技能状态…", "Updating skill status…"));
                 spawn_toggle_skill(skill.id.clone(), is_active);
@@ -22173,14 +22332,13 @@ impl MatchEvent for App {
                 self.edit_skill(cx, &skill);
             }
             if item.button(cx, ids!(skill_delete)).clicked(actions) && !skill.is_system {
-                self.ui
+                controls
                     .label(cx, ids!(skills_status))
                     .set_text(cx, localized("正在删除技能…", "Deleting skill…"));
                 spawn_delete_skill(skill.id.clone());
             }
         }
-        let vocab_list = self
-            .ui
+        let vocab_list = controls
             .widget(cx, ids!(vocab_list))
             .portal_list(cx, ids!(list));
         for (item_id, item) in vocab_list.items_with_actions(actions) {
@@ -22192,7 +22350,7 @@ impl MatchEvent for App {
             let Some(entry) = entry else { continue };
             if item.button(cx, ids!(vocab_speak)).clicked(actions) {
                 speak_text(entry.word.clone());
-                self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+                controls.label(cx, ids!(vocab_status_hint)).set_text(
                     cx,
                     &if app_language() == AppLanguage::English {
                         format!("Speaking {}…", entry.word)
@@ -22210,25 +22368,24 @@ impl MatchEvent for App {
                 } else {
                     "mastered"
                 };
-                self.ui.label(cx, ids!(vocab_status_hint)).set_text(
+                controls.label(cx, ids!(vocab_status_hint)).set_text(
                     cx,
                     localized("正在更新学习状态…", "Updating learning status…"),
                 );
                 spawn_set_vocab_status(entry.lemma.clone(), status);
             }
             if item.button(cx, ids!(vocab_remove)).clicked(actions) {
-                self.ui
+                controls
                     .label(cx, ids!(vocab_status_hint))
                     .set_text(cx, localized("正在移除生词…", "Removing word…"));
                 spawn_remove_vocab(entry.lemma.clone());
             }
         }
-        if self.ui.button(cx, ids!(nav_library)).clicked(actions)
-            || self
-                .ui
+        if controls.button(cx, ids!(nav_library)).clicked(actions)
+            || controls
                 .button(cx, ids!(mobile_nav_library))
                 .clicked(actions)
-            || self.ui.button(cx, ids!(reading_browse)).clicked(actions)
+            || controls.button(cx, ids!(reading_browse)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
@@ -22242,53 +22399,49 @@ impl MatchEvent for App {
                 self.pending_ui_projection_after_draw = true;
             }
         }
-        if self.ui.button(cx, ids!(reader_back_btn)).clicked(actions)
-            || self.ui.button(cx, ids!(titlebar_back_btn)).clicked(actions)
+        if controls.button(cx, ids!(reader_back_btn)).clicked(actions)
+            || controls
+                .button(cx, ids!(titlebar_back_btn))
+                .clicked(actions)
         {
             self.stop_reading_timer(cx, false);
             self.activate_page(cx, AppPage::Library);
             self.refresh_shelf_projection(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(reader_appearance_btn))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .button(cx, ids!(titlebar_appearance_btn))
                 .clicked(actions)
         {
             self.close_reader_info_popup(cx);
             self.open_reader_customise(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(reader_bookmark_btn))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .button(cx, ids!(reader_bookmark_filled_btn))
                 .clicked(actions)
-            || self
-                .ui
+            || controls
                 .button(cx, ids!(titlebar_bookmark_btn))
                 .clicked(actions)
-            || self
-                .ui
+            || controls
                 .button(cx, ids!(titlebar_bookmark_filled_btn))
                 .clicked(actions)
         {
             self.toggle_reader_bookmark(cx);
         }
         for (id, background) in crate::reader_settings_panel::theme_modes() {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if controls.button(cx, &[id]).clicked(actions) {
                 if let Some(draft) = self.reader_customise_draft.as_mut() {
                     draft.background = background;
                 }
             }
         }
         for tab in crate::reader_settings_panel::ReaderSettingsTab::ALL {
-            if self.ui.button(cx, &[tab.button()]).clicked(actions)
+            if controls.button(cx, &[tab.button()]).clicked(actions)
                 && self.reader_customise_draft.is_some()
                 && self.reader_customise_tab != tab
             {
@@ -22304,34 +22457,33 @@ impl MatchEvent for App {
         .into_iter()
         .zip(crate::settings_swatch::PEN_SLOTS)
         {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if controls.button(cx, &[id]).clicked(actions) {
                 if let Some(draft) = self.reader_customise_draft.as_mut() {
                     draft.selection_color_slot = slot;
                     self.sync_reader_customise_controls(cx);
                 }
             }
         }
-        if self.ui.modal(cx, ids!(reader_customise_modal)).dismissed(actions)
+        if controls.modal(cx, ids!(reader_customise_modal)).dismissed(actions)
             // The pinned Modal emits Dismissed on its content UID. Reconcile
             // native closure too, so overlay/Back/Escape dismissal cannot
             // leave a detached live projection and a locked reading surface.
             || (self.reader_customise_draft.is_some()
-                && !self.ui.modal(cx, ids!(reader_customise_modal)).is_open())
+                && !controls.modal(cx, ids!(reader_customise_modal)).is_open())
         {
             self.close_reader_customise(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(reader_customise_font_choice))
             .clicked(actions)
             && self.reader_customise_font_tap.allows_click()
             && self.reader_customise_draft.is_some()
         {
             self.reader_customise_open_dropdown = Some(id!(reader_customise_font_choice));
-            self.ui
+            controls
                 .widget(cx, ids!(reader_customise_font_menu))
                 .set_visible(cx, true);
-            self.ui
+            controls
                 .widget(cx, ids!(reader_customise_font_scroll))
                 .set_scroll_pos(cx, DVec2::default());
             self.sync_reader_customise_anchor(cx);
@@ -22340,7 +22492,7 @@ impl MatchEvent for App {
             .into_iter()
             .zip(ReaderFont::ALL)
         {
-            if self.ui.button(cx, &[id]).clicked(actions)
+            if controls.button(cx, &[id]).clicked(actions)
                 && self.reader_customise_font_tap.allows_click()
                 && self.reader_customise_open_dropdown == Some(id!(reader_customise_font_choice))
             {
@@ -22362,7 +22514,7 @@ impl MatchEvent for App {
         .into_iter()
         .zip(crate::mark_span::MARKER_SLOTS)
         {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if controls.button(cx, &[id]).clicked(actions) {
                 if let Some(draft) = self.reader_customise_draft.as_mut() {
                     draft.highlight_color_slot = slot;
                     highlight_changed = true;
@@ -22375,8 +22527,7 @@ impl MatchEvent for App {
             }
         }
         let mut gloss_preview_changed = false;
-        if let Some(enabled) = self
-            .ui
+        if let Some(enabled) = controls
             .check_box(cx, ids!(reader_customise_gloss_enable))
             .changed(actions)
         {
@@ -22391,7 +22542,7 @@ impl MatchEvent for App {
             (id!(reader_customise_gloss_color_orange), 2),
             (id!(reader_customise_gloss_color_gray), 3),
         ] {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if controls.button(cx, &[id]).clicked(actions) {
                 if let Some(draft) = self.reader_customise_draft.as_mut() {
                     draft.gloss_color_slot = slot;
                     gloss_preview_changed = true;
@@ -22404,7 +22555,7 @@ impl MatchEvent for App {
             (id!(reader_customise_gloss_bg_green), 2),
             (id!(reader_customise_gloss_bg_blue), 3),
         ] {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if controls.button(cx, &[id]).clicked(actions) {
                 if let Some(draft) = self.reader_customise_draft.as_mut() {
                     draft.gloss_background_slot = slot;
                     gloss_preview_changed = true;
@@ -22417,7 +22568,7 @@ impl MatchEvent for App {
             (id!(reader_customise_word_color_blue), 2),
             (id!(reader_customise_word_color_orange), 3),
         ] {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if controls.button(cx, &[id]).clicked(actions) {
                 if let Some(draft) = self.reader_customise_draft.as_mut() {
                     draft.word_color_slot = slot;
                     gloss_preview_changed = true;
@@ -22430,7 +22581,7 @@ impl MatchEvent for App {
             (id!(reader_customise_word_bg_green), 2),
             (id!(reader_customise_word_bg_blue), 3),
         ] {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if controls.button(cx, &[id]).clicked(actions) {
                 if let Some(draft) = self.reader_customise_draft.as_mut() {
                     draft.word_background_slot = slot;
                     gloss_preview_changed = true;
@@ -22440,12 +22591,10 @@ impl MatchEvent for App {
         if gloss_preview_changed {
             self.sync_reader_customise_controls(cx);
         }
-        let size_value = self
-            .ui
+        let size_value = controls
             .slider(cx, ids!(reader_customise_size_slider))
             .slided(actions);
-        let gloss_size_value = self
-            .ui
+        let gloss_size_value = controls
             .slider(cx, ids!(reader_customise_gloss_size_slider))
             .slided(actions);
         if let Some(draft) = self.reader_customise_draft.as_mut() {
@@ -22480,8 +22629,7 @@ impl MatchEvent for App {
                 self.sync_reader_customise_controls(cx);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(reader_customise_reset))
             .clicked(actions)
         {
@@ -22511,8 +22659,7 @@ impl MatchEvent for App {
             }
         }
         if self.reader_customise_tab == ReaderSettingsTab::Annotations
-            && self
-                .ui
+            && controls
                 .button(cx, ids!(reader_customise_annotations_reset))
                 .clicked(actions)
         {
@@ -22523,7 +22670,7 @@ impl MatchEvent for App {
         }
         self.handle_reader_text_actions(cx, actions);
         self.apply_reader_customise_live(cx);
-        if self.ui.button(cx, ids!(nav_reader)).clicked(actions) {
+        if controls.button(cx, ids!(nav_reader)).clicked(actions) {
             if let Some(book) = Self::reading_home_book() {
                 self.pending_last_read_open = false;
                 if CURRENT_BOOK
@@ -22542,10 +22689,13 @@ impl MatchEvent for App {
                 self.activate_page(cx, AppPage::ReadingHome);
             }
         }
-        if self.ui.button(cx, ids!(mobile_nav_reader)).clicked(actions) {
+        if controls
+            .button(cx, ids!(mobile_nav_reader))
+            .clicked(actions)
+        {
             self.activate_page(cx, AppPage::ReadingHome);
         }
-        if self.ui.button(cx, ids!(reading_continue)).clicked(actions) {
+        if controls.button(cx, ids!(reading_continue)).clicked(actions) {
             if let Some(book) = Self::reading_home_book() {
                 if CURRENT_BOOK
                     .read()
@@ -22563,11 +22713,10 @@ impl MatchEvent for App {
                 self.refresh_shelf_projection(cx);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(mobile_nav_profile))
             .clicked(actions)
-            || self.ui.button(cx, ids!(profile_back)).clicked(actions)
+            || controls.button(cx, ids!(profile_back)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, true);
@@ -22576,14 +22725,13 @@ impl MatchEvent for App {
             }
             self.activate_page(cx, AppPage::Profile);
         }
-        if self
-            .ui
+        if controls
             .widget(cx, ids!(profile_notes))
             .button(cx, ids!(metric_button))
             .clicked(actions)
         {
             self.activate_page(cx, AppPage::Notes);
-            self.ui
+            controls
                 .label(cx, ids!(all_notes_status))
                 .set_text(cx, localized("正在读取笔记…", "Loading notes…"));
             spawn_load_all_notes();
@@ -22592,8 +22740,7 @@ impl MatchEvent for App {
             (id!(profile_reading), READING_FILTER),
             (id!(profile_completed), COMPLETED_FILTER),
         ] {
-            if self
-                .ui
+            if controls
                 .widget(cx, &[id])
                 .button(cx, ids!(metric_button))
                 .clicked(actions)
@@ -22603,24 +22750,24 @@ impl MatchEvent for App {
                 self.refresh_shelf_projection(cx);
             }
         }
-        if self.ui.button(cx, ids!(nav_chat)).clicked(actions)
-            || self.ui.button(cx, ids!(profile_chat)).clicked(actions)
+        if controls.button(cx, ids!(nav_chat)).clicked(actions)
+            || controls.button(cx, ids!(profile_chat)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
             self.activate_page(cx, AppPage::Chat);
         }
-        if self.ui.button(cx, ids!(nav_skills)).clicked(actions)
-            || self.ui.button(cx, ids!(profile_skills)).clicked(actions)
+        if controls.button(cx, ids!(nav_skills)).clicked(actions)
+            || controls.button(cx, ids!(profile_skills)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
             self.activate_page(cx, AppPage::Skills);
         }
-        if self.ui.button(cx, ids!(nav_vocab)).clicked(actions)
-            || self.ui.button(cx, ids!(mobile_nav_vocab)).clicked(actions)
+        if controls.button(cx, ids!(nav_vocab)).clicked(actions)
+            || controls.button(cx, ids!(mobile_nav_vocab)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
@@ -22628,9 +22775,8 @@ impl MatchEvent for App {
             self.activate_page(cx, AppPage::Vocab);
             spawn_load_vocab();
         }
-        if self.ui.button(cx, ids!(nav_statistics)).clicked(actions)
-            || self
-                .ui
+        if controls.button(cx, ids!(nav_statistics)).clicked(actions)
+            || controls
                 .widget(cx, ids!(profile_duration))
                 .button(cx, ids!(metric_button))
                 .clicked(actions)
@@ -22641,64 +22787,62 @@ impl MatchEvent for App {
                 spawn_load_statistics();
             }
             self.activate_page(cx, AppPage::Statistics);
-            self.ui
+            controls
                 .label(cx, ids!(statistics_status))
                 .set_text(cx, localized("正在更新统计数据…", "Updating statistics…"));
         }
-        if self.ui.button(cx, ids!(nav_settings)).clicked(actions)
-            || self.ui.button(cx, ids!(profile_settings)).clicked(actions)
+        if controls.button(cx, ids!(nav_settings)).clicked(actions)
+            || controls.button(cx, ids!(profile_settings)).clicked(actions)
         {
             if self.on_reader_page {
                 self.stop_reading_timer(cx, false);
             }
             self.activate_page(cx, AppPage::Settings);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(statistics_refresh))
             .clicked(actions)
         {
-            self.ui
+            controls
                 .label(cx, ids!(statistics_status))
                 .set_text(cx, localized("正在更新统计数据…", "Updating statistics…"));
             spawn_load_statistics();
         }
-        if self.ui.button(cx, ids!(skill_new)).clicked(actions)
-            || self.ui.button(cx, ids!(skill_cancel)).clicked(actions)
+        if controls.button(cx, ids!(skill_new)).clicked(actions)
+            || controls.button(cx, ids!(skill_cancel)).clicked(actions)
         {
             self.clear_skill_editor(cx);
         }
-        if self.ui.button(cx, ids!(skill_save)).clicked(actions) {
-            let name = self.ui.text_input(cx, ids!(skill_name_input)).text();
-            let content = self.ui.text_input(cx, ids!(skill_content_input)).text();
+        if controls.button(cx, ids!(skill_save)).clicked(actions) {
+            let name = controls.text_input(cx, ids!(skill_name_input)).text();
+            let content = controls.text_input(cx, ids!(skill_content_input)).text();
             if name.trim().is_empty() {
-                self.ui.label(cx, ids!(skills_status)).set_text(
+                controls.label(cx, ids!(skills_status)).set_text(
                     cx,
                     localized("技能名称不能为空", "Skill name cannot be empty"),
                 );
             } else if content.trim().is_empty() {
-                self.ui.label(cx, ids!(skills_status)).set_text(
+                controls.label(cx, ids!(skills_status)).set_text(
                     cx,
                     localized("技能内容不能为空", "Skill prompt cannot be empty"),
                 );
             } else {
-                let is_active = self.ui.check_box(cx, ids!(skill_active_edit)).active(cx);
-                self.ui
+                let is_active = controls.check_box(cx, ids!(skill_active_edit)).active(cx);
+                controls
                     .label(cx, ids!(skills_status))
                     .set_text(cx, localized("正在保存技能…", "Saving skill…"));
                 spawn_save_skill(self.editing_skill_id.clone(), name, content, is_active);
             }
         }
-        if self.ui.button(cx, ids!(chat_skill_clear)).clicked(actions) {
+        if controls.button(cx, ids!(chat_skill_clear)).clicked(actions) {
             self.pending_skill_id = None;
             self.refresh_pending_skill_indicator(cx);
         }
-        if let Some(search) = self.ui.text_input(cx, ids!(vocab_search)).changed(actions) {
+        if let Some(search) = controls.text_input(cx, ids!(vocab_search)).changed(actions) {
             self.vocab_search = search;
             self.refresh_vocab_projection(cx);
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .radio_button_set(
                 cx,
                 ids_array!(
@@ -22711,8 +22855,7 @@ impl MatchEvent for App {
         {
             self.set_vocab_filter(cx, VocabFilter::from_index(index));
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(vocab_start_review))
             .clicked(actions)
         {
@@ -22724,29 +22867,25 @@ impl MatchEvent for App {
                 .collect();
             self.start_vocab_review(cx, queue);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(vocab_review_reveal))
             .clicked(actions)
         {
             self.reveal_vocab_review(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(vocab_review_again))
             .clicked(actions)
         {
             self.submit_vocab_review(cx, "learning");
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(vocab_review_known))
             .clicked(actions)
         {
             self.submit_vocab_review(cx, "mastered");
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(vocab_review_speak))
             .clicked(actions)
         {
@@ -22754,15 +22893,13 @@ impl MatchEvent for App {
                 speak_text(entry.word);
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(vocab_review_close))
             .clicked(actions)
         {
             self.finish_vocab_review(cx, localized("已结束本轮复习", "Review ended"));
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .radio_button_set(cx, ids_array!(language_chinese, language_english))
             .selected(cx, actions)
         {
@@ -22775,8 +22912,7 @@ impl MatchEvent for App {
                 },
             );
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .drop_down(cx, ids!(english_level_choice))
             .selected(actions)
         {
@@ -22784,8 +22920,7 @@ impl MatchEvent for App {
                 self.set_english_level(cx, level);
             }
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .radio_button_set(cx, ids_array!(theme_dark, theme_light))
             .selected(cx, actions)
         {
@@ -22798,8 +22933,7 @@ impl MatchEvent for App {
                 },
             );
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .radio_button_set(
                 cx,
                 ids_array!(
@@ -22823,8 +22957,7 @@ impl MatchEvent for App {
                 },
             );
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .radio_button_set(
                 cx,
                 ids_array!(reader_columns_one, reader_columns_two, reader_columns_auto),
@@ -22838,8 +22971,7 @@ impl MatchEvent for App {
             };
             self.set_reader_columns(cx, mode);
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .radio_button_set(
                 cx,
                 ids_array!(reader_turn_curl, reader_turn_slide, reader_turn_scroll),
@@ -22860,8 +22992,7 @@ impl MatchEvent for App {
             self.invalidate_reader_pagination_layout(cx);
             self.persist_reader_settings(cx);
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .drop_down(cx, ids!(reader_font_choice))
             .selected(actions)
         {
@@ -22869,8 +23000,7 @@ impl MatchEvent for App {
                 self.set_reader_font(cx, font);
             }
         }
-        if let Some(index) = self
-            .ui
+        if let Some(index) = controls
             .radio_button_set(
                 cx,
                 ids_array!(
@@ -22890,20 +23020,20 @@ impl MatchEvent for App {
                 },
             );
         }
-        if self.ui.button(cx, ids!(font_inc)).clicked(actions) {
+        if controls.button(cx, ids!(font_inc)).clicked(actions) {
             self.adjust_font(cx, 1.0);
         }
-        if self.ui.button(cx, ids!(font_dec)).clicked(actions) {
+        if controls.button(cx, ids!(font_dec)).clicked(actions) {
             self.adjust_font(cx, -1.0);
         }
-        if self.ui.button(cx, ids!(gloss_inc)).clicked(actions) {
+        if controls.button(cx, ids!(gloss_inc)).clicked(actions) {
             self.adjust_gloss_font(cx, 0.5);
         }
-        if self.ui.button(cx, ids!(gloss_dec)).clicked(actions) {
+        if controls.button(cx, ids!(gloss_dec)).clicked(actions) {
             self.adjust_gloss_font(cx, -0.5);
         }
         self.handle_swatch_rows(cx, actions);
-        if let Some(on) = self.ui.check_box(cx, ids!(gloss_enable)).changed(actions) {
+        if let Some(on) = controls.check_box(cx, ids!(gloss_enable)).changed(actions) {
             self.toggle_gloss(cx, on);
         }
         for (id, slot) in [
@@ -22912,11 +23042,11 @@ impl MatchEvent for App {
             (id!(sel_blue), 6),
             (id!(sel_pink), 7),
         ] {
-            if self.ui.button(cx, &[id]).clicked(actions) && !self.selection_highlight_pending {
+            if controls.button(cx, &[id]).clicked(actions) && !self.selection_highlight_pending {
                 *crate::mark_span::HL_SLOT.write().unwrap() = slot;
                 self.persist_reader_settings(cx);
                 self.sync_selection_popup(cx);
-                self.ui.widget(cx, ids!(sel_bar)).redraw(cx);
+                controls.widget(cx, ids!(sel_bar)).redraw(cx);
                 let range = *SEL_RANGE.read().unwrap();
                 let book_id = CURRENT_BOOK
                     .read()
@@ -22930,8 +23060,10 @@ impl MatchEvent for App {
                 }
             }
         }
-        if (self.ui.button(cx, ids!(hl_btn)).clicked(actions)
-            || self.ui.button(cx, ids!(remove_hl_sel_btn)).clicked(actions))
+        if (controls.button(cx, ids!(hl_btn)).clicked(actions)
+            || controls
+                .button(cx, ids!(remove_hl_sel_btn))
+                .clicked(actions))
             && !self.selection_highlight_pending
         {
             let range = *SEL_RANGE.read().unwrap();
@@ -22956,18 +23088,20 @@ impl MatchEvent for App {
                 }
             }
         }
-        if self.ui.button(cx, ids!(note_from_sel_btn)).clicked(actions) {
+        if controls
+            .button(cx, ids!(note_from_sel_btn))
+            .clicked(actions)
+        {
             self.open_note_composer(cx);
         }
-        if self.ui.button(cx, ids!(copy_sel_btn)).clicked(actions) {
+        if controls.button(cx, ids!(copy_sel_btn)).clicked(actions) {
             let text = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !text.is_empty() {
                 cx.copy_to_clipboard(&text);
                 self.set_selection_hint(cx, localized("已复制到剪贴板 ✓", "Copied ✓"));
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(vocab_from_sel_btn))
             .clicked(actions)
         {
@@ -22987,7 +23121,10 @@ impl MatchEvent for App {
                 );
             }
         }
-        if self.ui.button(cx, ids!(translate_sel_btn)).clicked(actions) {
+        if controls
+            .button(cx, ids!(translate_sel_btn))
+            .clicked(actions)
+        {
             let text = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !text.is_empty() {
                 let url = format!(
@@ -23001,15 +23138,14 @@ impl MatchEvent for App {
                 );
             }
         }
-        if self.ui.button(cx, ids!(more_sel_btn)).clicked(actions) {
+        if controls.button(cx, ids!(more_sel_btn)).clicked(actions) {
             self.selection_more_open = !self.selection_more_open;
-            self.ui
+            controls
                 .view(cx, ids!(selection_more_scroll))
                 .set_scroll_pos(cx, DVec2::default());
             self.relayout_selection_popup(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(selection_more_define.hit))
             .clicked(actions)
         {
@@ -23021,15 +23157,13 @@ impl MatchEvent for App {
                 ),
             );
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(selection_more_counter.hit))
             .clicked(actions)
         {
             self.submit_selection_question(cx, localized("请提出对所选观点最有力的反驳，区分事实、假设与意见。", "Give the strongest counterpoint to this claim, distinguishing facts, assumptions and opinions."));
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(selection_more_fact.hit))
             .clicked(actions)
         {
@@ -23053,8 +23187,7 @@ impl MatchEvent for App {
                 );
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(selection_more_quote.hit))
             .clicked(actions)
         {
@@ -23082,8 +23215,7 @@ impl MatchEvent for App {
                 );
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(selection_more_related.hit))
             .clicked(actions)
         {
@@ -23096,7 +23228,7 @@ impl MatchEvent for App {
             if let (false, Some(book_id)) = (query.is_empty(), book_id) {
                 self.clear_reader_selection(cx);
                 self.reader_search_query = query.clone();
-                self.ui
+                controls
                     .text_input(cx, ids!(reader_search_input))
                     .set_text(cx, &query);
                 READER_SEARCH_RESULTS.write().unwrap().clear();
@@ -23106,38 +23238,40 @@ impl MatchEvent for App {
                 self.bookmarks_open = false;
                 self.reader_ai_open = false;
                 self.sync_reader_panel_layout(cx);
-                self.ui
+                controls
                     .label(cx, ids!(reader_search_hint))
                     .set_text(cx, localized("正在搜索…", "Searching…"));
                 spawn_reader_search(book_id, query);
-                self.ui.redraw(cx);
+                controls.redraw(cx);
             }
         }
-        if self.ui.button(cx, ids!(ask_ai_sel_btn)).clicked(actions) {
+        if controls.button(cx, ids!(ask_ai_sel_btn)).clicked(actions) {
             self.selection_ai_open = true;
             self.selection_ai_focus_pending = true;
             self.selection_more_open = false;
             self.set_selection_hint(cx, "");
             self.relayout_selection_popup(cx);
-            self.ui
+            controls
                 .widget(cx, ids!(selection_ai_input))
                 .set_key_focus(cx);
         }
-        if self.ui.button(cx, ids!(selection_ai_back)).clicked(actions) {
+        if controls
+            .button(cx, ids!(selection_ai_back))
+            .clicked(actions)
+        {
             self.selection_ai_open = false;
             self.relayout_selection_popup(cx);
             cx.set_key_focus(Area::Empty);
         }
-        if let Some(text) = self
-            .ui
+        if let Some(text) = controls
             .text_input(cx, ids!(selection_ai_input))
             .changed(actions)
         {
             self.selection_ai_draft = text;
         }
-        if self.ui.button(cx, ids!(selection_ai_web)).clicked(actions) {
+        if controls.button(cx, ids!(selection_ai_web)).clicked(actions) {
             let selected = SELECTED_TEXT.read().unwrap().trim().to_string();
-            let question = self.ui.text_input(cx, ids!(selection_ai_input)).text();
+            let question = controls.text_input(cx, ids!(selection_ai_input)).text();
             if !selected.is_empty() {
                 cx.open_url(
                     &format!(
@@ -23159,47 +23293,50 @@ impl MatchEvent for App {
             (id!(selection_ai_origin), localized("这个词源自哪里？请解释它的词源。", "Where does it come from? Explain its etymology.")),
             (id!(selection_ai_example), localized("请用所选词语造句，并解释用法。", "Use it in a sentence and explain its usage.")),
         ] {
-            if self.ui.button(cx, &[id]).clicked(actions) {
+            if controls.button(cx, &[id]).clicked(actions) {
                 self.submit_selection_question(cx, question);
             }
         }
-        let returned = self
-            .ui
+        let returned = controls
             .text_input(cx, ids!(selection_ai_input))
             .returned(actions);
-        if self.ui.button(cx, ids!(selection_ai_send)).clicked(actions) || returned.is_some() {
+        if controls
+            .button(cx, ids!(selection_ai_send))
+            .clicked(actions)
+            || returned.is_some()
+        {
             let question = returned
                 .map(|(text, _)| text)
-                .unwrap_or_else(|| self.ui.text_input(cx, ids!(selection_ai_input)).text());
+                .unwrap_or_else(|| controls.text_input(cx, ids!(selection_ai_input)).text());
             self.submit_selection_question(cx, &question);
         }
-        if self.ui.button(cx, ids!(speak_sel_btn)).clicked(actions) {
+        if controls.button(cx, ids!(speak_sel_btn)).clicked(actions) {
             let text = SELECTED_TEXT.read().unwrap().trim().to_string();
             if !text.is_empty() {
                 speak_text(text);
                 self.set_selection_hint(cx, localized("正在发音…", "Speaking…"));
             }
         }
-        if self.ui.button(cx, ids!(sel_close_btn)).clicked(actions) {
+        if controls.button(cx, ids!(sel_close_btn)).clicked(actions) {
             self.clear_reader_selection(cx);
-            self.ui.redraw(cx);
+            controls.redraw(cx);
         }
-        if self.ui.button(cx, ids!(note_save_btn)).clicked(actions) {
-            let extra = self.ui.text_input(cx, ids!(note_extra)).text();
+        if controls.button(cx, ids!(note_save_btn)).clicked(actions) {
+            let extra = controls.text_input(cx, ids!(note_extra)).text();
             self.save_note_from_composer(cx, extra);
         }
-        if let Some((extra, _)) = self.ui.text_input(cx, ids!(note_extra)).returned(actions) {
+        if let Some((extra, _)) = controls.text_input(cx, ids!(note_extra)).returned(actions) {
             self.save_note_from_composer(cx, extra);
         }
-        if self.ui.button(cx, ids!(note_cancel_btn)).clicked(actions) {
+        if controls.button(cx, ids!(note_cancel_btn)).clicked(actions) {
             self.close_note_composer(cx);
         }
-        if self.ui.button(cx, ids!(note_close_btn)).clicked(actions) {
+        if controls.button(cx, ids!(note_close_btn)).clicked(actions) {
             self.note_open = false;
             self.close_note_composer(cx);
             self.sync_reader_panel_layout(cx);
         }
-        if self.ui.button(cx, ids!(card_speak_btn)).clicked(actions) {
+        if controls.button(cx, ids!(card_speak_btn)).clicked(actions) {
             if let Some((word, _, _)) = &self.card {
                 if cfg!(any(
                     target_os = "macos",
@@ -23208,19 +23345,18 @@ impl MatchEvent for App {
                 )) {
                     speak_text(word.clone());
                 } else {
-                    self.ui.label(cx, ids!(card_hint)).set_text(
+                    controls.label(cx, ids!(card_hint)).set_text(
                         cx,
                         localized(
                             "此平台暂不支持发音，可在词典中收听",
                             "Audio is not supported here; listen in the dictionary",
                         ),
                     );
-                    self.ui.widget(cx, ids!(card_hint)).set_visible(cx, true);
+                    controls.widget(cx, ids!(card_hint)).set_visible(cx, true);
                 }
             }
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(card_dictionary_btn))
             .clicked(actions)
         {
@@ -23234,37 +23370,37 @@ impl MatchEvent for App {
                 );
             }
         }
-        if self.ui.button(cx, ids!(card_more_btn)).clicked(actions) {
+        if controls.button(cx, ids!(card_more_btn)).clicked(actions) {
             self.word_card_more_open = !self.word_card_more_open;
-            self.ui
+            controls
                 .widget(cx, ids!(card_more_menu))
                 .set_visible(cx, self.word_card_more_open);
-            self.ui.widget(cx, ids!(word_card_layer)).redraw(cx);
+            controls.widget(cx, ids!(word_card_layer)).redraw(cx);
         }
-        if self.ui.button(cx, ids!(card_copy_btn)).clicked(actions) {
+        if controls.button(cx, ids!(card_copy_btn)).clicked(actions) {
             if let Some((word, _, _)) = &self.card {
                 cx.copy_to_clipboard(word);
-                self.ui
+                controls
                     .label(cx, ids!(card_hint))
                     .set_text(cx, localized("已复制", "Copied"));
-                self.ui.widget(cx, ids!(card_hint)).set_visible(cx, true);
+                controls.widget(cx, ids!(card_hint)).set_visible(cx, true);
             }
         }
-        if self.ui.button(cx, ids!(close_card_btn)).clicked(actions) {
+        if controls.button(cx, ids!(close_card_btn)).clicked(actions) {
             self.close_word_card(cx);
-            self.ui.redraw(cx);
+            controls.redraw(cx);
         }
-        if self.ui.button(cx, ids!(add_vocab_btn)).clicked(actions) {
+        if controls.button(cx, ids!(add_vocab_btn)).clicked(actions) {
             if let Some((word, lemma, gloss)) = self.card.clone() {
                 let book_id = CURRENT_ITEM.read().unwrap().as_ref().map(|i| i.id.clone());
-                self.ui
+                controls
                     .label(cx, ids!(card_hint))
                     .set_text(cx, localized("加入中…", "Adding…"));
-                self.ui.widget(cx, ids!(card_hint)).set_visible(cx, true);
+                controls.widget(cx, ids!(card_hint)).set_visible(cx, true);
                 spawn_add_vocab(lemma, word, gloss, book_id);
             }
         }
-        if self.ui.button(cx, ids!(know_btn)).clicked(actions) {
+        if controls.button(cx, ids!(know_btn)).clicked(actions) {
             if let Some((_, lemma, _)) = self.card.clone() {
                 self.close_word_card(cx);
                 let book_id = CURRENT_BOOK.write().unwrap().as_mut().map(|book| {
@@ -23277,8 +23413,8 @@ impl MatchEvent for App {
                 spawn_mark_known(lemma, book_id);
             }
         }
-        if self.ui.button(cx, ids!(toc_btn)).clicked(actions)
-            || self.ui.button(cx, ids!(titlebar_toc_btn)).clicked(actions)
+        if controls.button(cx, ids!(toc_btn)).clicked(actions)
+            || controls.button(cx, ids!(titlebar_toc_btn)).clicked(actions)
         {
             self.toc_open = !self.toc_open;
             self.pending_toc_first_draw = self.toc_open;
@@ -23287,17 +23423,16 @@ impl MatchEvent for App {
                 self.reader_ai_open = false;
                 self.bookmarks_open = false;
                 self.search_open = false;
-                self.ui.widget(cx, ids!(toc_list)).redraw(cx);
+                controls.widget(cx, ids!(toc_list)).redraw(cx);
             }
             self.sync_reader_panel_layout(cx);
-            self.ui.redraw(cx);
+            controls.redraw(cx);
         }
-        if self.ui.button(cx, ids!(toc_close_btn)).clicked(actions) {
+        if controls.button(cx, ids!(toc_close_btn)).clicked(actions) {
             self.close_reader_info_popup(cx);
         }
-        if self.ui.button(cx, ids!(notes_btn)).clicked(actions)
-            || self
-                .ui
+        if controls.button(cx, ids!(notes_btn)).clicked(actions)
+            || controls
                 .button(cx, ids!(titlebar_notes_btn))
                 .clicked(actions)
         {
@@ -23310,21 +23445,19 @@ impl MatchEvent for App {
                 self.search_open = false;
             }
             self.sync_reader_panel_layout(cx);
-            self.ui.redraw(cx);
+            controls.redraw(cx);
         }
-        if self.ui.button(cx, ids!(reader_ai_btn)).clicked(actions) {
+        if controls.button(cx, ids!(reader_ai_btn)).clicked(actions) {
             let visible = !self.reader_ai_open;
             self.set_reader_ai_visible(cx, visible);
         }
-        if self.ui.button(cx, ids!(reader_ai_close)).clicked(actions) {
+        if controls.button(cx, ids!(reader_ai_close)).clicked(actions) {
             self.set_reader_ai_visible(cx, false);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(reader_bookmarks_btn))
             .clicked(actions)
-            || self
-                .ui
+            || controls
                 .button(cx, ids!(titlebar_bookmarks_btn))
                 .clicked(actions)
         {
@@ -23334,22 +23467,22 @@ impl MatchEvent for App {
                 self.note_open = false;
                 self.reader_ai_open = false;
                 self.search_open = false;
-                self.ui.widget(cx, ids!(reader_bookmark_list)).redraw(cx);
+                controls.widget(cx, ids!(reader_bookmark_list)).redraw(cx);
             }
             self.sync_reader_panel_layout(cx);
-            self.ui.redraw(cx);
+            controls.redraw(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(reader_bookmarks_close))
             .clicked(actions)
         {
             self.bookmarks_open = false;
             self.sync_reader_panel_layout(cx);
         }
-        if self.ui.button(cx, ids!(reader_search_btn)).clicked(actions)
-            || self
-                .ui
+        if controls
+            .button(cx, ids!(reader_search_btn))
+            .clicked(actions)
+            || controls
                 .button(cx, ids!(titlebar_search_btn))
                 .clicked(actions)
         {
@@ -23361,49 +23494,44 @@ impl MatchEvent for App {
                 self.bookmarks_open = false;
             }
             self.sync_reader_panel_layout(cx);
-            self.ui.redraw(cx);
+            controls.redraw(cx);
         }
-        if self
-            .ui
+        if controls
             .button(cx, ids!(reader_search_close))
             .clicked(actions)
         {
             self.search_open = false;
             self.sync_reader_panel_layout(cx);
         }
-        let search_return = self
-            .ui
+        let search_return = controls
             .text_input(cx, ids!(reader_search_input))
             .returned(actions);
-        if self
-            .ui
+        if controls
             .button(cx, ids!(reader_search_submit))
             .clicked(actions)
             || search_return.is_some()
         {
-            let query = self
-                .ui
+            let query = controls
                 .text_input(cx, ids!(reader_search_input))
                 .text()
                 .trim()
                 .to_string();
             self.reader_search_query = query.clone();
             READER_SEARCH_RESULTS.write().unwrap().clear();
-            self.ui.widget(cx, ids!(reader_search_list)).redraw(cx);
+            controls.widget(cx, ids!(reader_search_list)).redraw(cx);
             if let Some(book_id) = CURRENT_BOOK
                 .read()
                 .unwrap()
                 .as_ref()
                 .map(|book| book.id.clone())
             {
-                self.ui
+                controls
                     .label(cx, ids!(reader_search_hint))
                     .set_text(cx, localized("正在搜索…", "Searching…"));
                 spawn_reader_search(book_id, query);
             }
         }
-        let bookmark_list = self
-            .ui
+        let bookmark_list = controls
             .widget(cx, ids!(reader_bookmark_list))
             .portal_list(cx, ids!(list));
         for (item_id, item) in bookmark_list.items_with_actions(actions) {
@@ -23425,7 +23553,7 @@ impl MatchEvent for App {
                     );
                     if let (Some(source), Some(mut reader)) = (
                         location.source,
-                        self.ui
+                        controls
                             .widget(cx, ids!(chapter_list))
                             .borrow_mut::<ChapterList>(),
                     ) {
@@ -23436,8 +23564,7 @@ impl MatchEvent for App {
                 }
             }
         }
-        let search_list = self
-            .ui
+        let search_list = controls
             .widget(cx, ids!(reader_search_list))
             .portal_list(cx, ids!(list));
         for (item_id, item) in search_list.items_with_actions(actions) {
@@ -23450,8 +23577,7 @@ impl MatchEvent for App {
                 }
             }
         }
-        let highlight_list = self
-            .ui
+        let highlight_list = controls
             .widget(cx, ids!(reader_highlight_list))
             .portal_list(cx, ids!(list));
         for (item_id, item) in highlight_list.items_with_actions(actions) {
@@ -23464,8 +23590,7 @@ impl MatchEvent for App {
                 }
             }
         }
-        let toc_list = self
-            .ui
+        let toc_list = controls
             .widget(cx, ids!(toc_list))
             .shelf_list(cx, ids!(list));
         for (item_id, item) in toc_list.items_with_actions(actions) {
@@ -23491,12 +23616,11 @@ impl MatchEvent for App {
                     self.set_chapter_at(cx, target.chapter, block, 0.0, true);
                     self.toc_open = false;
                     self.sync_reader_panel_layout(cx);
-                    self.ui.redraw(cx);
+                    controls.redraw(cx);
                 }
             }
         }
-        let note_list = self
-            .ui
+        let note_list = controls
             .widget(cx, ids!(note_list))
             .portal_list(cx, ids!(list));
         for (item_id, item) in note_list.items_with_actions(actions) {
@@ -23507,7 +23631,7 @@ impl MatchEvent for App {
                     let (quote, _) = split_note_content(&note.content);
                     let body = item.text_input(cx, ids!(note_body_input)).text();
                     let content = format_note_content(quote, &body);
-                    self.ui
+                    controls
                         .label(cx, ids!(note_hint))
                         .set_text(cx, localized("保存中…", "Saving…"));
                     spawn_update_note(book_id, note.id, content);
@@ -23521,69 +23645,66 @@ impl MatchEvent for App {
                     .map(|note| note.id.clone());
                 let book_id = CURRENT_BOOK.read().unwrap().as_ref().map(|b| b.id.clone());
                 if let (Some(book_id), Some(note_id)) = (book_id, note_id) {
-                    self.ui
+                    controls
                         .label(cx, ids!(note_hint))
                         .set_text(cx, localized("删除中…", "Deleting…"));
                     spawn_delete_note(book_id, note_id);
                 }
             }
         }
-        if self.ui.button(cx, ids!(chat_send)).clicked(actions)
-            || self
-                .ui
+        if controls.button(cx, ids!(chat_send)).clicked(actions)
+            || controls
                 .text_input(cx, ids!(chat_input))
                 .returned(actions)
                 .is_some()
         {
             self.send_chat(cx);
         }
-        if self.ui.button(cx, ids!(reader_chat_send)).clicked(actions)
-            || self
-                .ui
+        if controls.button(cx, ids!(reader_chat_send)).clicked(actions)
+            || controls
                 .text_input(cx, ids!(reader_chat_input))
                 .returned(actions)
                 .is_some()
         {
             self.send_reader_chat(cx);
         }
-        if self.ui.button(cx, ids!(chat_cancel)).clicked(actions)
-            || self
-                .ui
+        if controls.button(cx, ids!(chat_cancel)).clicked(actions)
+            || controls
                 .button(cx, ids!(reader_chat_cancel))
                 .clicked(actions)
-            || self.ui.text_input(cx, ids!(chat_input)).escaped(actions)
-            || self
-                .ui
+            || controls.text_input(cx, ids!(chat_input)).escaped(actions)
+            || controls
                 .text_input(cx, ids!(reader_chat_input))
                 .escaped(actions)
         {
             self.cancel_chat(cx);
         }
-        if self.ui.button(cx, ids!(chat_clear)).clicked(actions)
-            || self.ui.button(cx, ids!(reader_chat_clear)).clicked(actions)
+        if controls.button(cx, ids!(chat_clear)).clicked(actions)
+            || controls
+                .button(cx, ids!(reader_chat_clear))
+                .clicked(actions)
         {
             self.clear_chat(cx);
         }
-        if self.ui.button(cx, ids!(local_ai_save)).clicked(actions) {
+        if controls.button(cx, ids!(local_ai_save)).clicked(actions) {
             match self.local_ai_settings_from_ui(cx) {
                 Ok(settings) => {
-                    self.ui.label(cx, ids!(local_ai_status)).set_text(
+                    controls.label(cx, ids!(local_ai_status)).set_text(
                         cx,
                         localized("正在保存本地 AI 设置…", "Saving local AI settings…"),
                     );
                     spawn_save_local_ai_settings(settings);
                 }
-                Err(error) => self
-                    .ui
+                Err(error) => controls
                     .label(cx, ids!(local_ai_status))
                     .set_text(cx, &error),
             }
         }
-        if self.ui.button(cx, ids!(local_ai_start)).clicked(actions) {
+        if controls.button(cx, ids!(local_ai_start)).clicked(actions) {
             match self.local_ai_settings_from_ui(cx) {
                 Ok(settings) => match settings.validate() {
                     Ok(()) => {
-                        self.ui.label(cx, ids!(local_ai_status)).set_text(
+                        controls.label(cx, ids!(local_ai_status)).set_text(
                             cx,
                             localized(
                                 "正在加载 GGUF 模型，首次启动可能需要几分钟…",
@@ -23593,56 +23714,53 @@ impl MatchEvent for App {
                         self.set_local_ai_running(cx, true);
                         spawn_start_local_ai(settings);
                     }
-                    Err(error) => self
-                        .ui
+                    Err(error) => controls
                         .label(cx, ids!(local_ai_status))
                         .set_text(cx, &error),
                 },
-                Err(error) => self
-                    .ui
+                Err(error) => controls
                     .label(cx, ids!(local_ai_status))
                     .set_text(cx, &error),
             }
         }
-        if self.ui.button(cx, ids!(local_ai_stop)).clicked(actions) {
-            self.ui.label(cx, ids!(local_ai_status)).set_text(
+        if controls.button(cx, ids!(local_ai_stop)).clicked(actions) {
+            controls.label(cx, ids!(local_ai_status)).set_text(
                 cx,
                 localized("正在停止本地服务…", "Stopping local service…"),
             );
             spawn_stop_local_ai();
         }
-        if self.ui.button(cx, ids!(ai_save)).clicked(actions) {
-            let endpoint_input = self.ui.text_input(cx, ids!(ai_endpoint)).text();
+        if controls.button(cx, ids!(ai_save)).clicked(actions) {
+            let endpoint_input = controls.text_input(cx, ids!(ai_endpoint)).text();
             let endpoint = readwise_core::ai::normalize_chat_endpoint(&endpoint_input);
             let settings = endpoint.map(|endpoint| readwise_core::ai::AiSettings {
                 endpoint,
-                model: self
-                    .ui
+                model: controls
                     .text_input(cx, ids!(ai_model))
                     .text()
                     .trim()
                     .to_string(),
-                api_key: self.ui.text_input(cx, ids!(ai_api_key)).text(),
+                api_key: controls.text_input(cx, ids!(ai_api_key)).text(),
             });
             if let Err(error) = &settings {
-                self.ui
+                controls
                     .label(cx, ids!(ai_settings_status))
                     .set_text(cx, error);
             } else if let Ok(settings) = settings {
                 if settings.model.is_empty() {
-                    self.ui.label(cx, ids!(ai_settings_status)).set_text(
+                    controls.label(cx, ids!(ai_settings_status)).set_text(
                         cx,
                         localized("模型名称不能为空", "Model name cannot be empty"),
                     );
                     return;
                 }
-                self.ui
+                controls
                     .label(cx, ids!(ai_settings_status))
                     .set_text(cx, localized("正在保存…", "Saving…"));
                 spawn_save_ai_settings(settings);
             }
         }
-        if self.ui.button(cx, ids!(reload_button)).clicked(actions) {
+        if controls.button(cx, ids!(reload_button)).clicked(actions) {
             self.reload_count += 1;
             replace_paragraphs(sample_chapter::build_paragraphs(PARA_COUNT));
             let status = if app_language() == AppLanguage::English {
@@ -23650,8 +23768,8 @@ impl MatchEvent for App {
             } else {
                 format!("已重新渲染 {} 次", self.reload_count)
             };
-            self.ui.label(cx, ids!(status)).set_text(cx, &status);
-            self.ui.redraw(cx);
+            controls.label(cx, ids!(status)).set_text(cx, &status);
+            controls.redraw(cx);
         }
     }
 }
@@ -23863,6 +23981,8 @@ impl AppMain for App {
         makepad_widgets::widgets_mod(vm);
         makepad_code_editor::script_mod(vm);
         crate::shelf_list::script_mod(vm);
+        crate::reader_scroll_bar::script_mod(vm);
+        crate::reader_list::script_mod(vm);
         crate::ruby_word::script_mod(vm);
         crate::reader_hit::script_mod(vm);
         crate::reader_math::script_mod(vm);
@@ -24516,7 +24636,7 @@ impl ReaderControls<'_> {
         let list = self
             .ui
             .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list));
+            .reader_list(cx, ids!(list));
         let block_count = PARAGRAPHS.read().unwrap().len();
         let block = list.first_id().min(block_count.saturating_sub(1));
         let scroll = list.scroll_position();
@@ -24578,7 +24698,7 @@ impl ReaderControls<'_> {
     }
 
     fn update_reader_page_footer(&self, cx: &mut Cx) {
-        let paged_mode = READER_TURN_MODE.read().unwrap().is_paged();
+        let paged_mode = requested_book_is_ready() && READER_TURN_MODE.read().unwrap().is_paged();
         self.ui
             .view(cx, ids!(reader_footer))
             .set_visible(cx, paged_mode);
@@ -24656,7 +24776,7 @@ impl ReaderControls<'_> {
         let list = self
             .ui
             .widget(cx, ids!(chapter_list))
-            .portal_list(cx, ids!(list));
+            .reader_list(cx, ids!(list));
         // Keep process-lifetime resume state as the same logical block/byte
         // pair used for persistence; the visible page may start earlier.
         let _ = self.current_reader_progress_snapshot(cx);

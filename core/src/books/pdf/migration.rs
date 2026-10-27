@@ -4,8 +4,7 @@
 use super::{
     fingerprint,
     headings::{repair, BlockTarget},
-    load_imported_pages, open, read_pdf, LoadedChapters, Snapshot, EXTRACTOR, LEGACY_EXTRACTOR,
-    SNAPSHOT_FILE,
+    open, read_pdf, LoadedChapters, Snapshot, EXTRACTOR, LEGACY_EXTRACTOR, SNAPSHOT_FILE,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -15,6 +14,8 @@ const FILE: &str = "pdf-headings-v2.json";
 const MARKER: &str = "pdf_heading_projection_v2";
 const PACK: i64 = 1_000_000;
 
+#[path = "reader_cache.rs"]
+mod reader_cache;
 #[path = "reflow_migration.rs"]
 mod reflow_migration;
 #[path = "reflow_v8_migration.rs"]
@@ -22,7 +23,70 @@ mod reflow_v8_migration;
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;
-pub(crate) use reflow_v8_migration::load_reader_pages;
+/// Per-open source validation, shared by the historical migration chain.
+/// Never reuse it across opens: changed/missing files must still be rejected.
+struct ReaderSource<'a> {
+    path: &'a Path,
+    original: std::sync::OnceLock<Result<(Vec<u8>, Snapshot), String>>,
+    #[cfg(test)]
+    validations: std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> ReaderSource<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self {
+            path,
+            original: Default::default(),
+            #[cfg(test)]
+            validations: Default::default(),
+        }
+    }
+
+    fn original(&self) -> Result<&(Vec<u8>, Snapshot), String> {
+        self.original
+            .get_or_init(|| {
+                #[cfg(test)]
+                self.validations
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Validate the exact bytes we retain, with no second read and
+                // no creation path if a committed source disappears mid-open.
+                super::load_source_snapshot(self.path, false)
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    fn loaded(&self) -> Result<LoadedChapters, String> {
+        Ok(super::content::resolve_assets(
+            self.original()?.1.clone().into_chapters(),
+            self.path,
+        ))
+    }
+}
+
+pub(crate) async fn load_reader_pages(
+    pool: &SqlitePool,
+    book_id: &str,
+    path: &Path,
+) -> Result<LoadedChapters, String> {
+    let dependencies = reader_cache::Dependencies::capture(path);
+    if let Some(dependencies) = &dependencies {
+        if let Some(loaded) = reader_cache::load(pool, book_id, path, dependencies).await {
+            return Ok(loaded);
+        }
+    }
+    let source = ReaderSource::new(path);
+    reader_cache::validate_original(pool, book_id, path, &source).await?;
+    let loaded = reflow_v8_migration::load_reader_pages(pool, book_id, path, &source).await?;
+    if let (Some(dependencies), Ok((_, original))) = (dependencies.as_ref(), source.original()) {
+        if let Err(error) =
+            reader_cache::save(pool, book_id, path, dependencies, original, &loaded).await
+        {
+            log::debug!("PDF reader checkpoint unavailable: {error}");
+        }
+    }
+    Ok(loaded)
+}
 
 #[derive(Serialize, Deserialize)]
 struct Projection {
@@ -459,6 +523,7 @@ async fn load_heading_pages(
     pool: &SqlitePool,
     book_id: &str,
     path: &Path,
+    source: &ReaderSource<'_>,
 ) -> Result<LoadedChapters, String> {
     // A committed projection still depends on its ORIGINAL source coordinates.
     // Do not silently regenerate that source if a cache-cleaner removed it.
@@ -478,10 +543,9 @@ async fn load_heading_pages(
         return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
     }
     // Validate original-file identity and snapshot schema before any migration.
-    let original = load_imported_pages(path)?;
-    let data = std::fs::read(path.parent().ok_or("PDF 目录无效")?.join(SNAPSHOT_FILE))
-        .map_err(|e| e.to_string())?;
-    let snapshot: Snapshot = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+    let original = source.loaded()?;
+    let (data, snapshot) = source.original()?;
+    let snapshot = snapshot.clone();
     if snapshot.extractor != LEGACY_EXTRACTOR {
         if committed {
             return Err("PDF 原始文本快照已被替换，原标注保持不变".into());
@@ -623,6 +687,7 @@ async fn load_v3_pages(
     pool: &SqlitePool,
     book_id: &str,
     path: &Path,
+    source: &ReaderSource<'_>,
 ) -> Result<LoadedChapters, String> {
     let directory = path.parent().ok_or("PDF 目录无效")?;
     let metadata: Option<String> =
@@ -639,9 +704,8 @@ async fn load_v3_pages(
     if committed && !directory.join(SNAPSHOT_FILE).is_file() {
         return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
     }
-    let base = load_heading_pages(pool, book_id, path).await?;
-    let source = std::fs::read(directory.join(SNAPSHOT_FILE)).map_err(|e| e.to_string())?;
-    let mut snapshot: Snapshot = serde_json::from_slice(&source).map_err(|e| e.to_string())?;
+    let base = load_heading_pages(pool, book_id, path, source).await?;
+    let mut snapshot = source.original()?.1.clone();
     if snapshot.extractor == super::CONTENT_EXTRACTOR {
         if committed {
             return Err("PDF 原始文本快照已被替换，原标注保持不变".into());
@@ -710,6 +774,7 @@ async fn load_v4_pages(
     pool: &SqlitePool,
     book_id: &str,
     path: &Path,
+    source: &ReaderSource<'_>,
 ) -> Result<LoadedChapters, String> {
     let directory = path.parent().ok_or("PDF 目录无效")?;
     let metadata: Option<String> =
@@ -730,9 +795,8 @@ async fn load_v4_pages(
     if committed && !directory.join(SNAPSHOT_FILE).is_file() {
         return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
     }
-    let loaded = load_imported_pages(path)?;
-    let bytes = std::fs::read(directory.join(SNAPSHOT_FILE)).map_err(|e| e.to_string())?;
-    let mut base: Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let loaded = source.loaded()?;
+    let mut base = source.original()?.1.clone();
     if base.extractor == super::STRUCTURE_EXTRACTOR {
         if committed {
             return Err("PDF 原始文本快照已被替换，原标注保持不变".into());
@@ -741,7 +805,7 @@ async fn load_v4_pages(
     }
     // Replay older projections unchanged before rebasing from the CURRENT v3
     // coordinate system. Their serialized tokens must remain byte-for-byte stable.
-    load_v3_pages(pool, book_id, path).await?;
+    load_v3_pages(pool, book_id, path, source).await?;
     if base.extractor != super::CONTENT_EXTRACTOR {
         let data = std::fs::read(directory.join(CONTENT_FILE)).map_err(|e| e.to_string())?;
         let projection: Projection = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
@@ -801,6 +865,7 @@ async fn load_v5_pages(
     pool: &SqlitePool,
     book_id: &str,
     path: &Path,
+    source: &ReaderSource<'_>,
 ) -> Result<LoadedChapters, String> {
     let directory = path.parent().ok_or("PDF 目录无效")?;
     let metadata: Option<String> =
@@ -817,9 +882,8 @@ async fn load_v5_pages(
     if committed && !directory.join(SNAPSHOT_FILE).is_file() {
         return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
     }
-    let loaded = load_imported_pages(path)?;
-    let bytes = std::fs::read(directory.join(SNAPSHOT_FILE)).map_err(|e| e.to_string())?;
-    let mut base: Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let loaded = source.loaded()?;
+    let mut base = source.original()?.1.clone();
     if base.extractor == super::LIST_EXTRACTOR {
         let has_older_marker = metadata
             .as_deref()
@@ -834,7 +898,7 @@ async fn load_v5_pages(
         }
         return Ok(loaded);
     }
-    load_v4_pages(pool, book_id, path).await?;
+    load_v4_pages(pool, book_id, path, source).await?;
     if base.extractor != super::STRUCTURE_EXTRACTOR {
         let data = std::fs::read(directory.join(STRUCTURE_FILE)).map_err(|e| e.to_string())?;
         let projection: Projection = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
@@ -893,6 +957,7 @@ async fn load_v6_pages(
     pool: &SqlitePool,
     book_id: &str,
     path: &Path,
+    source: &ReaderSource<'_>,
 ) -> Result<LoadedChapters, String> {
     let directory = path.parent().ok_or("PDF 目录无效")?;
     let metadata: Option<String> =
@@ -909,9 +974,8 @@ async fn load_v6_pages(
     if committed && !directory.join(SNAPSHOT_FILE).is_file() {
         return Err("PDF 原始文本快照缺失，未重建，以避免已有标注错位".into());
     }
-    let loaded = load_imported_pages(path)?;
-    let bytes = std::fs::read(directory.join(SNAPSHOT_FILE)).map_err(|e| e.to_string())?;
-    let mut base: Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let loaded = source.loaded()?;
+    let mut base = source.original()?.1.clone();
     if base.extractor == super::TOC_EXTRACTOR {
         let has_older_marker = metadata
             .as_deref()
@@ -932,7 +996,7 @@ async fn load_v6_pages(
         }
         return Ok(loaded);
     }
-    load_v5_pages(pool, book_id, path).await?;
+    load_v5_pages(pool, book_id, path, source).await?;
     if base.extractor != super::LIST_EXTRACTOR {
         let data = std::fs::read(directory.join(LIST_FILE)).map_err(|e| e.to_string())?;
         let projection: Projection = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
